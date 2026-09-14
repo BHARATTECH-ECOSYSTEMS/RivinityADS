@@ -8,7 +8,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from liteads.common.database import get_session
-from liteads.models import AdSlot, Advertiser, Campaign, Creative, Publisher, PublisherDailyStat
+from liteads.common.security import current_user, require_roles
+from liteads.models import AdSlot, Advertiser, Campaign, Creative, Publisher, PublisherDailyStat, User
 from liteads.schemas.management import (
     AdvertiserCreate,
     AdvertiserResponse,
@@ -28,20 +29,30 @@ from liteads.schemas.management import (
     SlotUpdate,
 )
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(current_user)])
 
 
 def _not_found(entity: str, entity_id: int) -> HTTPException:
     return HTTPException(status_code=404, detail=f"{entity} {entity_id} not found")
 
 
-@router.get("/advertiser", response_model=list[AdvertiserResponse])
+def _assert_advertiser_access(user: User, advertiser_id: int) -> None:
+    if user.role != "admin" and user.advertiser_id != advertiser_id:
+        raise HTTPException(status_code=403, detail="Advertiser resource is outside your account")
+
+
+def _assert_publisher_access(user: User, publisher_id: int) -> None:
+    if user.role != "admin" and user.publisher_id != publisher_id:
+        raise HTTPException(status_code=403, detail="Publisher resource is outside your account")
+
+
+@router.get("/advertiser", response_model=list[AdvertiserResponse], dependencies=[Depends(require_roles("admin"))])
 async def list_advertisers(session: AsyncSession = Depends(get_session)) -> list[Advertiser]:
     result = await session.execute(select(Advertiser).order_by(Advertiser.id))
     return list(result.scalars().all())
 
 
-@router.post("/advertiser", response_model=AdvertiserResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/advertiser", response_model=AdvertiserResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin"))])
 async def create_advertiser(
     payload: AdvertiserCreate, session: AsyncSession = Depends(get_session)
 ) -> Advertiser:
@@ -51,7 +62,7 @@ async def create_advertiser(
     return advertiser
 
 
-@router.get("/advertiser/{advertiser_id}", response_model=AdvertiserResponse)
+@router.get("/advertiser/{advertiser_id}", response_model=AdvertiserResponse, dependencies=[Depends(require_roles("admin"))])
 async def get_advertiser(advertiser_id: int, session: AsyncSession = Depends(get_session)) -> Advertiser:
     advertiser = await session.get(Advertiser, advertiser_id)
     if advertiser is None:
@@ -59,7 +70,7 @@ async def get_advertiser(advertiser_id: int, session: AsyncSession = Depends(get
     return advertiser
 
 
-@router.patch("/advertiser/{advertiser_id}", response_model=AdvertiserResponse)
+@router.patch("/advertiser/{advertiser_id}", response_model=AdvertiserResponse, dependencies=[Depends(require_roles("admin"))])
 async def update_advertiser(
     advertiser_id: int,
     payload: AdvertiserUpdate,
@@ -74,22 +85,26 @@ async def update_advertiser(
     return advertiser
 
 
-@router.get("/campaign", response_model=list[CampaignResponse])
+@router.get("/campaign", response_model=list[CampaignResponse], dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def list_campaigns(
     advertiser_id: int | None = Query(default=None),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[Campaign]:
     query = select(Campaign).order_by(Campaign.id)
+    if user.role == "advertiser":
+        advertiser_id = user.advertiser_id
     if advertiser_id is not None:
         query = query.where(Campaign.advertiser_id == advertiser_id)
     result = await session.execute(query)
     return list(result.scalars().all())
 
 
-@router.post("/campaign", response_model=CampaignResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/campaign", response_model=CampaignResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def create_campaign(
-    payload: CampaignCreate, session: AsyncSession = Depends(get_session)
+    payload: CampaignCreate, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
 ) -> Campaign:
+    _assert_advertiser_access(user, payload.advertiser_id)
     if await session.get(Advertiser, payload.advertiser_id) is None:
         raise _not_found("Advertiser", payload.advertiser_id)
     campaign = Campaign(**payload.model_dump())
@@ -98,30 +113,33 @@ async def create_campaign(
     return campaign
 
 
-@router.get("/campaign/{campaign_id}", response_model=CampaignResponse)
-async def get_campaign(campaign_id: int, session: AsyncSession = Depends(get_session)) -> Campaign:
+@router.get("/campaign/{campaign_id}", response_model=CampaignResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
+async def get_campaign(campaign_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)) -> Campaign:
     campaign = await session.get(Campaign, campaign_id)
     if campaign is None:
         raise _not_found("Campaign", campaign_id)
+    _assert_advertiser_access(user, campaign.advertiser_id)
     return campaign
 
 
-@router.patch("/campaign/{campaign_id}", response_model=CampaignResponse)
+@router.patch("/campaign/{campaign_id}", response_model=CampaignResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def update_campaign(
     campaign_id: int,
     payload: CampaignUpdate,
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> Campaign:
     campaign = await session.get(Campaign, campaign_id)
     if campaign is None:
         raise _not_found("Campaign", campaign_id)
+    _assert_advertiser_access(user, campaign.advertiser_id)
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(campaign, key, value)
     await session.flush()
     return campaign
 
 
-@router.get("/creative", response_model=list[CreativeResponse])
+@router.get("/creative", response_model=list[CreativeResponse], dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def list_creatives(
     campaign_id: int | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
@@ -133,7 +151,7 @@ async def list_creatives(
     return list(result.scalars().all())
 
 
-@router.post("/creative", response_model=CreativeResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/creative", response_model=CreativeResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def create_creative(
     payload: CreativeCreate, session: AsyncSession = Depends(get_session)
 ) -> Creative:
@@ -145,7 +163,7 @@ async def create_creative(
     return creative
 
 
-@router.get("/creative/{creative_id}", response_model=CreativeResponse)
+@router.get("/creative/{creative_id}", response_model=CreativeResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def get_creative(creative_id: int, session: AsyncSession = Depends(get_session)) -> Creative:
     creative = await session.get(Creative, creative_id)
     if creative is None:
@@ -153,7 +171,7 @@ async def get_creative(creative_id: int, session: AsyncSession = Depends(get_ses
     return creative
 
 
-@router.patch("/creative/{creative_id}", response_model=CreativeResponse)
+@router.patch("/creative/{creative_id}", response_model=CreativeResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def update_creative(
     creative_id: int,
     payload: CreativeUpdate,
@@ -168,13 +186,13 @@ async def update_creative(
     return creative
 
 
-@router.get("/publisher", response_model=list[PublisherResponse])
+@router.get("/publisher", response_model=list[PublisherResponse], dependencies=[Depends(require_roles("admin"))])
 async def list_publishers(session: AsyncSession = Depends(get_session)) -> list[Publisher]:
     result = await session.execute(select(Publisher).order_by(Publisher.id))
     return list(result.scalars().all())
 
 
-@router.post("/publisher", response_model=PublisherResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/publisher", response_model=PublisherResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin"))])
 async def create_publisher(
     payload: PublisherCreate, session: AsyncSession = Depends(get_session)
 ) -> Publisher:
@@ -184,7 +202,7 @@ async def create_publisher(
     return publisher
 
 
-@router.get("/publisher/{publisher_id}", response_model=PublisherResponse)
+@router.get("/publisher/{publisher_id}", response_model=PublisherResponse, dependencies=[Depends(require_roles("admin", "publisher"))])
 async def get_publisher(publisher_id: int, session: AsyncSession = Depends(get_session)) -> Publisher:
     publisher = await session.get(Publisher, publisher_id)
     if publisher is None:
@@ -192,7 +210,7 @@ async def get_publisher(publisher_id: int, session: AsyncSession = Depends(get_s
     return publisher
 
 
-@router.patch("/publisher/{publisher_id}", response_model=PublisherResponse)
+@router.patch("/publisher/{publisher_id}", response_model=PublisherResponse, dependencies=[Depends(require_roles("admin"))])
 async def update_publisher(
     publisher_id: int,
     payload: PublisherUpdate,
@@ -207,20 +225,24 @@ async def update_publisher(
     return publisher
 
 
-@router.get("/slot", response_model=list[SlotResponse])
+@router.get("/slot", response_model=list[SlotResponse], dependencies=[Depends(require_roles("admin", "publisher"))])
 async def list_slots(
     publisher_id: int | None = Query(default=None),
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[AdSlot]:
     query = select(AdSlot).order_by(AdSlot.id)
+    if user.role == "publisher":
+        publisher_id = user.publisher_id
     if publisher_id is not None:
         query = query.where(AdSlot.publisher_id == publisher_id)
     result = await session.execute(query)
     return list(result.scalars().all())
 
 
-@router.post("/slot", response_model=SlotResponse, status_code=status.HTTP_201_CREATED)
-async def create_slot(payload: SlotCreate, session: AsyncSession = Depends(get_session)) -> AdSlot:
+@router.post("/slot", response_model=SlotResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin", "publisher"))])
+async def create_slot(payload: SlotCreate, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)) -> AdSlot:
+    _assert_publisher_access(user, payload.publisher_id)
     if await session.get(Publisher, payload.publisher_id) is None:
         raise _not_found("Publisher", payload.publisher_id)
     slot = AdSlot(**payload.model_dump())
@@ -229,34 +251,38 @@ async def create_slot(payload: SlotCreate, session: AsyncSession = Depends(get_s
     return slot
 
 
-@router.get("/slot/{slot_id}", response_model=SlotResponse)
-async def get_slot(slot_id: int, session: AsyncSession = Depends(get_session)) -> AdSlot:
+@router.get("/slot/{slot_id}", response_model=SlotResponse, dependencies=[Depends(require_roles("admin", "publisher"))])
+async def get_slot(slot_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)) -> AdSlot:
     slot = await session.get(AdSlot, slot_id)
     if slot is None:
         raise _not_found("Slot", slot_id)
+    _assert_publisher_access(user, slot.publisher_id)
     return slot
 
 
-@router.patch("/slot/{slot_id}", response_model=SlotResponse)
+@router.patch("/slot/{slot_id}", response_model=SlotResponse, dependencies=[Depends(require_roles("admin", "publisher"))])
 async def update_slot(
-    slot_id: int, payload: SlotUpdate, session: AsyncSession = Depends(get_session)
+    slot_id: int, payload: SlotUpdate, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
 ) -> AdSlot:
     slot = await session.get(AdSlot, slot_id)
     if slot is None:
         raise _not_found("Slot", slot_id)
+    _assert_publisher_access(user, slot.publisher_id)
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(slot, key, value)
     await session.flush()
     return slot
 
 
-@router.get("/publisher/{publisher_id}/reporting", response_model=PublisherReportingResponse)
+@router.get("/publisher/{publisher_id}/reporting", response_model=PublisherReportingResponse, dependencies=[Depends(require_roles("admin", "publisher"))])
 async def publisher_reporting(
     publisher_id: int,
+    user: User = Depends(current_user),
     start_date: date | None = Query(default=None),
     end_date: date | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
 ) -> PublisherReportingResponse:
+    _assert_publisher_access(user, publisher_id)
     if await session.get(Publisher, publisher_id) is None:
         raise _not_found("Publisher", publisher_id)
     today = date.today()

@@ -1,6 +1,6 @@
 export type Role = "admin" | "advertiser" | "publisher";
-export interface User { id: string; name: string; email: string; role: Role; }
-export interface Session { user: User; token: string; }
+export interface User { id: number; name: string; email: string; role: Role; advertiser_id?: number | null; publisher_id?: number | null; }
+export interface Session { user: User; token: string; refreshToken: string; }
 export const BID_TYPES: Record<number, string> = { 1: "CPM", 2: "CPC", 3: "CPA" };
 export const CREATIVE_TYPES: Record<number, string> = { 1: "banner", 2: "native", 3: "video", 4: "interstitial" };
 export const STATUS: Record<number, string> = { 0: "paused", 1: "active" };

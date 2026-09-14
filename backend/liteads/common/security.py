@@ -1,0 +1,101 @@
+"""Password hashing, JWT handling, and authenticated-user dependencies."""
+
+import base64
+import hashlib
+import hmac
+import secrets
+import time
+from collections import defaultdict, deque
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import jwt
+from fastapi import Depends, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from liteads.common.config import get_settings
+from liteads.common.database import get_session
+from liteads.models import User
+
+bearer = HTTPBearer(auto_error=False)
+_attempts: dict[str, deque[float]] = defaultdict(deque)
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
+    return "scrypt$16384$8$1$" + base64.urlsafe_b64encode(salt).decode() + "$" + base64.urlsafe_b64encode(digest).decode()
+
+
+def verify_password(password: str, encoded: str) -> bool:
+    try:
+        _, n, r, p, salt_text, digest_text = encoded.split("$")
+        salt = base64.urlsafe_b64decode(salt_text.encode())
+        expected = base64.urlsafe_b64decode(digest_text.encode())
+        actual = hashlib.scrypt(password.encode(), salt=salt, n=int(n), r=int(r), p=int(p))
+        return hmac.compare_digest(actual, expected)
+    except (ValueError, TypeError):
+        return False
+
+
+def _token(subject: int, token_type: str, expires: timedelta, **claims: Any) -> str:
+    now = datetime.now(UTC)
+    payload = {"sub": str(subject), "type": token_type, "iat": now, "exp": now + expires, **claims}
+    return jwt.encode(payload, get_settings().auth.jwt_secret, algorithm="HS256")
+
+
+def create_access_token(user: User) -> str:
+    return _token(user.id, "access", timedelta(minutes=get_settings().auth.access_token_minutes), role=user.role)
+
+
+def create_refresh_token(user: User) -> str:
+    return _token(user.id, "refresh", timedelta(days=get_settings().auth.refresh_token_days), jti=secrets.token_hex(16))
+
+
+def decode_token(token: str, expected_type: str) -> dict[str, Any]:
+    try:
+        payload = jwt.decode(token, get_settings().auth.jwt_secret, algorithms=["HS256"])
+    except jwt.PyJWTError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token") from exc
+    if payload.get("type") != expected_type or not payload.get("sub"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
+    return payload
+
+
+def check_login_rate_limit(request: Request, email: str) -> None:
+    key = f"{request.client.host if request.client else 'unknown'}:{email.lower()}"
+    now = time.time()
+    attempts = _attempts[key]
+    window = get_settings().auth.login_window_seconds
+    while attempts and attempts[0] <= now - window:
+        attempts.popleft()
+    if len(attempts) >= get_settings().auth.max_login_attempts:
+        raise HTTPException(status_code=429, detail="Too many login attempts")
+    attempts.append(now)
+
+
+async def current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    session: AsyncSession = Depends(get_session),
+) -> User:
+    if credentials is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    payload = decode_token(credentials.credentials, "access")
+    user = await session.get(User, int(payload["sub"]))
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User is inactive or missing")
+    return user
+
+
+def require_roles(*roles: str):
+    async def dependency(user: User = Depends(current_user)) -> User:
+        if user.role not in roles:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+        return user
+
+    return dependency
+
+
+def token_digest(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()

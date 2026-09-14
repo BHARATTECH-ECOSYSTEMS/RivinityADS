@@ -103,6 +103,18 @@ class MonitoringSettings(BaseSettings):
     prometheus_port: int = 9090
 
 
+class AuthSettings(BaseSettings):
+    """Authentication and token configuration."""
+
+    jwt_secret: str = "change-me-in-production"
+    access_token_minutes: int = 15
+    refresh_token_days: int = 30
+    verification_token_hours: int = 24
+    password_reset_token_hours: int = 1
+    max_login_attempts: int = 5
+    login_window_seconds: int = 60
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
@@ -127,6 +139,7 @@ class Settings(BaseSettings):
     ml: MLSettings = Field(default_factory=MLSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
+    auth: AuthSettings = Field(default_factory=AuthSettings)
 
     @field_validator("env")
     @classmethod
