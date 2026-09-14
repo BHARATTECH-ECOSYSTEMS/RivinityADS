@@ -17,6 +17,10 @@ export const login = async (email: string, password: string): Promise<Session> =
   const response = await apiFetch<{ user: Session["user"]; access_token: string; refresh_token: string }>("/api/v1/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
   return { user: response.user, token: response.access_token, refreshToken: response.refresh_token };
 };
+export const register = async (name: string, email: string, password: string, role: "advertiser" | "publisher"): Promise<Session> => {
+  const response = await apiFetch<{ user: Session["user"]; access_token: string; refresh_token: string }>("/api/v1/auth/register", { method: "POST", body: JSON.stringify({ name, email, password, role }) });
+  return { user: response.user, token: response.access_token, refreshToken: response.refresh_token };
+};
 export const logout = (refreshToken: string) => apiFetch<{ message: string }>("/api/v1/auth/logout", { method: "POST", body: JSON.stringify({ refresh_token: refreshToken }) });
 export const ping = () => apiFetch<{ pong: boolean }>("/ping");
 export const requestAds = (payload: AdRequestPayload) => apiFetch<AdListResponse>("/api/v1/ad/request", { method: "POST", body: JSON.stringify(payload) });

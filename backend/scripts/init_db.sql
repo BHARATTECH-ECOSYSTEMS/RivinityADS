@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS advertisers (
     contact_phone VARCHAR(50),
     balance DECIMAL(15,2) DEFAULT 0.00 NOT NULL,
     credit_limit DECIMAL(15,2) DEFAULT 0.00 NOT NULL,
+    daily_budget DECIMAL(12,4) DEFAULT 0.0000 NOT NULL,
     status SMALLINT DEFAULT 1 NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
@@ -177,6 +178,7 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_single_admin_role ON users(role) WHERE role = 'admin';
 
 CREATE TABLE IF NOT EXISTS refresh_tokens (
     id BIGSERIAL PRIMARY KEY,
