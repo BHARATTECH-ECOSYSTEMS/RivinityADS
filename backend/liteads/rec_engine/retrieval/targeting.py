@@ -42,10 +42,15 @@ class TargetingRetrieval(BaseRetrieval):
         Retrieve candidates matching targeting rules.
 
         Flow:
-        1. Get all active campaigns with creatives
-        2. For each campaign, check targeting rules
-        3. Return matching candidates
+        1. Get the ad slot to determine required dimensions
+        2. Get all active campaigns with creatives
+        3. For each campaign, check targeting rules
+        4. Filter creatives by slot dimensions
+        5. Return matching candidates
         """
+        # Resolve slot dimensions for size matching
+        slot_width, slot_height = await self._get_slot_dimensions(slot_id)
+
         # Get active campaigns (with caching)
         campaigns = await self._get_active_campaigns()
 
@@ -60,8 +65,17 @@ class TargetingRetrieval(BaseRetrieval):
             if not self._match_targeting(campaign_data, user_context):
                 continue
 
-            # Create candidate for each creative
+            # Create candidate for each creative that matches slot dimensions
             for creative_data in campaign_data.get("creatives", []):
+                # Size matching: skip creatives that don't fit the slot
+                if slot_width and slot_height:
+                    c_w = creative_data.get("width", 0) or 0
+                    c_h = creative_data.get("height", 0) or 0
+                    # Creative 0x0 means "any size" (responsive)
+                    if c_w != 0 and c_h != 0:
+                        if c_w != slot_width or c_h != slot_height:
+                            continue
+
                 candidate = AdCandidate(
                     campaign_id=campaign_data["id"],
                     creative_id=creative_data["id"],
@@ -87,6 +101,20 @@ class TargetingRetrieval(BaseRetrieval):
 
         logger.debug(f"Retrieved {len(candidates)} candidates from targeting")
         return candidates
+
+    async def _get_slot_dimensions(self, slot_id: str) -> tuple[int, int]:
+        """Resolve an ad slot's width and height from the database."""
+        try:
+            from liteads.models import AdSlot
+            result = await self.session.execute(
+                select(AdSlot).where(AdSlot.slot_id == slot_id)
+            )
+            slot = result.scalar_one_or_none()
+            if slot and slot.width and slot.height:
+                return slot.width, slot.height
+        except Exception as e:
+            logger.debug(f"Could not resolve slot dimensions for {slot_id}: {e}")
+        return 0, 0
 
     async def _get_active_campaigns(self) -> list[dict[str, Any]]:
         """Get all active campaigns with creatives and targeting rules."""

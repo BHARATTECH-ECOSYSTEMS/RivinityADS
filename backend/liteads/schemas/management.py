@@ -79,8 +79,8 @@ class CampaignResponse(ORMModel):
     spent_total: Decimal
     bid_type: int
     bid_amount: Decimal
-    freq_cap_daily: int
-    freq_cap_hourly: int
+    freq_cap_daily: int | None = None
+    freq_cap_hourly: int | None = None
     start_time: datetime | None
     end_time: datetime | None
     status: int
@@ -159,7 +159,7 @@ class PublisherResponse(ORMModel):
 
 
 class SlotCreate(BaseModel):
-    publisher_id: int = Field(gt=0)
+    publisher_id: int | None = Field(default=None, gt=0)
     slot_id: str = Field(min_length=1, max_length=255)
     name: str = Field(min_length=1, max_length=255)
     format: int = Field(default=1, ge=1, le=4)

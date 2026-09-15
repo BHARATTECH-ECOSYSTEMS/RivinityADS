@@ -242,10 +242,15 @@ async def list_slots(
 
 @router.post("/slot", response_model=SlotResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin", "publisher"))])
 async def create_slot(payload: SlotCreate, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)) -> AdSlot:
-    _assert_publisher_access(user, payload.publisher_id)
-    if await session.get(Publisher, payload.publisher_id) is None:
-        raise _not_found("Publisher", payload.publisher_id)
-    slot = AdSlot(**payload.model_dump())
+    publisher_id = payload.publisher_id or user.publisher_id
+    if not publisher_id:
+        raise HTTPException(status_code=400, detail="publisher_id is required")
+    _assert_publisher_access(user, publisher_id)
+    if await session.get(Publisher, publisher_id) is None:
+        raise _not_found("Publisher", publisher_id)
+    data = payload.model_dump()
+    data["publisher_id"] = publisher_id
+    slot = AdSlot(**data)
     session.add(slot)
     await session.flush()
     return slot

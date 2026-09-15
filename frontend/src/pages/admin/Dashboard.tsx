@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
-import { getHealth } from "../../api/client";
-import { listAdvertisers, listCampaigns, listPublishers } from "../../api/mock";
+import { getHealth, listAdvertisers, listCampaigns, listPublishers } from "../../api/client";
 import StatCard from "../../components/StatCard";
 import { money, num } from "../../lib/format";
 import type { HealthResponse } from "../../types";

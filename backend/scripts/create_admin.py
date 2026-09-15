@@ -29,7 +29,7 @@ from liteads.models import User  # noqa: E402
 from liteads.models.base import Base  # noqa: E402
 
 
-async def create_admin(name: str, email: str, password: str) -> None:
+async def create_admin(name: str, email: str, password: str, force: bool = False) -> None:
     """Create a single admin user in the database."""
     from sqlalchemy import select
 
@@ -52,8 +52,21 @@ async def create_admin(name: str, email: str, password: str) -> None:
             select(User).where(User.role == "admin")
         )
         if existing is not None:
+            if force:
+                existing.email = email.lower()
+                existing.name = name
+                existing.password_hash = hash_password(password)
+                existing.is_active = True
+                existing.email_verified = True
+                print(f"  [OK] Admin account updated successfully!")
+                print(f"       Name  : {name}")
+                print(f"       Email : {email.lower()}")
+                print(f"       Role  : admin\n")
+                print("  You can now log in at http://localhost:5173/login\n")
+                await db.close()
+                return
             print(f"  [!] An admin account already exists: {existing.email}")
-            print("     Only one admin is allowed. Delete the existing admin first if you want to replace it.")
+            print("     Only one admin is allowed. Delete the existing admin first if you want to replace it (or pass --force).")
             await db.close()
             return
 
@@ -108,6 +121,7 @@ def main() -> None:
     parser.add_argument("--name", help="Display name for the admin")
     parser.add_argument("--email", help="Admin email address (used for login)")
     parser.add_argument("--password", help="Admin password (min 12 characters)")
+    parser.add_argument("--force", action="store_true", help="Update existing admin credentials if one exists")
     args = parser.parse_args()
 
     print("\n+-------------------------------------+")
@@ -133,7 +147,7 @@ def main() -> None:
         print("\n  [X] Password must be at least 12 characters.\n")
         sys.exit(1)
 
-    asyncio.run(create_admin(name, email, password))
+    asyncio.run(create_admin(name, email, password, force=args.force))
 
 
 if __name__ == "__main__":

@@ -2,7 +2,8 @@
 Ad serving endpoints.
 """
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import HTMLResponse
 from urllib.parse import quote
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,7 +12,7 @@ from liteads.common.config import get_settings
 from liteads.common.database import get_session
 from liteads.common.logger import get_logger, log_context
 from liteads.common.utils import generate_request_id
-from liteads.schemas.request import AdRequest
+from liteads.schemas.request import AdRequest, DeviceInfo
 from liteads.schemas.response import AdListResponse, AdResponse, CreativeResponse, TrackingUrls
 
 logger = get_logger(__name__)
@@ -115,6 +116,92 @@ async def request_ads(
         ads=ads,
         count=len(ads),
     )
+
+
+@router.get("/serve", response_class=HTMLResponse)
+async def serve_ad(
+    request: Request,
+    slot_id: str = Query(..., description="Ad slot identifier"),
+    ad_service: AdService = Depends(get_ad_service),
+) -> HTMLResponse:
+    """
+    Serve an ad as ready-to-render HTML.
+
+    Publishers embed this via:
+        <iframe src="http://your-server/api/v1/ad/serve?slot_id=my_slot"></iframe>
+    or load it dynamically via a script tag.
+
+    Returns a self-contained HTML page with:
+    - The ad creative (image/banner)
+    - An impression tracking pixel (fires automatically)
+    - A click-through link with click tracking
+    """
+    request_id = generate_request_id()
+    base_url = str(request.base_url).rstrip("/")
+
+    # Build a minimal ad request
+    ad_request = AdRequest(
+        slot_id=slot_id,
+        device=DeviceInfo(os="web"),
+        num_ads=1,
+    )
+
+    # Get client IP
+    client_ip = request.client.host if request.client else None
+    if ad_request.geo and not ad_request.geo.ip:
+        ad_request.geo.ip = client_ip
+
+    # Serve
+    candidates = await ad_service.serve_ads(
+        request=ad_request,
+        request_id=request_id,
+    )
+
+    if not candidates:
+        # Return a transparent 1x1 pixel when no ad is available
+        return HTMLResponse(
+            content="<!-- no ad available -->",
+            status_code=204,
+        )
+
+    winner = candidates[0]
+    ad_id = f"ad_{winner.campaign_id}_{winner.creative_id}"
+    imp_url = f"{base_url}/api/v1/event/track?type=impression&req={request_id}&ad={ad_id}&slot={quote(slot_id)}"
+    click_url = f"{base_url}/api/v1/event/track?type=click&req={request_id}&ad={ad_id}&slot={quote(slot_id)}"
+    landing_url = winner.landing_url or "#"
+    image_url = winner.image_url or ""
+    title = winner.title or "Advertisement"
+    width = winner.width or 300
+    height = winner.height or 250
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<style>
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
+  body {{ display:flex; align-items:center; justify-content:center; min-height:100vh; background:transparent; font-family:system-ui,sans-serif; }}
+  .ad-container {{ position:relative; display:inline-block; overflow:hidden; border-radius:4px; }}
+  .ad-container img {{ display:block; max-width:100%; height:auto; }}
+  .ad-label {{ position:absolute; top:4px; right:4px; background:rgba(0,0,0,0.55); color:#fff; font-size:9px; padding:2px 5px; border-radius:3px; letter-spacing:.5px; }}
+  a {{ text-decoration:none; }}
+</style>
+</head>
+<body>
+  <div class="ad-container">
+    <a href="{landing_url}" target="_blank" rel="noopener noreferrer"
+       onclick="new Image().src='{click_url}'">
+      <img src="{image_url}" alt="{title}" width="{width}" height="{height}" />
+    </a>
+    <span class="ad-label">Ad</span>
+  </div>
+  <!-- Impression pixel -->
+  <img src="{imp_url}" width="1" height="1" style="position:absolute;opacity:0;" alt="" />
+</body>
+</html>"""
+
+    return HTMLResponse(content=html)
 
 
 def _get_creative_type_name(creative_type: int) -> str:
