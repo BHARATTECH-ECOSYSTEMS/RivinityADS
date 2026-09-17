@@ -26,6 +26,7 @@ class GeoInfo(BaseModel):
     country: str | None = Field(None, description="Country code (ISO 3166-1 alpha-2)")
     region: str | None = Field(None, description="Region/Province")
     city: str | None = Field(None, description="City name")
+    pincode: str | None = Field(None, description="Postal / ZIP code")
     latitude: float | None = Field(None, description="Latitude")
     longitude: float | None = Field(None, description="Longitude")
 
@@ -40,6 +41,7 @@ class ContextInfo(BaseModel):
     carrier: str | None = Field(None, description="Mobile carrier")
     network: str | None = Field(None, description="Network type (wifi/4g/5g)")
     connection_type: str | None = Field(None, description="Connection type")
+    sectors: list[str] | None = Field(None, description="Audience sectors (from SECTORS taxonomy)")
 
 
 class UserFeatures(BaseModel):

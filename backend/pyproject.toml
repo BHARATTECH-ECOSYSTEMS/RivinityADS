@@ -55,6 +55,7 @@ dependencies = [
     "PyJWT>=2.8.0",
     "email-validator>=2.1.0",
     "colorama>=0.4.6",
+    "geoip2>=5.0.0",
 ]
 
 [project.optional-dependencies]

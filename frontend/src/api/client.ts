@@ -62,3 +62,16 @@ export const listPublishers = () => apiFetch<Publisher[]>("/api/v1/publisher");
 export const createPublisher = (payload: PublisherInput) => apiFetch<Publisher>("/api/v1/publisher", { method: "POST", body: JSON.stringify(payload) });
 export const updatePublisher = (id: number, payload: Partial<Publisher>) => apiFetch<Publisher>(`/api/v1/publisher/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
 export const setPublisherStatus = (id: number, status: number) => updatePublisher(id, { status });
+
+// Targeting and References
+export interface GeoEntry { country: string; state?: string | null; city?: string | null; pincode?: string | null; }
+export interface TargetingSet { geo_include: GeoEntry[]; geo_exclude: GeoEntry[]; sector_include: string[]; sector_exclude: string[]; }
+export interface TargetingResponse extends TargetingSet { campaign_id: number; }
+export const getCampaignTargeting = (campaignId: number) => apiFetch<TargetingResponse>(`/api/v1/campaign/${campaignId}/targeting`);
+export const updateCampaignTargeting = (campaignId: number, payload: TargetingSet) => apiFetch<TargetingResponse>(`/api/v1/campaign/${campaignId}/targeting`, { method: "PUT", body: JSON.stringify(payload) });
+export const getReferenceSectors = () => apiFetch<string[]>("/api/v1/reference/sectors");
+export const getReferenceCountries = () => apiFetch<string[]>("/api/v1/reference/locations/countries");
+export const getReferenceStates = (country: string) => apiFetch<{code: string; name: string}[]>(`/api/v1/reference/locations/states?country=${country}`);
+export const getReferenceCities = (country: string, state: string) => apiFetch<string[]>(`/api/v1/reference/locations/cities?country=${country}&state=${state}`);
+export const getReferencePincodes = (country: string, state: string, city: string) => apiFetch<string[]>(`/api/v1/reference/locations/pincodes?country=${country}&state=${state}&city=${city}`);
+

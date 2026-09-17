@@ -16,6 +16,7 @@ from liteads.common.utils import json_dumps, json_loads
 from liteads.models import Campaign, Creative, Status, TargetingRule
 from liteads.rec_engine.retrieval.base import BaseRetrieval
 from liteads.schemas.internal import AdCandidate, UserContext
+from liteads.ad_server.services.targeting import match_geo, match_sector
 
 logger = get_logger(__name__)
 
@@ -248,18 +249,10 @@ class TargetingRetrieval(BaseRetrieval):
             return user_context.gender.lower() in [v.lower() for v in values]
 
         elif rule_type == "geo":
-            countries = rule_value.get("countries", [])
-            cities = rule_value.get("cities", [])
+            return match_geo(rule_value, user_context)
 
-            if countries and user_context.country:
-                if user_context.country.upper() not in [c.upper() for c in countries]:
-                    return False
-
-            if cities and user_context.city:
-                if user_context.city.lower() not in [c.lower() for c in cities]:
-                    return False
-
-            return True
+        elif rule_type == "sector":
+            return match_sector(rule_value, user_context)
 
         elif rule_type == "device":
             device_types = rule_value.get("types", [])

@@ -5,6 +5,7 @@ import Badge from "../../components/Badge";
 import StatCard from "../../components/StatCard";
 import { ctr, money, num } from "../../lib/format";
 import { BID_TYPES, CREATIVE_TYPES, type Campaign, type Creative } from "../../types";
+import CampaignTargeting from "./CampaignTargeting";
 
 export default function CampaignDetail() {
   const { id } = useParams();
@@ -47,6 +48,9 @@ export default function CampaignDetail() {
     <p className="muted">{BID_TYPES[campaign.bid_type]} bid ${campaign.bid_amount} <button className="btn secondary small" onClick={() => void updateCampaign(campaign.id, { status: campaign.status === 1 ? 0 : 1 }).then(reload)}>Toggle status</button></p>
     <div className="grid cards"><StatCard title="Budget" value={money(campaign.budget_total)} /><StatCard title="Impressions" value={num(campaign.impressions)} /><StatCard title="CTR" value={ctr(campaign.clicks, campaign.impressions)} /></div>
     <div className="card"><h2>Creatives</h2><table className="table"><thead><tr><th>ID</th><th>Title</th><th>Type</th><th>Size</th><th>Quality</th></tr></thead><tbody>{creatives.map((creative) => <tr key={creative.id}><td>{creative.id}</td><td><b>{creative.title}</b></td><td>{CREATIVE_TYPES[creative.creative_type]}</td><td>{creative.width}x{creative.height}</td><td>{creative.quality_score}/100</td></tr>)}</tbody></table><form onSubmit={submit}><input placeholder="Title" value={title} onChange={(event) => setTitle(event.target.value)} required /><input type="url" placeholder="Landing URL" value={landing} onChange={(event) => setLanding(event.target.value)} required /><button className="btn">Add creative</button></form></div>
+    
+    <CampaignTargeting campaignId={campaignId} />
+
     <p><Link to="/advertiser">Back to campaigns</Link></p>
   </div>;
 }

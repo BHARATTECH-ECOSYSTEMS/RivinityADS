@@ -59,6 +59,7 @@ class UserContext:
     country: str = ""
     region: str = ""
     city: str = ""
+    pincode: str = ""
     latitude: float | None = None
     longitude: float | None = None
 
@@ -67,6 +68,7 @@ class UserContext:
     app_name: str = ""
     network: str = ""
     carrier: str = ""
+    sectors: list[str] = field(default_factory=list)
 
     # Features (for ML)
     age: int | None = None

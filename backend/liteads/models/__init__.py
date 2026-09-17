@@ -10,6 +10,7 @@ from liteads.models.ad import (
     HourlyStat,
     TargetingRule,
 )
+from liteads.models.geo import GeoLocation
 from liteads.models.publisher import AdSlot, Publisher, PublisherDailyStat
 from liteads.models.auth import AuditLog, OneTimeToken, RefreshToken, User
 from liteads.models.base import (
@@ -44,4 +45,5 @@ __all__ = [
     "RefreshToken",
     "OneTimeToken",
     "AuditLog",
+    "GeoLocation",
 ]

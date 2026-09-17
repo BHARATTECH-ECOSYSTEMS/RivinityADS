@@ -13,6 +13,12 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+class GeoSettings(BaseSettings):
+    """Geo location resolution configuration."""
+
+    mmdb_path: str = "./GeoLite2-City.mmdb"
+
+
 class DatabaseSettings(BaseSettings):
     """Database configuration."""
 
@@ -162,6 +168,7 @@ class Settings(BaseSettings):
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
     tracking: TrackingSettings = Field(default_factory=TrackingSettings)
+    geo: GeoSettings = Field(default_factory=GeoSettings)
 
     @field_validator("env")
     @classmethod

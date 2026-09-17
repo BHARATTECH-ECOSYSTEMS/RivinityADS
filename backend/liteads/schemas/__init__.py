@@ -27,6 +27,11 @@ from liteads.schemas.response import (
     HealthResponse,
     TrackingUrls,
 )
+from liteads.schemas.targeting import (
+    GeoEntry,
+    TargetingResponse,
+    TargetingSet,
+)
 
 __all__ = [
     # Request schemas
@@ -44,6 +49,10 @@ __all__ = [
     "ErrorResponse",
     "CreativeResponse",
     "TrackingUrls",
+    # Targeting schemas
+    "GeoEntry",
+    "TargetingSet",
+    "TargetingResponse",
     # Internal schemas
     "AdCandidate",
     "UserContext",

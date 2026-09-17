@@ -1,0 +1,5 @@
+IN	400001	mumbai	maharashtra	MH	mumbai city	MH_MC	colaba	MH_CO	18.9067	72.8147	4
+IN	400002	mumbai	maharashtra	MH	mumbai city	MH_MC	kalbadevi	MH_KA	18.95	72.8167	4
+IN	411001	pune	maharashtra	MH	pune district	MH_PU	camp	MH_CA	18.5204	73.8567	4
+US	10001	new york	new york	NY	new york county	NY_NY	manhattan	NY_MA	40.7128	-74.0060	4
+US	10002	new york	new york	NY	new york county	NY_NY	lower east side	NY_LE	40.7128	-74.0060	4

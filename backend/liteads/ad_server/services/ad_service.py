@@ -64,7 +64,7 @@ class AdService:
         5. Return top candidates
         """
         # Build user context
-        user_context = self._build_user_context(request)
+        user_context = await self._build_user_context(request)
 
         # Get recommendations
         candidates, metrics = await self.engine.recommend(
@@ -83,7 +83,7 @@ class AdService:
 
         return candidates
 
-    def _build_user_context(self, request: AdRequest) -> UserContext:
+    async def _build_user_context(self, request: AdRequest) -> UserContext:
         """Build user context from request."""
         ctx = UserContext(
             user_id=request.user_id,
@@ -103,6 +103,7 @@ class AdService:
             ctx.country = request.geo.country or ""
             ctx.region = request.geo.region or ""
             ctx.city = request.geo.city or ""
+            ctx.pincode = request.geo.pincode or ""
             ctx.latitude = request.geo.latitude
             ctx.longitude = request.geo.longitude
 
@@ -112,6 +113,24 @@ class AdService:
             ctx.app_name = request.context.app_name or ""
             ctx.network = request.context.network or ""
             ctx.carrier = request.context.carrier or ""
+            ctx.sectors = request.context.sectors or []
+
+        # Server-side IP -> Geo resolution (overrides request values if found)
+        if ctx.ip:
+            from liteads.ad_server.services.geo_resolver import resolve_ip
+            geo_data = await resolve_ip(ctx.ip)
+            if geo_data.get("country"):
+                ctx.country = geo_data["country"]
+            if geo_data.get("state"):
+                ctx.region = geo_data["state"]
+            if geo_data.get("city"):
+                ctx.city = geo_data["city"]
+            if geo_data.get("pincode"):
+                ctx.pincode = geo_data["pincode"]
+            if geo_data.get("lat") is not None:
+                ctx.latitude = geo_data["lat"]
+            if geo_data.get("lon") is not None:
+                ctx.longitude = geo_data["lon"]
 
         # User features
         if request.user_features:
