@@ -2,6 +2,11 @@
 Pytest configuration and fixtures.
 """
 
+import os
+
+os.environ.setdefault("LITEADS_AUTH__JWT_SECRET", "test_jwt_secret_must_be_at_least_32_characters_long_for_validation")
+os.environ.setdefault("LITEADS_TRACKING__SECRET", "test_tracking_secret_must_be_at_least_32_characters_long_for_validation")
+
 import asyncio
 from collections.abc import AsyncGenerator, Generator
 from typing import Any
