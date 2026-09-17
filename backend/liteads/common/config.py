@@ -106,13 +106,21 @@ class MonitoringSettings(BaseSettings):
 class AuthSettings(BaseSettings):
     """Authentication and token configuration."""
 
-    jwt_secret: str = "change-me-in-production"
+    jwt_secret: str = ""  # NO default secret. Empty = startup failure.
     access_token_minutes: int = 15
     refresh_token_days: int = 30
     verification_token_hours: int = 24
     password_reset_token_hours: int = 1
     max_login_attempts: int = 5
     login_window_seconds: int = 60
+
+    @field_validator("jwt_secret")
+    @classmethod
+    def secret_must_be_set(cls, v: str) -> str:
+        if not v or len(v) < 32:
+            raise ValueError("LITEADS_AUTH__JWT_SECRET must be set and >= 32 chars")
+        return v
+
 
 
 class Settings(BaseSettings):
