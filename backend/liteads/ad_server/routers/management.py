@@ -46,6 +46,18 @@ def _assert_publisher_access(user: User, publisher_id: int) -> None:
         raise HTTPException(status_code=403, detail="Publisher resource is outside your account")
 
 
+async def _assert_campaign_access(user: User, campaign_id: int, session: AsyncSession) -> Campaign:
+    """Admin: any campaign. Advertiser: only own campaigns. Publisher: never."""
+    campaign = await session.get(Campaign, campaign_id)
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if user.role == "advertiser" and campaign.advertiser_id != user.advertiser_id:
+        raise HTTPException(status_code=403, detail="Campaign belongs to another advertiser")
+    if user.role == "publisher":
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    return campaign
+
+
 @router.get("/advertiser", response_model=list[AdvertiserResponse], dependencies=[Depends(require_roles("admin"))])
 async def list_advertisers(session: AsyncSession = Depends(get_session)) -> list[Advertiser]:
     result = await session.execute(select(Advertiser).order_by(Advertiser.id))
@@ -141,22 +153,23 @@ async def update_campaign(
 
 @router.get("/creative", response_model=list[CreativeResponse], dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def list_creatives(
-    campaign_id: int | None = Query(default=None),
+    campaign_id: int,
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[Creative]:
-    query = select(Creative).order_by(Creative.id)
-    if campaign_id is not None:
-        query = query.where(Creative.campaign_id == campaign_id)
+    await _assert_campaign_access(user, campaign_id, session)
+    query = select(Creative).order_by(Creative.id).where(Creative.campaign_id == campaign_id)
     result = await session.execute(query)
     return list(result.scalars().all())
 
 
 @router.post("/creative", response_model=CreativeResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def create_creative(
-    payload: CreativeCreate, session: AsyncSession = Depends(get_session)
+    payload: CreativeCreate,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session)
 ) -> Creative:
-    if await session.get(Campaign, payload.campaign_id) is None:
-        raise _not_found("Campaign", payload.campaign_id)
+    await _assert_campaign_access(user, payload.campaign_id, session)
     creative = Creative(**payload.model_dump())
     session.add(creative)
     await session.flush()
@@ -164,10 +177,11 @@ async def create_creative(
 
 
 @router.get("/creative/{creative_id}", response_model=CreativeResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
-async def get_creative(creative_id: int, session: AsyncSession = Depends(get_session)) -> Creative:
+async def get_creative(creative_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)) -> Creative:
     creative = await session.get(Creative, creative_id)
     if creative is None:
         raise _not_found("Creative", creative_id)
+    await _assert_campaign_access(user, creative.campaign_id, session)
     return creative
 
 
@@ -175,15 +189,30 @@ async def get_creative(creative_id: int, session: AsyncSession = Depends(get_ses
 async def update_creative(
     creative_id: int,
     payload: CreativeUpdate,
+    user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> Creative:
     creative = await session.get(Creative, creative_id)
     if creative is None:
         raise _not_found("Creative", creative_id)
+    await _assert_campaign_access(user, creative.campaign_id, session)
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(creative, key, value)
     await session.flush()
     return creative
+
+@router.delete("/creative/{creative_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles("admin", "advertiser"))])
+async def delete_creative(
+    creative_id: int,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    creative = await session.get(Creative, creative_id)
+    if creative is None:
+        raise _not_found("Creative", creative_id)
+    await _assert_campaign_access(user, creative.campaign_id, session)
+    await session.delete(creative)
+    await session.flush()
 
 
 @router.get("/publisher", response_model=list[PublisherResponse], dependencies=[Depends(require_roles("admin"))])
@@ -203,10 +232,11 @@ async def create_publisher(
 
 
 @router.get("/publisher/{publisher_id}", response_model=PublisherResponse, dependencies=[Depends(require_roles("admin", "publisher"))])
-async def get_publisher(publisher_id: int, session: AsyncSession = Depends(get_session)) -> Publisher:
+async def get_publisher(publisher_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)) -> Publisher:
     publisher = await session.get(Publisher, publisher_id)
     if publisher is None:
         raise _not_found("Publisher", publisher_id)
+    _assert_publisher_access(user, publisher_id)
     return publisher
 
 

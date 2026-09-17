@@ -69,10 +69,13 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    import os
+
+    allowed = [o.strip() for o in os.getenv("LITEADS_CORS_ORIGINS", "http://localhost:5173").split(",")]
     # CORS middleware
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=allowed,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

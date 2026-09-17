@@ -11,10 +11,11 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import StaticPool
 
 from liteads.ad_server.main import app
 from liteads.common.database import Base, get_session
+import liteads.models  # ensure models are registered with Base
 
 
 # Test database URL (use SQLite for testing)
@@ -34,7 +35,7 @@ async def test_db() -> AsyncGenerator[AsyncSession, None]:
     """Create a test database session."""
     engine = create_async_engine(
         TEST_DATABASE_URL,
-        poolclass=NullPool,
+        poolclass=StaticPool,
         echo=False,
     )
 

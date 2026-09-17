@@ -102,6 +102,8 @@ class EventRequest(BaseModel):
     )
     timestamp: int | None = Field(None, description="Event timestamp (Unix epoch)")
     user_id: str | None = Field(None, description="User identifier")
+    slot_id: str | None = Field(None, description="Slot identifier")
+    sig: str | None = Field(None, description="Cryptographic tracking signature")
     extra: dict[str, Any] | None = Field(None, description="Extra event data")
 
     model_config = {

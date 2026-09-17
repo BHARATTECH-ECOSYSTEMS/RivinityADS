@@ -110,7 +110,7 @@ class FeaturesConfigLoader:
 
         logger.info(f"Loading feature config from {self.config_path}")
 
-        with open(self.config_path) as f:
+        with open(self.config_path, encoding="utf-8") as f:
             self._config = yaml.safe_load(f)
 
         self._schema = self._parse_config()

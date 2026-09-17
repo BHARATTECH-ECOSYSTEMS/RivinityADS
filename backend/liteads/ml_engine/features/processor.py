@@ -306,12 +306,11 @@ class SequenceFeatureProcessor(BaseFeatureProcessor):
         # Parse sequences
         all_items = []
         for seq in data:
-            if pd.isna(seq) or seq == "":
-                continue
-            if isinstance(seq, str):
+            if isinstance(seq, (list, np.ndarray)):
+                items = list(seq)
+            elif isinstance(seq, str):
+                if seq == "": continue
                 items = [s.strip() for s in seq.split(",") if s.strip()]
-            elif isinstance(seq, list):
-                items = seq
             else:
                 continue
             all_items.extend(items)
@@ -338,12 +337,13 @@ class SequenceFeatureProcessor(BaseFeatureProcessor):
         offsets = [0]
 
         for seq in data:
-            if pd.isna(seq) or seq == "":
-                items = []
+            if isinstance(seq, (list, np.ndarray)):
+                items = list(seq)
             elif isinstance(seq, str):
-                items = [s.strip() for s in seq.split(",") if s.strip()]
-            elif isinstance(seq, list):
-                items = [str(s) for s in seq]
+                if seq == "":
+                    items = []
+                else:
+                    items = [s.strip() for s in seq.split(",") if s.strip()]
             else:
                 items = []
 
@@ -543,6 +543,12 @@ class FeaturePipeline:
                 logger.warning(f"Feature {name} not in data, using default fit")
                 if isinstance(processor, CrossFeatureProcessor):
                     processor.fit(data)
+                elif isinstance(processor, ContinuousFeatureProcessor):
+                    dummy = pd.Series([0.0] * 10)
+                    processor.fit(dummy)
+                elif isinstance(processor, TimeFeatureProcessor):
+                    dummy = pd.Series([1700000000] * 10)
+                    processor.fit(dummy)
                 else:
                     # Create dummy data for fitting
                     dummy = pd.Series(["__UNKNOWN__"] * 10)

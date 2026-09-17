@@ -73,10 +73,12 @@ async def request_ads(
 
     for candidate in candidates[: ad_request.num_ads]:
         # Build tracking URLs
+        from liteads.common.tracking_sig import sign_tracking
+        sig = sign_tracking(request_id, f"ad_{candidate.campaign_id}_{candidate.creative_id}", ad_request.slot_id)
         tracking = TrackingUrls(
-            impression_url=f"{base_url}/api/v1/event/track?type=impression&req={request_id}&ad=ad_{candidate.campaign_id}_{candidate.creative_id}&slot={quote(ad_request.slot_id)}",
-            click_url=f"{base_url}/api/v1/event/track?type=click&req={request_id}&ad=ad_{candidate.campaign_id}_{candidate.creative_id}&slot={quote(ad_request.slot_id)}",
-            conversion_url=f"{base_url}/api/v1/event/track?type=conversion&req={request_id}&ad=ad_{candidate.campaign_id}_{candidate.creative_id}&slot={quote(ad_request.slot_id)}",
+            impression_url=f"{base_url}/api/v1/event/track?type=impression&req={request_id}&ad=ad_{candidate.campaign_id}_{candidate.creative_id}&slot={quote(ad_request.slot_id)}&sig={sig}",
+            click_url=f"{base_url}/api/v1/event/track?type=click&req={request_id}&ad=ad_{candidate.campaign_id}_{candidate.creative_id}&slot={quote(ad_request.slot_id)}&sig={sig}",
+            conversion_url=f"{base_url}/api/v1/event/track?type=conversion&req={request_id}&ad=ad_{candidate.campaign_id}_{candidate.creative_id}&slot={quote(ad_request.slot_id)}&sig={sig}",
         )
 
         # Build creative response
@@ -166,8 +168,10 @@ async def serve_ad(
 
     winner = candidates[0]
     ad_id = f"ad_{winner.campaign_id}_{winner.creative_id}"
-    imp_url = f"{base_url}/api/v1/event/track?type=impression&req={request_id}&ad={ad_id}&slot={quote(slot_id)}"
-    click_url = f"{base_url}/api/v1/event/track?type=click&req={request_id}&ad={ad_id}&slot={quote(slot_id)}"
+    from liteads.common.tracking_sig import sign_tracking
+    sig = sign_tracking(request_id, ad_id, slot_id)
+    imp_url = f"{base_url}/api/v1/event/track?type=impression&req={request_id}&ad={ad_id}&slot={quote(slot_id)}&sig={sig}"
+    click_url = f"{base_url}/api/v1/event/track?type=click&req={request_id}&ad={ad_id}&slot={quote(slot_id)}&sig={sig}"
     landing_url = winner.landing_url or "#"
     image_url = winner.image_url or ""
     title = winner.title or "Advertisement"

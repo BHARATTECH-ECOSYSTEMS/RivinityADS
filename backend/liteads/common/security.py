@@ -5,7 +5,6 @@ import hashlib
 import hmac
 import secrets
 import time
-from collections import defaultdict, deque
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -16,10 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from liteads.common.config import get_settings
 from liteads.common.database import get_session
+from liteads.common.cache import redis_client
 from liteads.models import User
 
 bearer = HTTPBearer(auto_error=False)
-_attempts: dict[str, deque[float]] = defaultdict(deque)
 
 
 def hash_password(password: str) -> str:
@@ -63,16 +62,14 @@ def decode_token(token: str, expected_type: str) -> dict[str, Any]:
     return payload
 
 
-def check_login_rate_limit(request: Request, email: str) -> None:
-    key = f"{request.client.host if request.client else 'unknown'}:{email.lower()}"
-    now = time.time()
-    attempts = _attempts[key]
+async def check_login_rate_limit(request: Request, email: str) -> None:
+    key = f"rate_limit:login:{request.client.host if request.client else 'unknown'}:{email.lower()}"
     window = get_settings().auth.login_window_seconds
-    while attempts and attempts[0] <= now - window:
-        attempts.popleft()
-    if len(attempts) >= get_settings().auth.max_login_attempts:
+    attempts = await redis_client.incr(key)
+    if attempts == 1:
+        await redis_client.expire(key, window)
+    if attempts > get_settings().auth.max_login_attempts:
         raise HTTPException(status_code=429, detail="Too many login attempts")
-    attempts.append(now)
 
 
 async def current_user(

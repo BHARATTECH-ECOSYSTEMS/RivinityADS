@@ -5,6 +5,7 @@ Retrieves ads based on targeting rules matching user attributes.
 """
 
 from typing import Any
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -141,6 +142,9 @@ class TargetingRetrieval(BaseRetrieval):
         campaign_list: list[dict[str, Any]] = []
 
         for campaign in campaigns:
+            if campaign.updated_at.date() < datetime.now(timezone.utc).date():
+                campaign.spent_today = 0
+
             if not campaign.is_active:
                 continue
 

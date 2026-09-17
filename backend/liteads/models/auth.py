@@ -10,7 +10,7 @@ from liteads.models.base import Base, TimestampMixin
 
 class User(Base, TimestampMixin):
     __tablename__ = "users"
-    __table_args__ = (Index("uq_single_admin_role", "role", unique=True, postgresql_where=text("role = 'admin'")),)
+    __table_args__ = (Index("uq_single_admin_role", "role", unique=True, postgresql_where=text("role = 'admin'"), sqlite_where=text("role = 'admin'")),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)

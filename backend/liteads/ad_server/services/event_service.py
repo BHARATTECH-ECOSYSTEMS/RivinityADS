@@ -53,8 +53,22 @@ class EventService:
                 return False
 
             # Create event record
-            campaign = await self.session.get(Campaign, campaign_id) if campaign_id else None
+            if campaign_id:
+                result = await self.session.execute(
+                    select(Campaign).where(Campaign.id == campaign_id).with_for_update()
+                )
+                campaign = result.scalar_one_or_none()
+            else:
+                campaign = None
+
             cost = self._calculate_cost(event_type_enum, campaign)
+            
+            if campaign:
+                if campaign.updated_at.date() < datetime.now(timezone.utc).date():
+                    campaign.spent_today = 0
+                campaign.spent_today += cost
+                campaign.spent_total += cost
+
             event = AdEvent(
                 request_id=request_id,
                 campaign_id=campaign_id,

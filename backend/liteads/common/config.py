@@ -103,6 +103,20 @@ class MonitoringSettings(BaseSettings):
     prometheus_port: int = 9090
 
 
+class TrackingSettings(BaseSettings):
+    """Tracking configuration."""
+
+    secret: str = ""
+    signature_ttl_seconds: int = 7 * 24 * 3600
+
+    @field_validator("secret")
+    @classmethod
+    def tracking_secret_must_be_set(cls, v: str) -> str:
+        if not v or len(v) < 32:
+            raise ValueError("LITEADS_TRACKING__SECRET must be set and >= 32 chars")
+        return v
+
+
 class AuthSettings(BaseSettings):
     """Authentication and token configuration."""
 
@@ -120,7 +134,6 @@ class AuthSettings(BaseSettings):
         if not v or len(v) < 32:
             raise ValueError("LITEADS_AUTH__JWT_SECRET must be set and >= 32 chars")
         return v
-
 
 
 class Settings(BaseSettings):
@@ -148,6 +161,7 @@ class Settings(BaseSettings):
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
+    tracking: TrackingSettings = Field(default_factory=TrackingSettings)
 
     @field_validator("env")
     @classmethod

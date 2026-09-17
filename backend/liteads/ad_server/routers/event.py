@@ -41,6 +41,12 @@ async def track_event(
     )
 
     logger.info("Event received")
+    
+    from liteads.common.tracking_sig import verify_tracking
+    if not event.sig:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Missing signature")
+    verify_tracking(event.request_id, event.ad_id, event.slot_id or "", event.sig)
 
     # Record the event
     success = await event_service.track_event(
@@ -63,6 +69,7 @@ async def track_event_get(
     type: str = Query(..., alias="type", description="Event type"),
     req: str = Query(..., description="Request ID"),
     ad: str = Query(..., description="Ad ID"),
+    sig: str = Query(..., description="Tracking signature"),
     slot: str | None = Query(None, description="Publisher slot ID"),
     event_service: EventService = Depends(get_event_service),
 ) -> EventResponse:
@@ -78,6 +85,9 @@ async def track_event_get(
     )
 
     logger.info("Pixel event received")
+
+    from liteads.common.tracking_sig import verify_tracking
+    verify_tracking(req, ad, slot or "", sig)
 
     success = await event_service.track_event(
         request_id=req,

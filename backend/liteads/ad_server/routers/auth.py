@@ -79,7 +79,7 @@ async def register(payload: RegisterRequest, session: AsyncSession = Depends(get
 @router.post("/auth/login", response_model=AuthResponse)
 async def login(request: Request, payload: LoginRequest, session: AsyncSession = Depends(get_session)) -> AuthResponse:
     email = str(payload.email).lower()
-    check_login_rate_limit(request, email)
+    await check_login_rate_limit(request, email)
     user = await session.scalar(select(User).where(User.email == email))
     if user is None or not verify_password(payload.password, user.password_hash) or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")

@@ -3,6 +3,7 @@ Tests for feature processing module.
 """
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from liteads.ml_engine.features.config import FeatureConfig, FeaturesConfigLoader
@@ -54,7 +55,7 @@ class TestIDFeatureProcessor:
         config = FeatureConfig(name="user_id", type="id", embedding_dim=16)
         processor = IDFeatureProcessor(config)
 
-        data = [{"user_id": "a"}, {"user_id": "b"}, {"user_id": "a"}]
+        data = pd.Series(["a", "b", "a"])
         processor.fit(data)
         result = processor.transform(data)
 
@@ -67,14 +68,14 @@ class TestIDFeatureProcessor:
         config = FeatureConfig(name="user_id", type="id")
         processor = IDFeatureProcessor(config)
 
-        train_data = [{"user_id": "a"}, {"user_id": "b"}]
+        train_data = pd.Series(["a", "b"])
         processor.fit(train_data)
 
-        test_data = [{"user_id": "c"}]  # Unknown user
+        test_data = pd.Series(["c"])  # Unknown user
         result = processor.transform(test_data)
 
-        # Unknown values should be mapped to index 0
-        assert result[0] == 0
+        # Unknown values should be mapped to the unknown_idx
+        assert result[0] == processor.unknown_idx
 
 
 class TestDiscreteFeatureProcessor:
@@ -85,7 +86,7 @@ class TestDiscreteFeatureProcessor:
         config = FeatureConfig(name="gender", type="discrete")
         processor = DiscreteFeatureProcessor(config)
 
-        data = [{"gender": "male"}, {"gender": "female"}, {"gender": "male"}]
+        data = pd.Series(["male", "female", "male"])
         processor.fit(data)
         result = processor.transform(data)
 
@@ -102,7 +103,7 @@ class TestContinuousFeatureProcessor:
         config = FeatureConfig(name="age", type="continuous")
         processor = ContinuousFeatureProcessor(config)
 
-        data = [{"age": 20}, {"age": 30}, {"age": 40}]
+        data = pd.Series([20.0, 30.0, 40.0])
         processor.fit(data)
         result = processor.transform(data)
 
@@ -115,7 +116,7 @@ class TestContinuousFeatureProcessor:
         config = FeatureConfig(name="clicks", type="continuous", transform="log1p")
         processor = ContinuousFeatureProcessor(config)
 
-        data = [{"clicks": 0}, {"clicks": 100}, {"clicks": 1000}]
+        data = pd.Series([0.0, 100.0, 1000.0])
         processor.fit(data)
         result = processor.transform(data)
 
@@ -136,7 +137,7 @@ class TestTimeFeatureProcessor:
         processor = TimeFeatureProcessor(config)
 
         # Monday 10:00 UTC
-        data = [{"timestamp": 1700000000}]  # 2023-11-14 22:13:20 UTC (Tuesday)
+        data = pd.Series([1700000000])  # 2023-11-14 22:13:20 UTC (Tuesday)
         processor.fit(data)
         result = processor.transform(data)
 
@@ -160,13 +161,15 @@ class TestSequenceFeatureProcessor:
         )
         processor = SequenceFeatureProcessor(config)
 
-        data = [
-            {"interests": ["tech", "sports"]},
-            {"interests": ["fashion"]},
-            {"interests": ["tech", "food", "travel"]},
-        ]
+        data = pd.Series([
+            ["tech", "sports"],
+            ["fashion"],
+            ["tech", "food", "travel"],
+        ])
         processor.fit(data)
-        values, offsets = processor.transform(data)
+        result = processor.transform(data)
+        values = result["interests_ids"]
+        offsets = result["interests_offsets"]
 
         # Check offsets are correct
         assert len(offsets) == 3
@@ -181,9 +184,11 @@ class TestSequenceFeatureProcessor:
         )
         processor = SequenceFeatureProcessor(config)
 
-        data = [{"interests": ["a", "b", "c", "d", "e"]}]
+        data = pd.Series([["a", "b", "c", "d", "e"]])
         processor.fit(data)
-        values, offsets = processor.transform(data)
+        result = processor.transform(data)
+        values = result["interests_ids"]
+        offsets = result["interests_offsets"]
 
         # Should only have 2 items
         assert len(values) == 2
@@ -202,11 +207,11 @@ class TestCrossFeatureProcessor:
         )
         processor = CrossFeatureProcessor(config)
 
-        data = [
+        data = pd.DataFrame([
             {"user_id": "u1", "campaign_id": "c1"},
             {"user_id": "u1", "campaign_id": "c2"},
             {"user_id": "u2", "campaign_id": "c1"},
-        ]
+        ])
         processor.fit(data)
         result = processor.transform(data)
 
@@ -214,7 +219,7 @@ class TestCrossFeatureProcessor:
         assert all(0 <= v < 1000 for v in result)
 
         # Same inputs should produce same hash
-        data2 = [{"user_id": "u1", "campaign_id": "c1"}]
+        data2 = pd.DataFrame([{"user_id": "u1", "campaign_id": "c1"}])
         result2 = processor.transform(data2)
         assert result[0] == result2[0]
 
