@@ -8,11 +8,27 @@ from sqlalchemy import select, String, null, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.expression import collate
 
+from pydantic import BaseModel
+
 from liteads.common.database import get_session
 from liteads.common.security import current_user
 from liteads.models import User, GeoLocation
 
 router = APIRouter(dependencies=[Depends(current_user)])
+
+class ClassifyRequest(BaseModel):
+    text: str
+
+@router.post("/classify")
+async def classify_text(
+    request: ClassifyRequest,
+    user: User = Depends(current_user),
+) -> dict[str, list[str]]:
+    """Classify input text into sectors."""
+    from liteads.ad_server.services.sector_classifier import classify
+    sectors = classify(request.text)
+    return {"sectors": sectors}
+
 
 # The canonical 24-sector taxonomy for the platform
 SECTORS = [

@@ -140,6 +140,14 @@ class AdService:
             ctx.app_categories = request.user_features.app_categories or []
             ctx.custom_features = request.user_features.custom or {}
 
+        # User sector affinities (for Phase 3 personalization)
+        if ctx.user_id:
+            try:
+                from liteads.ad_server.services.user_profile import get_affinities
+                ctx.sector_affinities = await get_affinities(ctx.user_id)
+            except Exception as e:
+                logger.error(f"Failed to fetch user affinities: {e}")
+
         return ctx
 
     async def refresh_cache(self) -> None:

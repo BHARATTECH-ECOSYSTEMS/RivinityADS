@@ -86,6 +86,7 @@ class EventService:
 
             await self._update_campaign_stats(campaign, creative_id, event_type_enum)
             await self._update_publisher_stats(event_type_enum, cost, extra)
+            await self._update_user_profile(user_id, campaign_id, event_type_enum)
 
             # Update real-time stats in Redis
             await self._update_stats(campaign_id, event_type_enum)
@@ -239,3 +240,30 @@ class EventService:
         hourly_key = CacheKeys.freq_hourly(user_id, campaign_id, hour)
         await redis_client.incr(hourly_key)
         await redis_client.expire(hourly_key, 3600)
+
+    async def _update_user_profile(self, user_id: str | None, campaign_id: int | None, event_type: int) -> None:
+        """Update the user's affinity profile based on ad interaction."""
+        if not user_id or not campaign_id:
+            return
+
+        try:
+            from liteads.ad_server.services import user_profile
+            from liteads.models import TargetingRule
+            
+            result = await self.session.execute(
+                select(TargetingRule.rule_value).where(
+                    TargetingRule.campaign_id == campaign_id,
+                    TargetingRule.rule_type == "sector",
+                    TargetingRule.is_include.is_(True),
+                )
+            )
+            
+            sectors: list[str] = []
+            for (rv,) in result.all():
+                if rv and "entries" in rv:
+                    sectors.extend(rv["entries"])
+                    
+            if sectors:
+                await user_profile.record_activity(user_id, sectors, event_type)
+        except Exception as e:
+            logger.error(f"Failed to update user profile: {e}")

@@ -75,6 +75,7 @@ class UserContext:
     gender: str | None = None
     interests: list[str] = field(default_factory=list)
     app_categories: list[str] = field(default_factory=list)
+    sector_affinities: dict[str, float] = field(default_factory=dict)
     custom_features: dict[str, Any] = field(default_factory=dict)
 
 

@@ -67,6 +67,13 @@ class TargetingRetrieval(BaseRetrieval):
             if not self._match_targeting(campaign_data, user_context):
                 continue
 
+            # Extract sector_include rules to pass to candidates for personalization
+            targeted_sectors = []
+            for rule in campaign_data.get("targeting_rules", []):
+                if rule["rule_type"] == "sector" and rule["is_include"]:
+                    if rule["rule_value"] and "entries" in rule["rule_value"]:
+                        targeted_sectors.extend(rule["rule_value"]["entries"])
+
             # Create candidate for each creative that matches slot dimensions
             for creative_data in campaign_data.get("creatives", []):
                 # Size matching: skip creatives that don't fit the slot
@@ -92,6 +99,7 @@ class TargetingRetrieval(BaseRetrieval):
                     creative_type=creative_data.get("creative_type", 1),
                     width=creative_data.get("width"),
                     height=creative_data.get("height"),
+                    metadata={"sectors": targeted_sectors},
                 )
                 candidates.append(candidate)
 

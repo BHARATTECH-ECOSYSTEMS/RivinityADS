@@ -164,6 +164,11 @@ class RecommendationEngine:
                 ExplorationReranker(epsilon=self.config.exploration_epsilon)
             )
 
+        # Affinity Reranker goes at the end of the chain (or before exploration)
+        # We will add it before exploration so exploration still shuffles appropriately
+        from liteads.rec_engine.ranking.reranker import AffinityReranker
+        rerankers.insert(0, AffinityReranker())
+
         return rerankers
 
     async def recommend(

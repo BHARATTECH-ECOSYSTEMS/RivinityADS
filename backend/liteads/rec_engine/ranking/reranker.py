@@ -112,6 +112,50 @@ class DiversityReranker(BaseReranker):
         return result
 
 
+class AffinityReranker(BaseReranker):
+    """
+    Re-ranker for personalization based on user sector affinity.
+    
+    Boosts candidates that target sectors the user has a high affinity for,
+    or that match the requested context sectors.
+    """
+
+    def rerank(
+        self,
+        candidates: list[AdCandidate],
+        user_context: UserContext,
+        **kwargs: Any,
+    ) -> list[AdCandidate]:
+        """Apply sector affinity boost to candidate scores."""
+        if not candidates:
+            return []
+
+        # Convert context sectors to lower for case-insensitive matching
+        req_secs = {s.lower() for s in (user_context.sectors or [])}
+
+        for candidate in candidates:
+            camp_secs = {s.lower() for s in candidate.metadata.get("sectors", [])}
+            
+            if not camp_secs:
+                # No sector targeting on this campaign, normal ranking
+                continue
+                
+            # Get max affinity score for any of the campaign's targeted sectors
+            affinity = max((user_context.sector_affinities.get(s, 0.0) for s in camp_secs), default=0.0)
+            
+            # Context hit if the campaign targets a sector the user is currently in (e.g. from publisher request)
+            context_hit = 0.4 if (camp_secs & req_secs) else 0.0
+            
+            # Apply boost multiplier, capped at +90% (affinity/20 caps at 0.5 + 0.4 context)
+            boost = 1.0 + min(0.5, affinity / 20.0) + context_hit
+            
+            candidate.score *= boost
+
+        # Re-sort by adjusted score
+        candidates.sort(key=lambda c: c.score, reverse=True)
+        return candidates
+
+
 class ExplorationReranker(BaseReranker):
     """
     Re-ranker with exploration for new/cold ads.
