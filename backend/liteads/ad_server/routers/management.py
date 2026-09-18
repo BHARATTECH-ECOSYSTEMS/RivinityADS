@@ -10,10 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from liteads.common.database import get_session
 from liteads.common.security import current_user, require_roles
 from liteads.models import AdSlot, Advertiser, Campaign, Creative, Publisher, PublisherDailyStat, User
+from liteads.management.api_key_service import ApiKeyService
 from liteads.schemas.management import (
     AdvertiserCreate,
     AdvertiserResponse,
     AdvertiserUpdate,
+    ApiKeyCreate,
+    ApiKeyResponse,
     CampaignCreate,
     CampaignResponse,
     CampaignUpdate,
@@ -253,6 +256,39 @@ async def update_publisher(
         setattr(publisher, key, value)
     await session.flush()
     return publisher
+
+
+@router.get("/publisher/{publisher_id}/keys", response_model=list[ApiKeyResponse], dependencies=[Depends(require_roles("admin", "publisher"))])
+async def list_publisher_keys(
+    publisher_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+) -> list[ApiKeyResponse]:
+    _assert_publisher_access(user, publisher_id)
+    if await session.get(Publisher, publisher_id) is None:
+        raise _not_found("Publisher", publisher_id)
+    return await ApiKeyService.list_api_keys(session, publisher_id)
+
+
+@router.post("/publisher/{publisher_id}/keys", response_model=ApiKeyResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin", "publisher"))])
+async def create_publisher_key(
+    publisher_id: int, payload: ApiKeyCreate, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+) -> ApiKeyResponse:
+    _assert_publisher_access(user, publisher_id)
+    if await session.get(Publisher, publisher_id) is None:
+        raise _not_found("Publisher", publisher_id)
+    
+    db_key, raw_key = await ApiKeyService.create_api_key(session, publisher_id, payload)
+    response_model = ApiKeyResponse.model_validate(db_key)
+    response_model.raw_key = raw_key
+    return response_model
+
+
+@router.delete("/publisher/{publisher_id}/keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles("admin", "publisher"))])
+async def revoke_publisher_key(
+    publisher_id: int, key_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+) -> None:
+    _assert_publisher_access(user, publisher_id)
+    if not await ApiKeyService.revoke_api_key(session, publisher_id, key_id):
+        raise HTTPException(status_code=404, detail="API Key not found or already revoked")
 
 
 @router.get("/slot", response_model=list[SlotResponse], dependencies=[Depends(require_roles("admin", "publisher"))])

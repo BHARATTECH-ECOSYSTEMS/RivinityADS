@@ -50,8 +50,8 @@ class TargetingRetrieval(BaseRetrieval):
         4. Filter creatives by slot dimensions
         5. Return matching candidates
         """
-        # Resolve slot dimensions for size matching
-        slot_width, slot_height = await self._get_slot_dimensions(slot_id)
+        # Resolve slot dimensions and format for size matching
+        slot_width, slot_height, slot_format = await self._get_slot_info(slot_id)
 
         # Get active campaigns (with caching)
         campaigns = await self._get_active_campaigns()
@@ -76,6 +76,11 @@ class TargetingRetrieval(BaseRetrieval):
 
             # Create candidate for each creative that matches slot dimensions
             for creative_data in campaign_data.get("creatives", []):
+                # Format matching
+                c_format = creative_data.get("creative_type", 1)
+                if slot_format is not None and c_format != slot_format:
+                    continue
+
                 # Size matching: skip creatives that don't fit the slot
                 if slot_width and slot_height:
                     c_w = creative_data.get("width", 0) or 0
@@ -112,19 +117,19 @@ class TargetingRetrieval(BaseRetrieval):
         logger.debug(f"Retrieved {len(candidates)} candidates from targeting")
         return candidates
 
-    async def _get_slot_dimensions(self, slot_id: str) -> tuple[int, int]:
-        """Resolve an ad slot's width and height from the database."""
+    async def _get_slot_info(self, slot_id: str) -> tuple[int, int, int | None]:
+        """Resolve an ad slot's width, height, and format from the database."""
         try:
             from liteads.models import AdSlot
             result = await self.session.execute(
                 select(AdSlot).where(AdSlot.slot_id == slot_id)
             )
             slot = result.scalar_one_or_none()
-            if slot and slot.width and slot.height:
-                return slot.width, slot.height
+            if slot:
+                return (slot.width or 0, slot.height or 0, slot.format)
         except Exception as e:
-            logger.debug(f"Could not resolve slot dimensions for {slot_id}: {e}")
-        return 0, 0
+            logger.debug(f"Could not resolve slot info for {slot_id}: {e}")
+        return 0, 0, None
 
     async def _get_active_campaigns(self) -> list[dict[str, Any]]:
         """Get all active campaigns with creatives and targeting rules."""

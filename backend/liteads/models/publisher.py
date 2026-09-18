@@ -1,9 +1,9 @@
 """Publisher inventory and reporting models."""
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Date, ForeignKey, Integer, Numeric, String
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from liteads.models.base import Base, Status, TimestampMixin
@@ -63,3 +63,20 @@ class PublisherDailyStat(Base, TimestampMixin):
     earnings: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"), nullable=False)
 
     publisher: Mapped[Publisher] = relationship("Publisher", back_populates="daily_stats")
+
+
+class PublisherApiKey(Base, TimestampMixin):
+    """API key for publisher server-to-server integration."""
+
+    __tablename__ = "publisher_api_keys"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    publisher_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("publishers.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    key_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    publisher: Mapped[Publisher] = relationship("Publisher")

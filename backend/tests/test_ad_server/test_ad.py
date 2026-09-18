@@ -6,7 +6,26 @@ from typing import Any
 
 import pytest
 from httpx import AsyncClient
+from liteads.ad_server.main import app
+from liteads.common.security import authenticate_s2s_or_user
+from liteads.models import User, AdSlot, Publisher
+from liteads.common.database import get_session
 
+@pytest.fixture(autouse=True)
+async def override_auth(test_db):
+    async def mock_auth():
+        return {"type": "user", "entity": User(id=1, role="admin", email="test@test.com")}
+    app.dependency_overrides[authenticate_s2s_or_user] = mock_auth
+    
+    # Create dummy slot for tests
+    publisher = Publisher(id=1, name="test_pub", status=1)
+    slot = AdSlot(id=1, publisher_id=1, slot_id="test_slot", name="test", format=1, status=1)
+    test_db.add(publisher)
+    test_db.add(slot)
+    await test_db.commit()
+    
+    yield
+    app.dependency_overrides.pop(authenticate_s2s_or_user, None)
 
 @pytest.mark.asyncio
 async def test_ad_request_empty(

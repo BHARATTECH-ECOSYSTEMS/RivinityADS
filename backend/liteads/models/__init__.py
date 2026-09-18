@@ -11,7 +11,7 @@ from liteads.models.ad import (
     TargetingRule,
 )
 from liteads.models.geo import GeoLocation
-from liteads.models.publisher import AdSlot, Publisher, PublisherDailyStat
+from liteads.models.publisher import AdSlot, Publisher, PublisherDailyStat, PublisherApiKey
 from liteads.models.auth import AuditLog, OneTimeToken, RefreshToken, User
 from liteads.models.base import (
     Base,
@@ -41,6 +41,7 @@ __all__ = [
     "Publisher",
     "AdSlot",
     "PublisherDailyStat",
+    "PublisherApiKey",
     "User",
     "RefreshToken",
     "OneTimeToken",

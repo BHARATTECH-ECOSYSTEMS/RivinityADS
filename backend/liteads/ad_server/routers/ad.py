@@ -12,8 +12,12 @@ from liteads.common.config import get_settings
 from liteads.common.database import get_session
 from liteads.common.logger import get_logger, log_context
 from liteads.common.utils import generate_request_id
+from liteads.common.security import authenticate_s2s_or_user
 from liteads.schemas.request import AdRequest, DeviceInfo
 from liteads.schemas.response import AdListResponse, AdResponse, CreativeResponse, TrackingUrls
+from liteads.models import AdSlot, Publisher
+from fastapi import HTTPException
+from sqlalchemy.orm import selectinload
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -29,6 +33,8 @@ async def request_ads(
     request: Request,
     ad_request: AdRequest,
     ad_service: AdService = Depends(get_ad_service),
+    auth: dict = Depends(authenticate_s2s_or_user),
+    session: AsyncSession = Depends(get_session),
 ) -> AdListResponse:
     """
     Request ads for a given slot.
@@ -60,6 +66,21 @@ async def request_ads(
     client_ip = request.client.host if request.client else None
     if ad_request.geo and not ad_request.geo.ip:
         ad_request.geo.ip = client_ip
+
+    # Slot validation and authorization
+    from sqlalchemy import select
+    slot = await session.execute(select(AdSlot).where(AdSlot.slot_id == ad_request.slot_id))
+    slot = slot.scalar_one_or_none()
+    if not slot or slot.status != 1:
+        raise HTTPException(status_code=404, detail="AdSlot not found or inactive")
+
+    if auth["type"] == "publisher":
+        if slot.publisher_id != auth["entity"].id:
+            raise HTTPException(status_code=403, detail="Not authorized for this slot")
+    elif auth["type"] == "user":
+        # Check if the user is an admin or publisher owning the slot (AdPreview could be used by admin/advertiser)
+        # For simplicity, if it's a JWT, allow it (AdPreview use case), but we can restrict further if needed.
+        pass
 
     # Serve ads
     candidates = await ad_service.serve_ads(
@@ -152,6 +173,19 @@ async def serve_ad(
     client_ip = request.client.host if request.client else None
     if ad_request.geo and not ad_request.geo.ip:
         ad_request.geo.ip = client_ip
+
+    # Slot validation for IFrame / SDK domain validation
+    from sqlalchemy import select
+    slot = await ad_service.session.execute(select(AdSlot).options(selectinload(AdSlot.publisher)).where(AdSlot.slot_id == slot_id))
+    slot = slot.scalar_one_or_none()
+    if not slot or slot.status != 1:
+        return HTMLResponse(content="<!-- invalid slot -->", status_code=204)
+
+    if slot.publisher.site_url:
+        referer = request.headers.get("referer") or request.headers.get("origin")
+        if not referer or not referer.startswith(slot.publisher.site_url):
+            logger.warning("domain_validation_failed", slot=slot_id, site_url=slot.publisher.site_url, referer=referer)
+            return HTMLResponse(content="<!-- domain validation failed -->", status_code=204)
 
     # Serve
     candidates = await ad_service.serve_ads(

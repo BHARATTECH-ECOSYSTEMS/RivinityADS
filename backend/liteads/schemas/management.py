@@ -198,3 +198,18 @@ class PublisherReportingResponse(BaseModel):
     conversions: int
     earnings: Decimal
     ecpm: Decimal
+
+
+class ApiKeyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+
+
+class ApiKeyResponse(ORMModel):
+    id: int
+    publisher_id: int
+    name: str
+    key_prefix: str
+    raw_key: str | None = None
+    revoked_at: datetime | None
+    created_at: datetime
+    updated_at: datetime

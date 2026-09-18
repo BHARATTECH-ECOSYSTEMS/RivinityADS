@@ -96,3 +96,47 @@ def require_roles(*roles: str):
 
 def token_digest(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+from liteads.models.publisher import Publisher
+from liteads.management.api_key_service import ApiKeyService
+
+async def verify_api_key(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    session: AsyncSession = Depends(get_session),
+) -> Publisher:
+    if credentials is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API Key required")
+    raw_key = credentials.credentials
+    parts = raw_key.split("_")
+    if len(parts) != 4 or parts[0] != "pk" or parts[1] != "live":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key format")
+    prefix = f"{parts[0]}_{parts[1]}_{parts[2]}"
+    
+    db_key = await ApiKeyService.get_key_by_prefix(session, prefix)
+    if not db_key:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
+        
+    if not ApiKeyService.verify_key(raw_key, db_key.key_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
+        
+    publisher = await session.get(Publisher, db_key.publisher_id)
+    if not publisher or publisher.status != 1:  # Status.ACTIVE
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Publisher inactive")
+        
+    return publisher
+
+
+async def authenticate_s2s_or_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Returns {"type": "publisher", "entity": Publisher} or {"type": "user", "entity": User}"""
+    if not credentials:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    token = credentials.credentials
+    if token.startswith("pk_live_"):
+        publisher = await verify_api_key(credentials, session)
+        return {"type": "publisher", "entity": publisher}
+    else:
+        user = await current_user(credentials, session)
+        return {"type": "user", "entity": user}
