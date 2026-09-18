@@ -73,6 +73,19 @@ class AdService:
             num_ads=request.num_ads,
         )
 
+        # STEP 4.1 — per-request format selection
+        # Filter by requested creative_type; fall back to unfiltered if no match.
+        if request.format is not None and candidates:
+            filtered = [c for c in candidates if c.creative_type == request.format]
+            if filtered:
+                candidates = filtered
+            else:
+                logger.debug(
+                    "No candidates matched requested format; using unfiltered set",
+                    requested_format=request.format,
+                    candidate_types=list({c.creative_type for c in candidates}),
+                )
+
         logger.info(
             "Ad serving completed",
             request_id=request_id,

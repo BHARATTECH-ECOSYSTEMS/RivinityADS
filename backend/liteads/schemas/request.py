@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 class DeviceInfo(BaseModel):
     """Device information."""
 
-    os: str = Field(..., description="Operating system (android/ios)")
+    os: str = Field(..., description="Operating system (android/ios/web)")
     os_version: str | None = Field(None, description="OS version")
     model: str | None = Field(None, description="Device model")
     brand: str | None = Field(None, description="Device brand")
@@ -41,7 +41,9 @@ class ContextInfo(BaseModel):
     carrier: str | None = Field(None, description="Mobile carrier")
     network: str | None = Field(None, description="Network type (wifi/4g/5g)")
     connection_type: str | None = Field(None, description="Connection type")
-    sectors: list[str] | None = Field(None, description="Audience sectors (from SECTORS taxonomy)")
+    sectors: list[str] | None = Field(
+        None, description="Audience/content sectors from SECTORS taxonomy (e.g. ['tech', 'finance'])"
+    )
 
 
 class UserFeatures(BaseModel):
@@ -55,7 +57,14 @@ class UserFeatures(BaseModel):
 
 
 class AdRequest(BaseModel):
-    """Ad request schema."""
+    """Ad request schema.
+
+    Supports both classic publisher placements (slot_id) and server-to-server
+    AI-platform requests. For AI-platform callers set format=2 (native) so that
+    ``title``, ``description``, and ``landing_url`` are returned; the client is
+    responsible for rendering them as chat-inline, sidebar, or conversation-starter
+    blocks — those are delivery templates, not separate creative types.
+    """
 
     slot_id: str = Field(..., description="Ad slot identifier")
     user_id: str | None = Field(None, description="User identifier (IMEI/IDFA/custom)")
@@ -64,6 +73,17 @@ class AdRequest(BaseModel):
     context: ContextInfo | None = Field(None, description="Context information")
     user_features: UserFeatures | None = Field(None, description="User features for ML")
     num_ads: int = Field(1, ge=1, le=10, description="Number of ads requested")
+    format: int | None = Field(
+        None,
+        ge=1,
+        le=4,
+        description=(
+            "Requested creative_type to filter candidates: "
+            "1=banner, 2=native, 3=video, 4=interstitial. "
+            "Defaults to the slot's configured format. "
+            "Falls back to unfiltered candidates if none match."
+        ),
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -87,8 +107,10 @@ class AdRequest(BaseModel):
                     "app_id": "com.example.app",
                     "app_version": "1.0.0",
                     "network": "wifi",
+                    "sectors": ["tech", "finance"],
                 },
                 "num_ads": 1,
+                "format": 2,
             }
         }
     }
@@ -119,3 +141,40 @@ class EventRequest(BaseModel):
             }
         }
     }
+
+
+class TextClassifyRequest(BaseModel):
+    """Request body for ``POST /api/v1/classify``.
+
+    Classifies free-form text into ad-relevant content sectors.
+    Useful for AI platforms doing context-aware ad decisioning server-side.
+    """
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        max_length=4096,
+        description="Text content to classify into ad-relevant sectors",
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "text": (
+                    "Breaking news: The Federal Reserve raised interest rates by 25 basis points, "
+                    "sending tech stocks lower while bond yields surged."
+                )
+            }
+        }
+    }
+
+
+class TextClassifyResponse(BaseModel):
+    """Response for ``POST /api/v1/classify``."""
+
+    sectors: list[str] = Field(
+        description="Ordered list of matching sector labels (most relevant first)"
+    )
+    scores: dict[str, float] = Field(
+        description="Sector → confidence score mapping (0.0 – 1.0)"
+    )

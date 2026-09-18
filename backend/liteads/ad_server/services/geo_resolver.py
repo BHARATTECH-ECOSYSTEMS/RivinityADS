@@ -3,19 +3,26 @@ Resolve client IP to country/state/city/pincode. Cached in Redis 7 days.
 """
 
 import ipaddress
+from typing import Any
 
-import geoip2.database
+try:
+    import geoip2.database
+except ImportError:
+    geoip2 = None
+
 from liteads.common.cache import redis_client
 from liteads.common.config import get_settings
 from liteads.common.logger import get_logger
 
 logger = get_logger(__name__)
 
-_reader: geoip2.database.Reader | None = None
+_reader: Any = None
 
 
-def _get_reader() -> geoip2.database.Reader | None:
+def _get_reader() -> Any:
     global _reader
+    if geoip2 is None:
+        return None
     if _reader is None:
         path = get_settings().geo.mmdb_path
         try:

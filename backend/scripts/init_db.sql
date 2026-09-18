@@ -233,6 +233,21 @@ FROM publishers p
 WHERE p.name = 'Demo Publisher'
     AND NOT EXISTS (SELECT 1 FROM ad_slots WHERE slot_id = 'banner_home_top');
 
+-- PHASE 4 — Publisher API keys (for third-party integrations and AI-platform S2S)
+-- Only the sha256 hash of the key is stored; the prefix is shown in the UI.
+CREATE TABLE IF NOT EXISTS publisher_api_keys (
+    id BIGSERIAL PRIMARY KEY,
+    publisher_id BIGINT NOT NULL REFERENCES publishers(id) ON DELETE CASCADE,
+    label VARCHAR(128) NOT NULL,
+    key_hash VARCHAR(128) UNIQUE NOT NULL,  -- sha256 of the raw key; never stored in plaintext
+    key_prefix VARCHAR(12) NOT NULL,         -- e.g. "rk_live_a1b2" for display purposes
+    status SMALLINT DEFAULT 1 NOT NULL,      -- 1=active, 0=revoked
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_publisher_api_keys_hash ON publisher_api_keys(key_hash);
+CREATE INDEX IF NOT EXISTS idx_publisher_api_keys_publisher ON publisher_api_keys(publisher_id);
+
 -- Print success message
 DO $$
 BEGIN

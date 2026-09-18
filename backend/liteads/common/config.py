@@ -112,6 +112,11 @@ class MonitoringSettings(BaseSettings):
 class TrackingSettings(BaseSettings):
     """Tracking configuration."""
 
+    model_config = SettingsConfigDict(
+        env_prefix="LITEADS_TRACKING__",
+        extra="ignore",
+    )
+
     secret: str = ""
     signature_ttl_seconds: int = 7 * 24 * 3600
 
@@ -125,6 +130,11 @@ class TrackingSettings(BaseSettings):
 
 class AuthSettings(BaseSettings):
     """Authentication and token configuration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="LITEADS_AUTH__",
+        extra="ignore",
+    )
 
     jwt_secret: str = ""  # NO default secret. Empty = startup failure.
     access_token_minutes: int = 15
@@ -250,6 +260,10 @@ def get_settings() -> Settings:
         flat_config["logging"] = LoggingSettings(**merged["logging"])
     if "monitoring" in merged:
         flat_config["monitoring"] = MonitoringSettings(**merged["monitoring"])
+    if "auth" in merged:
+        flat_config["auth"] = AuthSettings(**merged["auth"])
+    if "tracking" in merged:
+        flat_config["tracking"] = TrackingSettings(**merged["tracking"])
 
     # Nested settings are created from YAML above, so apply environment overrides
     # explicitly for deployments such as Docker Compose.
