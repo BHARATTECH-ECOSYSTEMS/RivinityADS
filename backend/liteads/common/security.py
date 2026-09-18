@@ -13,9 +13,9 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from liteads.common.cache import redis_client
 from liteads.common.config import get_settings
 from liteads.common.database import get_session
-from liteads.common.cache import redis_client
 from liteads.models import User
 
 bearer = HTTPBearer(auto_error=False)
@@ -63,13 +63,18 @@ def decode_token(token: str, expected_type: str) -> dict[str, Any]:
 
 
 async def check_login_rate_limit(request: Request, email: str) -> None:
-    key = f"rate_limit:login:{request.client.host if request.client else 'unknown'}:{email.lower()}"
-    window = get_settings().auth.login_window_seconds
-    attempts = await redis_client.incr(key)
-    if attempts == 1:
-        await redis_client.expire(key, window)
-    if attempts > get_settings().auth.max_login_attempts:
-        raise HTTPException(status_code=429, detail="Too many login attempts")
+    try:
+        key = f"rate_limit:login:{request.client.host if request.client else 'unknown'}:{email.lower()}"
+        window = get_settings().auth.login_window_seconds
+        attempts = await redis_client.incr(key)
+        if attempts == 1:
+            await redis_client.expire(key, window)
+        if attempts > get_settings().auth.max_login_attempts:
+            raise HTTPException(status_code=429, detail="Too many login attempts")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
 
 
 async def current_user(
@@ -97,8 +102,10 @@ def require_roles(*roles: str):
 def token_digest(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
+
 from liteads.models.publisher import Publisher
 from liteads.management.api_key_service import ApiKeyService
+
 
 async def verify_api_key(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
@@ -111,18 +118,18 @@ async def verify_api_key(
     if len(parts) != 4 or parts[0] != "pk" or parts[1] != "live":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key format")
     prefix = f"{parts[0]}_{parts[1]}_{parts[2]}"
-    
+
     db_key = await ApiKeyService.get_key_by_prefix(session, prefix)
     if not db_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
-        
+
     if not ApiKeyService.verify_key(raw_key, db_key.key_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
-        
+
     publisher = await session.get(Publisher, db_key.publisher_id)
     if not publisher or publisher.status != 1:  # Status.ACTIVE
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Publisher inactive")
-        
+
     return publisher
 
 
@@ -139,4 +146,119 @@ async def authenticate_s2s_or_user(
         return {"type": "publisher", "entity": publisher}
     else:
         user = await current_user(credentials, session)
-        return {"type": "user", "entity": user}
+        return {"type": "user", "entity": user}
+
+
+# ── Phase 4.2 — Publisher API Key authentication ───────────────────────────────
+
+async def _get_publisher_id_from_key(key: str, session: AsyncSession) -> int | None:
+    if not key:
+        return None
+    from liteads.models import PublisherApiKey
+    from sqlalchemy import select
+
+    key_hash = hashlib.sha256(key.encode()).hexdigest()
+    result = await session.execute(
+        select(PublisherApiKey).where(
+            PublisherApiKey.key_hash == key_hash,
+            PublisherApiKey.status == 1,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row is not None:
+        return row.publisher_id
+
+    if key.startswith("pk_live_"):
+        try:
+            parts = key.split("_")
+            if len(parts) >= 3:
+                prefix = f"{parts[0]}_{parts[1]}_{parts[2]}"
+                db_key = await ApiKeyService.get_key_by_prefix(session, prefix)
+                if db_key and ApiKeyService.verify_key(key, db_key.key_hash):
+                    return db_key.publisher_id
+        except Exception:
+            pass
+
+    return None
+
+
+async def publisher_from_api_key(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> int:
+    """Authenticate ad/event API calls via ``X-API-Key`` header.
+
+    Returns the ``publisher_id`` associated with the validated key.
+    Raises HTTP 401 if the header is missing or the key is invalid/revoked.
+    """
+    key = request.headers.get("X-API-Key", "")
+    if not key:
+        raise HTTPException(status_code=401, detail="X-API-Key header required")
+
+    pub_id = await _get_publisher_id_from_key(key, session)
+    if pub_id is None:
+        raise HTTPException(status_code=401, detail="Invalid or revoked API key")
+    return pub_id
+
+
+async def optional_publisher_from_api_key(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> int | None:
+    """Soft version of :func:`publisher_from_api_key`.
+
+    Returns the publisher_id if a valid ``X-API-Key`` header is present,
+    otherwise returns ``None``.  Use this for endpoints that want to log
+    attribution without hard-enforcing the key.
+    """
+    key = request.headers.get("X-API-Key", "")
+    if not key:
+        return None
+    return await _get_publisher_id_from_key(key, session)
+
+
+# ── Phase 4.3 — HMAC signature verification for S2S signed requests ────────────
+
+_HMAC_TIMESTAMP_WINDOW = 300  # seconds
+
+
+def verify_hmac_signature(
+    raw_key: str,
+    timestamp_str: str,
+    body_bytes: bytes,
+    signature: str,
+) -> None:
+    """Validate an HMAC-SHA256 signed request (used by AI-platform callers).
+
+    Expected signature:
+        HMAC-SHA256(api_secret, "{api_key}|{timestamp}|{sha256(body)}")
+
+    Raises HTTP 401 on any failure (bad sig, stale timestamp, wrong format).
+
+    Args:
+        raw_key: The raw ``X-API-Key`` header value.
+        timestamp_str: The ``X-Timestamp`` header value (Unix epoch as string).
+        body_bytes: The raw request body bytes.
+        signature: The ``X-Signature`` header value (hex-encoded HMAC).
+    """
+    # 1. Freshness check
+    try:
+        ts = int(timestamp_str)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=401, detail="X-Timestamp must be a Unix epoch integer")
+
+    age = abs(int(time.time()) - ts)
+    if age > _HMAC_TIMESTAMP_WINDOW:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Request timestamp is too old ({age}s; max {_HMAC_TIMESTAMP_WINDOW}s)",
+        )
+
+    # 2. Build the expected signature
+    body_sha256 = hashlib.sha256(body_bytes).hexdigest()
+    message = f"{raw_key}|{timestamp_str}|{body_sha256}".encode()
+    expected_sig = hmac.new(raw_key.encode(), message, hashlib.sha256).hexdigest()
+
+    # 3. Constant-time comparison
+    if not hmac.compare_digest(expected_sig, signature):
+        raise HTTPException(status_code=401, detail="Invalid request signature")

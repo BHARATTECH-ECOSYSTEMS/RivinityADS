@@ -1,6 +1,8 @@
 """CRUD and publisher reporting endpoints."""
 
-from datetime import date, timedelta
+import hashlib
+import secrets
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -9,7 +11,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from liteads.common.database import get_session
 from liteads.common.security import current_user, require_roles
-from liteads.models import AdSlot, Advertiser, Campaign, Creative, Publisher, PublisherDailyStat, User
+from liteads.models import (
+    AdSlot,
+    Advertiser,
+    Campaign,
+    Creative,
+    Publisher,
+    PublisherApiKey,
+    PublisherDailyStat,
+    User,
+)
 from liteads.management.api_key_service import ApiKeyService
 from liteads.schemas.management import (
     AdvertiserCreate,
@@ -23,6 +34,9 @@ from liteads.schemas.management import (
     CreativeCreate,
     CreativeResponse,
     CreativeUpdate,
+    PublisherApiKeyCreate,
+    PublisherApiKeyCreateResponse,
+    PublisherApiKeyResponse,
     PublisherCreate,
     PublisherReportingResponse,
     PublisherResponse,
@@ -386,3 +400,138 @@ async def publisher_reporting(
         earnings=earnings,
         ecpm=ecpm,
     )
+
+
+# ── Phase 4.2 — Publisher API key management ────────────────────────────────────
+
+@router.post(
+    "/publisher/{publisher_id}/keys",
+    response_model=ApiKeyResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_roles("admin", "publisher"))],
+    summary="Create an API key for a publisher",
+)
+async def create_api_key_for_publisher(
+    publisher_id: int,
+    payload: ApiKeyCreate,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiKeyResponse:
+    _assert_publisher_access(user, publisher_id)
+    if await session.get(Publisher, publisher_id) is None:
+        raise _not_found("Publisher", publisher_id)
+
+    db_key, raw_key = await ApiKeyService.create_api_key(session, publisher_id, payload)
+    return ApiKeyResponse(
+        id=db_key.id,
+        publisher_id=db_key.publisher_id,
+        name=db_key.name,
+        key_prefix=db_key.key_prefix,
+        raw_key=raw_key,
+        revoked_at=db_key.revoked_at,
+        created_at=db_key.created_at,
+        updated_at=db_key.updated_at,
+    )
+
+
+@router.post(
+    "/publisher/keys",
+    response_model=PublisherApiKeyCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_roles("admin", "publisher"))],
+    summary="Create a publisher API key",
+    description=(
+        "Generates a new API key for authenticating ad/event API calls from "
+        "third-party integrations and AI-platform server-to-server callers. "
+        "**The raw key is returned exactly once** — copy it now."
+    ),
+)
+async def create_publisher_api_key(
+    payload: PublisherApiKeyCreate,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> PublisherApiKeyCreateResponse:
+    pub_id = payload.publisher_id or user.id
+    _assert_publisher_access(user, pub_id)
+    if await session.get(Publisher, pub_id) is None:
+        raise _not_found("Publisher", pub_id)
+
+    key_name = payload.name or payload.label or "Default Key"
+    db_key, raw_key = await ApiKeyService.create_api_key(session, pub_id, ApiKeyCreate(name=key_name))
+    return PublisherApiKeyCreateResponse(
+        id=db_key.id,
+        publisher_id=db_key.publisher_id,
+        name=db_key.name,
+        label=db_key.name,
+        key_prefix=db_key.key_prefix,
+        status=db_key.status,
+        created_at=db_key.created_at,
+        raw_key=raw_key,
+    )
+
+
+@router.get(
+    "/publisher/{publisher_id}/keys",
+    response_model=list[ApiKeyResponse],
+    dependencies=[Depends(require_roles("admin", "publisher"))],
+    summary="List publisher API keys",
+)
+async def list_publisher_api_keys(
+    publisher_id: int,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[ApiKeyResponse]:
+    _assert_publisher_access(user, publisher_id)
+    if await session.get(Publisher, publisher_id) is None:
+        raise _not_found("Publisher", publisher_id)
+
+    keys = await ApiKeyService.list_api_keys(session, publisher_id)
+    return [
+        ApiKeyResponse(
+            id=k.id,
+            publisher_id=k.publisher_id,
+            name=k.name,
+            key_prefix=k.key_prefix,
+            revoked_at=k.revoked_at,
+            created_at=k.created_at,
+            updated_at=k.updated_at,
+        )
+        for k in keys
+    ]
+
+
+@router.delete(
+    "/publisher/{publisher_id}/keys/{key_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_roles("admin", "publisher"))],
+    summary="Revoke a publisher API key by publisher and key id",
+)
+async def revoke_publisher_api_key_by_pub(
+    publisher_id: int,
+    key_id: int,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    _assert_publisher_access(user, publisher_id)
+    success = await ApiKeyService.revoke_api_key(session, publisher_id, key_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"API key {key_id} not found or already revoked")
+
+
+@router.delete(
+    "/publisher/keys/{key_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_roles("admin", "publisher"))],
+    summary="Revoke a publisher API key",
+)
+async def revoke_publisher_api_key(
+    key_id: int,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    api_key = await session.get(PublisherApiKey, key_id)
+    if api_key is None:
+        raise HTTPException(status_code=404, detail=f"API key {key_id} not found")
+    _assert_publisher_access(user, api_key.publisher_id)
+    api_key.status = 0  # revoked
+    await session.flush()

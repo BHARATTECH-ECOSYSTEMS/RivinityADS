@@ -210,6 +210,69 @@ class ApiKeyResponse(ORMModel):
     name: str
     key_prefix: str
     raw_key: str | None = None
-    revoked_at: datetime | None
+    revoked_at: datetime | None = None
     created_at: datetime
-    updated_at: datetime
+    updated_at: datetime | None = None
+
+
+# ── Publisher API Key schemas (Phase 4.2 compatibility) ─────────────────────────
+
+class PublisherApiKeyCreate(BaseModel):
+    """Input for creating a new publisher API key."""
+
+    publisher_id: int | None = Field(default=None, gt=0, description="Publisher who owns this key")
+    label: str | None = Field(
+        default=None, min_length=1, max_length=128, description="Human-readable label"
+    )
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+
+    def __init__(self, **data):
+        if "label" in data and "name" not in data:
+            data["name"] = data["label"]
+        elif "name" in data and "label" not in data:
+            data["label"] = data["name"]
+        super().__init__(**data)
+
+
+class PublisherApiKeyResponse(ORMModel):
+    """Read-only view of a publisher API key."""
+
+    id: int
+    publisher_id: int
+    name: str | None = None
+    label: str | None = None
+    key_prefix: str
+    status: int = 1
+    revoked_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime | None = None
+
+    def __init__(self, **data):
+        if "name" in data and "label" not in data:
+            data["label"] = data["name"]
+        elif "label" in data and "name" not in data:
+            data["name"] = data["label"]
+        super().__init__(**data)
+
+
+class PublisherApiKeyCreateResponse(BaseModel):
+    """Returned exactly once when a key is created; contains the raw key."""
+
+    id: int
+    publisher_id: int
+    name: str | None = None
+    label: str | None = None
+    key_prefix: str
+    status: int = 1
+    created_at: datetime
+    raw_key: str = Field(
+        description="The full API key — copy it now, it cannot be retrieved again."
+    )
+
+    def __init__(self, **data):
+        if "name" in data and "label" not in data:
+            data["label"] = data["name"]
+        elif "label" in data and "name" not in data:
+            data["name"] = data["label"]
+        super().__init__(**data)
+
