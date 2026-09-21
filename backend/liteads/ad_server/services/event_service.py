@@ -15,6 +15,7 @@ from liteads.common.cache import CacheKeys, redis_client
 from liteads.common.logger import get_logger
 from liteads.common.utils import current_date, current_hour
 from liteads.models import AdEvent, AdSlot, Campaign, Creative, EventType, PublisherDailyStat
+from liteads.ad_server.services.billing import BillingService
 
 logger = get_logger(__name__)
 
@@ -63,11 +64,28 @@ class EventService:
 
             cost = self._calculate_cost(event_type_enum, campaign)
             
-            if campaign:
-                if campaign.updated_at.date() < datetime.now(timezone.utc).date():
-                    campaign.spent_today = 0
-                campaign.spent_today += cost
-                campaign.spent_total += cost
+            slot_id = extra.get("slot_id") if extra else None
+            publisher_id = None
+            if slot_id:
+                slot_res = await self.session.execute(select(AdSlot).where(AdSlot.slot_id == slot_id))
+                slot = slot_res.scalar_one_or_none()
+                if slot:
+                    publisher_id = slot.publisher_id
+            
+            if campaign and campaign.advertiser_id and publisher_id and cost > 0:
+                success_bill = await BillingService.process_impression_charge(
+                    self.session,
+                    advertiser_id=campaign.advertiser_id,
+                    campaign_id=campaign.id,
+                    publisher_id=publisher_id,
+                    cost=cost,
+                    reference_id=request_id
+                )
+                if not success_bill:
+                    logger.warning(f"Billing failed for event {request_id}")
+            elif campaign and campaign.updated_at.date() < datetime.now(timezone.utc).date():
+                campaign.spent_today = 0
+
 
             event = AdEvent(
                 request_id=request_id,

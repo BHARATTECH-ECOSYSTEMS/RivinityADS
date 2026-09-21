@@ -1,9 +1,10 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
-import { createSlot, listSlots, listPublisherAssignments, type SlotData, type PublisherAssignment } from "../../api/client";
+import { useAuth } from "../../auth/AuthContext";
+import { createSlot, listSlots, listPublisherAssignments, getPublisherLedger, requestPayout, type SlotData, type PublisherAssignment, type LedgerResponse } from "../../api/client";
 import Badge from "../../components/Badge";
 import StatCard from "../../components/StatCard";
-import { money } from "../../lib/format";
+import { money, dateString } from "../../lib/format";
 import { CREATIVE_TYPES } from "../../types";
 
 const FORMAT_SIZES: Record<number, { width: number; height: number }> = {
@@ -12,18 +13,24 @@ const FORMAT_SIZES: Record<number, { width: number; height: number }> = {
   3: { width: 320, height: 50 },
   4: { width: 300, height: 600 },
 };
-
 export default function PublisherDashboard() {
+  const { session } = useAuth();
   const [slots, setSlots] = useState<SlotData[]>([]);
   const [form, setForm] = useState({ slot_id: "", name: "", format: "1" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [assignments, setAssignments] = useState<PublisherAssignment[]>([]);
+  
+  const [ledger, setLedger] = useState<LedgerResponse | null>(null);
+  const [payoutAmount, setPayoutAmount] = useState<number | "">("");
 
   const reload = () => {
     listSlots().then(setSlots).catch(() => setSlots([]));
     listPublisherAssignments().then(setAssignments).catch(() => setAssignments([]));
+    if (session?.user.publisher_id) {
+        getPublisherLedger(session.user.publisher_id).then(setLedger).catch(console.error);
+    }
   };
 
   useEffect(() => { void reload(); }, []);
@@ -142,7 +149,7 @@ export default function PublisherDashboard() {
       </div>
 
       {/* Assigned Ads */}
-      <div className="card">
+      <div className="card" style={{ marginBottom: "24px" }}>
         <h2>Assigned Ads</h2>
         {assignments.length === 0 ? (
           <p className="muted">No campaigns are explicitly assigned to your slots.</p>
@@ -179,6 +186,53 @@ export default function PublisherDashboard() {
             </table>
           </div>
         )}
+      </div>
+
+      {/* Earnings & Payouts */}
+      <div className="card">
+          <div className="flex row space-between align-center" style={{ marginBottom: "16px" }}>
+              <h2 style={{ margin: 0 }}>Earnings & Payouts</h2>
+              <div style={{ fontSize: "1.25rem", fontWeight: 700 }}>
+                  Balance: {ledger ? money(ledger.balance) : "..."}
+              </div>
+          </div>
+          <div className="flex row gap" style={{ alignItems: "center", marginBottom: "24px" }}>
+              <input type="number" placeholder="Payout Amount ($)" value={payoutAmount} onChange={e => setPayoutAmount(Number(e.target.value) || "")} min={1} style={{ width: "200px" }} />
+              <button 
+                className="btn primary" 
+                onClick={async () => {
+                    if (!payoutAmount || payoutAmount <= 0) return;
+                    if (!session?.user.publisher_id) return;
+                    try {
+                        await requestPayout(session.user.publisher_id, Number(payoutAmount), `demo_out_${Date.now()}`);
+                        setPayoutAmount("");
+                        reload();
+                        alert("Payout requested successfully");
+                    } catch (err) {
+                        alert("Payout failed: " + (err instanceof Error ? err.message : String(err)));
+                    }
+                }} 
+                disabled={!payoutAmount || !!(ledger && Number(payoutAmount) > ledger.balance)}
+              >
+                  Request Payout
+              </button>
+          </div>
+          
+          <h3 style={{ marginBottom: "12px", fontSize: "14px" }}>Recent Transactions</h3>
+          {ledger?.transactions.length === 0 && <p className="muted" style={{ fontSize: "13px" }}>No transactions yet.</p>}
+          <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              {ledger?.transactions.slice(0, 10).map(tx => (
+                  <div key={tx.id} className="flex row space-between align-center" style={{ fontSize: "13px", paddingBottom: "8px", borderBottom: "1px solid var(--border)" }}>
+                      <div>
+                          <div style={{ fontWeight: 600 }}>{tx.type === 3 ? "Payout Request" : "Earnings / Other"}</div>
+                          <div className="muted">{dateString(tx.created_at)}</div>
+                      </div>
+                      <div style={{ fontWeight: 700, color: tx.amount > 0 ? "var(--success)" : "var(--fg)" }}>
+                          {tx.amount > 0 ? "+" : ""}{money(tx.amount)}
+                      </div>
+                  </div>
+              ))}
+          </div>
       </div>
     </div>
   );

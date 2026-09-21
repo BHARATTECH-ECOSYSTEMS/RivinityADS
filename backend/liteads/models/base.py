@@ -55,3 +55,11 @@ class EventType(IntEnum):
     IMPRESSION = 1
     CLICK = 2
     CONVERSION = 3
+
+
+class TransactionType(IntEnum):
+    """Financial transaction type enum."""
+    DEPOSIT = 1
+    SPEND = 2
+    PAYOUT = 3
+    REFUND = 4

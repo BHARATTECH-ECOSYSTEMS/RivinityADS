@@ -84,3 +84,10 @@ export const getReferenceStates = (country: string) => apiFetch<{code: string; n
 export const getReferenceCities = (country: string, state: string) => apiFetch<string[]>(`/api/v1/reference/locations/cities?country=${country}&state=${state}`);
 export const getReferencePincodes = (country: string, state: string, city: string) => apiFetch<string[]>(`/api/v1/reference/locations/pincodes?country=${country}&state=${state}&city=${city}`);
 
+// Finance APIs
+export interface TransactionResponse { id: number; type: number; amount: number; currency: string; advertiser_id?: number | null; publisher_id?: number | null; campaign_id?: number | null; reference_id?: string | null; description?: string | null; created_at: string; }
+export interface LedgerResponse { balance: number; transactions: TransactionResponse[]; }
+export const getAdvertiserLedger = (advertiserId: number) => apiFetch<LedgerResponse>(`/api/v1/finance/advertiser/${advertiserId}/ledger`);
+export const depositFunds = (advertiserId: number, amount: number, referenceId?: string) => apiFetch<TransactionResponse>(`/api/v1/finance/advertiser/${advertiserId}/deposit`, { method: "POST", body: JSON.stringify({ amount, reference_id: referenceId }) });
+export const getPublisherLedger = (publisherId: number) => apiFetch<LedgerResponse>(`/api/v1/finance/publisher/${publisherId}/ledger`);
+export const requestPayout = (publisherId: number, amount: number, referenceId?: string) => apiFetch<TransactionResponse>(`/api/v1/finance/publisher/${publisherId}/payout`, { method: "POST", body: JSON.stringify({ amount, reference_id: referenceId }) });

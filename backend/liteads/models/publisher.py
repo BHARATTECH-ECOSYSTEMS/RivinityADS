@@ -3,7 +3,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, Numeric, String
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, Numeric, String, JSON
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -20,6 +20,8 @@ class Publisher(Base, TimestampMixin):
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     site_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     status: Mapped[int] = mapped_column(Integer, default=Status.ACTIVE, nullable=False)
+    balance: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"), nullable=False)
+    payout_details: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     slots: Mapped[list["AdSlot"]] = relationship(
         "AdSlot", back_populates="publisher", cascade="all, delete-orphan", lazy="selectin"

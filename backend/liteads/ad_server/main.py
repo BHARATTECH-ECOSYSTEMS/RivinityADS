@@ -15,7 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from liteads.ad_server.middleware.metrics import MetricsMiddleware, metrics_endpoint
-from liteads.ad_server.routers import ad, auth, event, health, management, targeting, reference
+from liteads.ad_server.routers import ad, auth, event, health, management, targeting, reference, finance
 from liteads.common.cache import redis_client
 from liteads.common.config import get_settings
 from liteads.common.database import close_db, create_tables, init_db
@@ -182,6 +182,7 @@ def create_app() -> FastAPI:
     app.include_router(management.router, prefix="/api/v1", tags=["management"])
     app.include_router(targeting.router, prefix="/api/v1", tags=["targeting"])
     app.include_router(reference.router, prefix="/api/v1/reference", tags=["reference"])
+    app.include_router(finance.router, prefix="/api/v1", tags=["finance"])
 
     # Mount JS SDK & static assets so rivinity.js and liteads.js are served at /static/
     static_dir = _STATIC_DIR if _STATIC_DIR.exists() else Path(os.path.join(os.path.dirname(__file__), "..", "static"))
