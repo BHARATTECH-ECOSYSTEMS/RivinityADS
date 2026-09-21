@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
-import { createSlot, listSlots, type SlotData } from "../../api/client";
+import { createSlot, listSlots, listPublisherAssignments, type SlotData, type PublisherAssignment } from "../../api/client";
 import Badge from "../../components/Badge";
 import StatCard from "../../components/StatCard";
 import { money } from "../../lib/format";
@@ -19,7 +19,12 @@ export default function PublisherDashboard() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const reload = () => listSlots().then(setSlots).catch(() => setSlots([]));
+  const [assignments, setAssignments] = useState<PublisherAssignment[]>([]);
+
+  const reload = () => {
+    listSlots().then(setSlots).catch(() => setSlots([]));
+    listPublisherAssignments().then(setAssignments).catch(() => setAssignments([]));
+  };
 
   useEffect(() => { void reload(); }, []);
 
@@ -133,6 +138,46 @@ export default function PublisherDashboard() {
               ))}
             </tbody>
           </table>
+        )}
+      </div>
+
+      {/* Assigned Ads */}
+      <div className="card">
+        <h2>Assigned Ads</h2>
+        {assignments.length === 0 ? (
+          <p className="muted">No campaigns are explicitly assigned to your slots.</p>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Campaign</th>
+                  <th>Advertiser</th>
+                  <th>Slot</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {assignments.map((a) => (
+                  <tr key={a.id}>
+                    <td><b>{a.campaign_name}</b></td>
+                    <td>{a.advertiser_name}</td>
+                    <td className="muted">{a.slot_id ? `${a.slot_name} (${a.slot_id})` : "All eligible slots"}</td>
+                    <td>{a.status}</td>
+                    <td>
+                      <Link
+                        to={`/publisher/preview${a.slot_id ? `?slot_id=${encodeURIComponent(a.slot_id)}` : ""}`}
+                        className="btn secondary small"
+                      >
+                        Preview
+                      </Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>

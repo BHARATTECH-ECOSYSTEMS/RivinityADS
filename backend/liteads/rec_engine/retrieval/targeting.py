@@ -51,7 +51,7 @@ class TargetingRetrieval(BaseRetrieval):
         5. Return matching candidates
         """
         # Resolve slot dimensions and format for size matching
-        slot_width, slot_height, slot_format = await self._get_slot_info(slot_id)
+        slot_width, slot_height, slot_format, publisher_id = await self._get_slot_info(slot_id)
 
         # Get active campaigns (with caching)
         campaigns = await self._get_active_campaigns()
@@ -63,6 +63,19 @@ class TargetingRetrieval(BaseRetrieval):
         candidates: list[AdCandidate] = []
 
         for campaign_data in campaigns:
+            # Enforce explicit campaign assignments if any exist
+            assignments = campaign_data.get("assignments", [])
+            if assignments and publisher_id is not None:
+                is_assigned = False
+                for assignment in assignments:
+                    if assignment["publisher_id"] == publisher_id:
+                        # If assignment has no specific slot, or matches current slot exactly
+                        if assignment["slot_id"] is None or assignment["slot_id"] == slot_id:
+                            is_assigned = True
+                            break
+                if not is_assigned:
+                    continue
+            
             # Check if campaign matches user targeting
             if not self._match_targeting(campaign_data, user_context):
                 continue
@@ -117,8 +130,8 @@ class TargetingRetrieval(BaseRetrieval):
         logger.debug(f"Retrieved {len(candidates)} candidates from targeting")
         return candidates
 
-    async def _get_slot_info(self, slot_id: str) -> tuple[int, int, int | None]:
-        """Resolve an ad slot's width, height, and format from the database."""
+    async def _get_slot_info(self, slot_id: str) -> tuple[int, int, int | None, int | None]:
+        """Resolve an ad slot's width, height, format, and publisher_id from the database."""
         try:
             from liteads.models import AdSlot
             result = await self.session.execute(
@@ -126,10 +139,10 @@ class TargetingRetrieval(BaseRetrieval):
             )
             slot = result.scalar_one_or_none()
             if slot:
-                return (slot.width or 0, slot.height or 0, slot.format)
+                return (slot.width or 0, slot.height or 0, slot.format, slot.publisher_id)
         except Exception as e:
             logger.debug(f"Could not resolve slot info for {slot_id}: {e}")
-        return 0, 0, None
+        return 0, 0, None, None
 
     async def _get_active_campaigns(self) -> list[dict[str, Any]]:
         """Get all active campaigns with creatives and targeting rules."""
@@ -176,7 +189,15 @@ class TargetingRetrieval(BaseRetrieval):
                 "freq_cap_hourly": campaign.freq_cap_hourly,
                 "creatives": [],
                 "targeting_rules": [],
+                "assignments": [],
             }
+
+            # Add assignments
+            for assignment in getattr(campaign, "assignments", []):
+                campaign_data["assignments"].append({
+                    "publisher_id": assignment.publisher_id,
+                    "slot_id": assignment.slot_id,
+                })
 
             # Add creatives
             for creative in campaign.creatives:

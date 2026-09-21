@@ -63,6 +63,15 @@ export const createPublisher = (payload: PublisherInput) => apiFetch<Publisher>(
 export const updatePublisher = (id: number, payload: Partial<Publisher>) => apiFetch<Publisher>(`/api/v1/publisher/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
 export const setPublisherStatus = (id: number, status: number) => updatePublisher(id, { status });
 
+// Campaign Assignments
+export interface CampaignAssignment { id: number; campaign_id: number; publisher_id: number; slot_id: string | null; }
+export interface CampaignAssignmentInput { campaign_id: number; publisher_id: number; slot_id?: string | null; }
+export const listCampaignAssignments = (campaignId: number) => apiFetch<CampaignAssignment[]>(`/api/v1/campaign/${campaignId}/assignments`);
+export const createCampaignAssignment = (campaignId: number, payload: CampaignAssignmentInput) => apiFetch<CampaignAssignment>(`/api/v1/campaign/${campaignId}/assignments`, { method: "POST", body: JSON.stringify(payload) });
+export const deleteCampaignAssignment = (campaignId: number, assignmentId: number) => apiFetch<{success: boolean}>(`/api/v1/campaign/${campaignId}/assignments/${assignmentId}`, { method: "DELETE" });
+
+export interface PublisherAssignment { id: number; campaign_id: number; campaign_name: string; advertiser_name: string; slot_id: string | null; slot_name: string | null; status: string; }
+export const listPublisherAssignments = () => apiFetch<PublisherAssignment[]>("/api/v1/publisher/assignments");
 // Targeting and References
 export interface GeoEntry { country: string; state?: string | null; city?: string | null; pincode?: string | null; }
 export interface TargetingSet { geo_include: GeoEntry[]; geo_exclude: GeoEntry[]; sector_include: string[]; sector_exclude: string[]; }

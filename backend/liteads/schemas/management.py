@@ -276,3 +276,26 @@ class PublisherApiKeyCreateResponse(BaseModel):
             data["name"] = data["label"]
         super().__init__(**data)
 
+
+class CampaignAssignmentCreate(BaseModel):
+    campaign_id: int = Field(gt=0)
+    publisher_id: int = Field(gt=0)
+    slot_id: str | None = None
+
+
+class CampaignAssignmentResponse(ORMModel):
+    id: int
+    campaign_id: int
+    publisher_id: int
+    slot_id: str | None
+    created_at: datetime
+    updated_at: datetime
+
+class PublisherAssignmentResponse(BaseModel):
+    id: int
+    campaign_id: int
+    campaign_name: str
+    advertiser_name: str
+    slot_id: str | None = None
+    slot_name: str | None = None
+    status: str

@@ -98,6 +98,9 @@ class Campaign(Base, TimestampMixin):
     targeting_rules: Mapped[list["TargetingRule"]] = relationship(
         "TargetingRule", back_populates="campaign", lazy="selectin"
     )
+    assignments: Mapped[list["CampaignAssignment"]] = relationship(
+        "CampaignAssignment", back_populates="campaign", lazy="selectin", cascade="all, delete-orphan"
+    )
 
     @property
     def is_active(self) -> bool:
@@ -214,4 +217,25 @@ class AdEvent(Base, TimestampMixin):
     ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
     cost: Mapped[Decimal] = mapped_column(
         Numeric(10, 6), default=Decimal("0"), nullable=False
+    )
+
+
+class CampaignAssignment(Base, TimestampMixin):
+    """Explicit assignment of a campaign to a publisher and optionally a specific ad slot."""
+
+    __tablename__ = "campaign_assignments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    campaign_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False
+    )
+    publisher_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("publishers.id", ondelete="CASCADE"), nullable=False
+    )
+    slot_id: Mapped[str | None] = mapped_column(
+        String(255), ForeignKey("ad_slots.slot_id", ondelete="CASCADE"), nullable=True
+    )
+
+    campaign: Mapped["Campaign"] = relationship(
+        "Campaign", back_populates="assignments"
     )

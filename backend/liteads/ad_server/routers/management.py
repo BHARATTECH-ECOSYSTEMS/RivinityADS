@@ -15,6 +15,7 @@ from liteads.models import (
     AdSlot,
     Advertiser,
     Campaign,
+    CampaignAssignment,
     Creative,
     Publisher,
     PublisherApiKey,
@@ -28,6 +29,8 @@ from liteads.schemas.management import (
     AdvertiserUpdate,
     ApiKeyCreate,
     ApiKeyResponse,
+    CampaignAssignmentCreate,
+    CampaignAssignmentResponse,
     CampaignCreate,
     CampaignResponse,
     CampaignUpdate,
@@ -44,6 +47,7 @@ from liteads.schemas.management import (
     SlotCreate,
     SlotResponse,
     SlotUpdate,
+    PublisherAssignmentResponse,
 )
 
 router = APIRouter(dependencies=[Depends(current_user)])
@@ -168,6 +172,54 @@ async def update_campaign(
     return campaign
 
 
+@router.get("/campaign/{campaign_id}/assignments", response_model=list[CampaignAssignmentResponse], dependencies=[Depends(require_roles("admin"))])
+async def list_campaign_assignments(
+    campaign_id: int, session: AsyncSession = Depends(get_session)
+) -> list[CampaignAssignment]:
+    campaign = await session.get(Campaign, campaign_id)
+    if campaign is None:
+        raise _not_found("Campaign", campaign_id)
+    query = select(CampaignAssignment).where(CampaignAssignment.campaign_id == campaign_id).order_by(CampaignAssignment.id)
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
+@router.post("/campaign/{campaign_id}/assignments", response_model=CampaignAssignmentResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin"))])
+async def create_campaign_assignment(
+    campaign_id: int, payload: CampaignAssignmentCreate, session: AsyncSession = Depends(get_session)
+) -> CampaignAssignment:
+    if payload.campaign_id != campaign_id:
+        raise HTTPException(status_code=400, detail="Campaign ID mismatch")
+    campaign = await session.get(Campaign, campaign_id)
+    if campaign is None:
+        raise _not_found("Campaign", campaign_id)
+    publisher = await session.get(Publisher, payload.publisher_id)
+    if publisher is None:
+        raise _not_found("Publisher", payload.publisher_id)
+    if payload.slot_id:
+        query = select(AdSlot).where(AdSlot.slot_id == payload.slot_id, AdSlot.publisher_id == payload.publisher_id)
+        result = await session.execute(query)
+        slot = result.scalar_one_or_none()
+        if slot is None:
+            raise HTTPException(status_code=400, detail="AdSlot does not exist or does not belong to the publisher")
+    
+    assignment = CampaignAssignment(**payload.model_dump())
+    session.add(assignment)
+    await session.flush()
+    return assignment
+
+
+@router.delete("/campaign/{campaign_id}/assignments/{assignment_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles("admin"))])
+async def delete_campaign_assignment(
+    campaign_id: int, assignment_id: int, session: AsyncSession = Depends(get_session)
+) -> None:
+    assignment = await session.get(CampaignAssignment, assignment_id)
+    if assignment is None or assignment.campaign_id != campaign_id:
+        raise _not_found("CampaignAssignment", assignment_id)
+    await session.delete(assignment)
+    await session.flush()
+
+
 @router.get("/creative", response_model=list[CreativeResponse], dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def list_creatives(
     campaign_id: int,
@@ -246,6 +298,53 @@ async def create_publisher(
     session.add(publisher)
     await session.flush()
     return publisher
+
+
+@router.get("/publisher/assignments", response_model=list[PublisherAssignmentResponse], dependencies=[Depends(require_roles("publisher"))])
+async def get_publisher_assignments(
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[PublisherAssignmentResponse]:
+    if not user.publisher_id:
+        raise HTTPException(status_code=403, detail="Not a publisher")
+
+    query = (
+        select(
+            CampaignAssignment.id,
+            CampaignAssignment.campaign_id,
+            Campaign.name.label("campaign_name"),
+            Advertiser.name.label("advertiser_name"),
+            CampaignAssignment.slot_id,
+            AdSlot.name.label("slot_name"),
+            Campaign.status
+        )
+        .join(Campaign, CampaignAssignment.campaign_id == Campaign.id)
+        .join(Advertiser, Campaign.advertiser_id == Advertiser.id)
+        .outerjoin(
+            AdSlot,
+            (CampaignAssignment.slot_id == AdSlot.slot_id) &
+            (CampaignAssignment.publisher_id == AdSlot.publisher_id)
+        )
+        .where(CampaignAssignment.publisher_id == user.publisher_id)
+        .order_by(CampaignAssignment.id)
+    )
+    result = await session.execute(query)
+    
+    status_map = {0: "Paused", 1: "Active", 2: "Completed", 3: "Archived"}
+    
+    response = []
+    for row in result.all():
+        status_str = status_map.get(row.status, "Unknown")
+        response.append(PublisherAssignmentResponse(
+            id=row.id,
+            campaign_id=row.campaign_id,
+            campaign_name=row.campaign_name,
+            advertiser_name=row.advertiser_name,
+            slot_id=row.slot_id,
+            slot_name=row.slot_name,
+            status=status_str
+        ))
+    return response
 
 
 @router.get("/publisher/{publisher_id}", response_model=PublisherResponse, dependencies=[Depends(require_roles("admin", "publisher"))])
