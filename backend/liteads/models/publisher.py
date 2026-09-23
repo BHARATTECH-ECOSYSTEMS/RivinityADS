@@ -32,6 +32,28 @@ class Publisher(Base, TimestampMixin):
     api_keys: Mapped[list["PublisherApiKey"]] = relationship(
         "PublisherApiKey", back_populates="publisher", cascade="all, delete-orphan"
     )
+    properties: Mapped[list["PublisherProperty"]] = relationship(
+        "PublisherProperty", back_populates="publisher", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class PublisherProperty(Base, TimestampMixin):
+    """A website or app owned by a publisher."""
+
+    __tablename__ = "publisher_properties"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    publisher_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("publishers.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    domain: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[int] = mapped_column(Integer, default=Status.ACTIVE, nullable=False)
+
+    publisher: Mapped["Publisher"] = relationship("Publisher", back_populates="properties")
+    slots: Mapped[list["AdSlot"]] = relationship(
+        "AdSlot", back_populates="property", cascade="all, delete-orphan", lazy="selectin"
+    )
 
 
 class AdSlot(Base, TimestampMixin):
@@ -49,8 +71,13 @@ class AdSlot(Base, TimestampMixin):
     width: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     height: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     status: Mapped[int] = mapped_column(Integer, default=Status.ACTIVE, nullable=False)
+    floor_price: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"), nullable=False)
+    property_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("publisher_properties.id", ondelete="SET NULL"), nullable=True
+    )
 
     publisher: Mapped[Publisher] = relationship("Publisher", back_populates="slots")
+    property: Mapped["PublisherProperty"] = relationship("PublisherProperty", back_populates="slots")
 
 
 class PublisherApiKey(Base, TimestampMixin):
@@ -124,5 +151,9 @@ class PublisherDailyStat(Base, TimestampMixin):
     clicks: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     conversions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     earnings: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"), nullable=False)
+    slot_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("ad_slots.id", ondelete="CASCADE"), nullable=True
+    )
 
     publisher: Mapped[Publisher] = relationship("Publisher", back_populates="daily_stats")
+    slot: Mapped["AdSlot"] = relationship("AdSlot")

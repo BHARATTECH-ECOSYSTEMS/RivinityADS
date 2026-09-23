@@ -237,7 +237,10 @@ class RecommendationEngine:
 
             # 4. Ranking
             with Timer() as ranking_timer:
-                candidates = self.bidding.rank(candidates)
+                candidates = self.bidding.rank(
+                    candidates,
+                    floor_price=kwargs.get("floor_price", 0.0)
+                )
             metrics.ranking_ms = ranking_timer.elapsed_ms
             metrics.post_ranking_count = len(candidates)
 

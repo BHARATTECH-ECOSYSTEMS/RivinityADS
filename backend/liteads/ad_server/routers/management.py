@@ -20,6 +20,7 @@ from liteads.models import (
     Publisher,
     PublisherApiKey,
     PublisherDailyStat,
+    PublisherProperty,
     User,
 )
 from liteads.management.api_key_service import ApiKeyService
@@ -41,6 +42,9 @@ from liteads.schemas.management import (
     PublisherApiKeyCreateResponse,
     PublisherApiKeyResponse,
     PublisherCreate,
+    PublisherPropertyCreate,
+    PublisherPropertyResponse,
+    PublisherPropertyUpdate,
     PublisherReportingResponse,
     PublisherResponse,
     PublisherUpdate,
@@ -499,6 +503,76 @@ async def publisher_reporting(
         earnings=earnings,
         ecpm=ecpm,
     )
+
+
+@router.get("/publisher/{publisher_id}/property", response_model=list[PublisherPropertyResponse], dependencies=[Depends(require_roles("admin", "publisher"))])
+async def list_publisher_properties(
+    publisher_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+) -> list[PublisherProperty]:
+    _assert_publisher_access(user, publisher_id)
+    query = select(PublisherProperty).where(PublisherProperty.publisher_id == publisher_id).order_by(PublisherProperty.id)
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
+@router.post("/publisher/{publisher_id}/property", response_model=PublisherPropertyResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin", "publisher"))])
+async def create_publisher_property(
+    publisher_id: int, payload: PublisherPropertyCreate, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+) -> PublisherProperty:
+    _assert_publisher_access(user, publisher_id)
+    if await session.get(Publisher, publisher_id) is None:
+        raise _not_found("Publisher", publisher_id)
+    data = payload.model_dump()
+    data["publisher_id"] = publisher_id
+    property_obj = PublisherProperty(**data)
+    session.add(property_obj)
+    await session.flush()
+    return property_obj
+
+
+@router.get("/publisher/property/{property_id}", response_model=PublisherPropertyResponse, dependencies=[Depends(require_roles("admin", "publisher"))])
+async def get_publisher_property(
+    property_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+) -> PublisherProperty:
+    property_obj = await session.get(PublisherProperty, property_id)
+    if property_obj is None:
+        raise _not_found("PublisherProperty", property_id)
+    _assert_publisher_access(user, property_obj.publisher_id)
+    return property_obj
+
+
+@router.patch("/publisher/property/{property_id}", response_model=PublisherPropertyResponse, dependencies=[Depends(require_roles("admin", "publisher"))])
+async def update_publisher_property(
+    property_id: int, payload: PublisherPropertyUpdate, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+) -> PublisherProperty:
+    property_obj = await session.get(PublisherProperty, property_id)
+    if property_obj is None:
+        raise _not_found("PublisherProperty", property_id)
+    _assert_publisher_access(user, property_obj.publisher_id)
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        setattr(property_obj, key, value)
+    await session.flush()
+    return property_obj
+
+
+@router.get("/slot/{slot_id}/tag", dependencies=[Depends(require_roles("admin", "publisher"))])
+async def generate_slot_tag(
+    slot_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+):
+    slot = await session.get(AdSlot, slot_id)
+    if slot is None:
+        raise _not_found("Slot", slot_id)
+    _assert_publisher_access(user, slot.publisher_id)
+    
+    script = f'''<script async src="http://localhost:8000/api/v1/sdk.js"></script>
+<div id="liteads-ad-{slot.slot_id}" class="liteads-ad-slot" data-slot-id="{slot.slot_id}"></div>
+<script>
+  (window.LiteAds = window.LiteAds || []).push({{
+    slotId: "{slot.slot_id}",
+    containerId: "liteads-ad-{slot.slot_id}"
+  }});
+</script>'''
+    return {"html": script}
 
 
 # ── Phase 4.2 — Publisher API key management ────────────────────────────────────

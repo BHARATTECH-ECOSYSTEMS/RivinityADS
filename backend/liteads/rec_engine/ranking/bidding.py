@@ -122,6 +122,7 @@ class Bidding:
         self,
         candidates: list[AdCandidate],
         apply_ecpm: bool = True,
+        floor_price: float = 0.0,
     ) -> list[AdCandidate]:
         """
         Rank candidates by score.
@@ -140,6 +141,9 @@ class Bidding:
             if apply_ecpm:
                 candidate.ecpm = self.calculate_ecpm(candidate)
             candidate.score = self.calculate_score(candidate)
+
+        if floor_price > 0:
+            candidates = [c for c in candidates if c.ecpm >= floor_price]
 
         # Sort by score descending
         ranked = sorted(candidates, key=lambda c: c.score, reverse=True)

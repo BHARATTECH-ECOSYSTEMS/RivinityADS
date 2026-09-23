@@ -158,39 +158,69 @@ class PublisherResponse(ORMModel):
     updated_at: datetime
 
 
+class PublisherPropertyCreate(BaseModel):
+    publisher_id: int | None = Field(default=None, gt=0)
+    name: str = Field(min_length=1, max_length=255)
+    domain: str = Field(min_length=1, max_length=255)
+    status: int = Field(default=1, ge=0, le=4)
+
+
+class PublisherPropertyUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    domain: str | None = Field(default=None, min_length=1, max_length=255)
+    status: int | None = Field(default=None, ge=0, le=4)
+
+
+class PublisherPropertyResponse(ORMModel):
+    id: int
+    publisher_id: int
+    name: str
+    domain: str
+    status: int
+    created_at: datetime
+    updated_at: datetime
+
+
 class SlotCreate(BaseModel):
     publisher_id: int | None = Field(default=None, gt=0)
+    property_id: int | None = None
     slot_id: str = Field(min_length=1, max_length=255)
     name: str = Field(min_length=1, max_length=255)
     format: int = Field(default=1, ge=1, le=4)
     width: int = Field(default=0, ge=0)
     height: int = Field(default=0, ge=0)
     status: int = Field(default=1, ge=0, le=4)
+    floor_price: Decimal = Field(default=Decimal("0.0"), ge=0)
 
 
 class SlotUpdate(BaseModel):
+    property_id: int | None = None
     name: str | None = Field(default=None, min_length=1, max_length=255)
     format: int | None = Field(default=None, ge=1, le=4)
     width: int | None = Field(default=None, ge=0)
     height: int | None = Field(default=None, ge=0)
     status: int | None = Field(default=None, ge=0, le=4)
+    floor_price: Decimal | None = Field(default=None, ge=0)
 
 
 class SlotResponse(ORMModel):
     id: int
     publisher_id: int
+    property_id: int | None = None
     slot_id: str
     name: str
     format: int
     width: int
     height: int
     status: int
+    floor_price: Decimal
     created_at: datetime
     updated_at: datetime
 
 
 class PublisherReportingResponse(BaseModel):
     publisher_id: int
+    slot_id: int | None = None
     start_date: date
     end_date: date
     impressions: int

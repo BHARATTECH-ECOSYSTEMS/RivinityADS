@@ -53,15 +53,36 @@ export const updateCampaign = (id: number, payload: Partial<Campaign>) => apiFet
 export const setCampaignStatus = (id: number, status: number) => updateCampaign(id, { status });
 export const listCreatives = (campaignId: number) => apiFetch<Creative[]>(`/api/v1/creative?campaign_id=${campaignId}`);
 export const createCreative = (payload: CreativeInput) => apiFetch<Creative>("/api/v1/creative", { method: "POST", body: JSON.stringify(payload) });
-export interface SlotData { id: number; publisher_id: number; slot_id: string; name: string; format: number; width: number; height: number; status: number; }
-export interface SlotInput { slot_id: string; name: string; format: number; width: number; height: number; }
+export interface SlotData { id: number; publisher_id: number; property_id: number | null; slot_id: string; name: string; format: number; width: number; height: number; status: number; floor_price: number; }
+export interface SlotInput { slot_id: string; name: string; format: number; width: number; height: number; property_id?: number | null; floor_price?: number; }
 export interface PublisherInput { name: string; email?: string; site_url?: string; }
 export const listSlots = (publisherId?: number) => apiFetch<SlotData[]>(`/api/v1/slot${publisherId ? `?publisher_id=${publisherId}` : ""}`);
 export const createSlot = (payload: SlotInput) => apiFetch<SlotData>("/api/v1/slot", { method: "POST", body: JSON.stringify(payload) });
+export const updateSlot = (id: number, payload: Partial<SlotInput>) => apiFetch<SlotData>(`/api/v1/slot/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
 export const listPublishers = () => apiFetch<Publisher[]>("/api/v1/publisher");
 export const createPublisher = (payload: PublisherInput) => apiFetch<Publisher>("/api/v1/publisher", { method: "POST", body: JSON.stringify(payload) });
 export const updatePublisher = (id: number, payload: Partial<Publisher>) => apiFetch<Publisher>(`/api/v1/publisher/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
 export const setPublisherStatus = (id: number, status: number) => updatePublisher(id, { status });
+
+// Publisher Properties
+export interface PublisherProperty { id: number; publisher_id: number; name: string; domain: string; status: number; }
+export interface PublisherPropertyInput { name: string; domain: string; status?: number; }
+export const listPublisherProperties = (publisherId: number) => apiFetch<PublisherProperty[]>(`/api/v1/publisher/${publisherId}/property`);
+export const createPublisherProperty = (publisherId: number, payload: PublisherPropertyInput) => apiFetch<PublisherProperty>(`/api/v1/publisher/${publisherId}/property`, { method: "POST", body: JSON.stringify(payload) });
+export const updatePublisherProperty = (propertyId: number, payload: Partial<PublisherPropertyInput>) => apiFetch<PublisherProperty>(`/api/v1/publisher/property/${propertyId}`, { method: "PATCH", body: JSON.stringify(payload) });
+
+// Publisher Ad Units (Tags)
+export const generateSlotTag = (slotId: number) => apiFetch<{html: string}>(`/api/v1/slot/${slotId}/tag`);
+
+// Publisher Reporting
+export interface PublisherReporting { publisher_id: number; start_date: string; end_date: string; impressions: number; clicks: number; conversions: number; earnings: number; ecpm: number; }
+export const getPublisherReporting = (publisherId: number, startDate?: string, endDate?: string) => {
+    const params = new URLSearchParams();
+    if (startDate) params.append("start_date", startDate);
+    if (endDate) params.append("end_date", endDate);
+    const qs = params.toString();
+    return apiFetch<PublisherReporting>(`/api/v1/publisher/${publisherId}/reporting${qs ? `?${qs}` : ""}`);
+};
 
 // Campaign Assignments
 export interface CampaignAssignment { id: number; campaign_id: number; publisher_id: number; slot_id: string | null; }

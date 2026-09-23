@@ -66,11 +66,27 @@ class AdService:
         # Build user context
         user_context = await self._build_user_context(request)
 
+        # Get floor price for the slot
+        floor_price = 0.0
+        if request.slot_id:
+            try:
+                from liteads.models import AdSlot
+                from sqlalchemy import select
+                slot_res = await self.session.execute(
+                    select(AdSlot.floor_price).where(AdSlot.slot_id == request.slot_id)
+                )
+                fp = slot_res.scalar_one_or_none()
+                if fp is not None:
+                    floor_price = float(fp)
+            except Exception as e:
+                logger.debug(f"Could not fetch floor price for {request.slot_id}: {e}")
+
         # Get recommendations
         candidates, metrics = await self.engine.recommend(
             user_context=user_context,
             slot_id=request.slot_id,
             num_ads=request.num_ads,
+            floor_price=floor_price,
         )
 
         # STEP 4.1 — per-request format selection
