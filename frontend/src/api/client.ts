@@ -75,13 +75,25 @@ export const updatePublisherProperty = (propertyId: number, payload: Partial<Pub
 export const generateSlotTag = (slotId: number) => apiFetch<{html: string}>(`/api/v1/slot/${slotId}/tag`);
 
 // Publisher Reporting
-export interface PublisherReporting { publisher_id: number; start_date: string; end_date: string; impressions: number; clicks: number; conversions: number; earnings: number; ecpm: number; }
+export interface DailyStat { stat_date: string; impressions: number; clicks: number; conversions: number; spend?: number; earnings?: number; }
+export interface PublisherReporting { publisher_id: number; start_date: string; end_date: string; impressions: number; clicks: number; conversions: number; earnings: number; ecpm: number; daily_breakdown: DailyStat[]; }
 export const getPublisherReporting = (publisherId: number, startDate?: string, endDate?: string) => {
     const params = new URLSearchParams();
     if (startDate) params.append("start_date", startDate);
     if (endDate) params.append("end_date", endDate);
     const qs = params.toString();
     return apiFetch<PublisherReporting>(`/api/v1/publisher/${publisherId}/reporting${qs ? `?${qs}` : ""}`);
+};
+
+// Advertiser Reporting
+export interface AdvertiserReporting { advertiser_id: number; campaign_id?: number; start_date: string; end_date: string; impressions: number; clicks: number; conversions: number; spend: number; ctr: number; cvr: number; daily_breakdown: DailyStat[]; }
+export const getAdvertiserReporting = (advertiserId: number, startDate?: string, endDate?: string, campaignId?: number) => {
+    const params = new URLSearchParams();
+    if (startDate) params.append("start_date", startDate);
+    if (endDate) params.append("end_date", endDate);
+    if (campaignId) params.append("campaign_id", campaignId.toString());
+    const qs = params.toString();
+    return apiFetch<AdvertiserReporting>(`/api/v1/advertiser/${advertiserId}/reporting${qs ? `?${qs}` : ""}`);
 };
 
 // Campaign Assignments
@@ -112,3 +124,20 @@ export const getAdvertiserLedger = (advertiserId: number) => apiFetch<LedgerResp
 export const depositFunds = (advertiserId: number, amount: number, referenceId?: string) => apiFetch<TransactionResponse>(`/api/v1/finance/advertiser/${advertiserId}/deposit`, { method: "POST", body: JSON.stringify({ amount, reference_id: referenceId }) });
 export const getPublisherLedger = (publisherId: number) => apiFetch<LedgerResponse>(`/api/v1/finance/publisher/${publisherId}/ledger`);
 export const requestPayout = (publisherId: number, amount: number, referenceId?: string) => apiFetch<TransactionResponse>(`/api/v1/finance/publisher/${publisherId}/payout`, { method: "POST", body: JSON.stringify({ amount, reference_id: referenceId }) });
+// API Keys
+export interface ApiKey { id: number; publisher_id: number; name: string; key_prefix: string; status: number; created_at: string; revoked_at: string | null; }
+export interface ApiKeyCreateResponse extends ApiKey { raw_key: string; }
+export const listPublisherApiKeys = (publisherId: number) => apiFetch<ApiKey[]>(`/api/v1/publisher/${publisherId}/keys`);
+export const createPublisherApiKey = (publisherId: number, name: string) => apiFetch<ApiKeyCreateResponse>(`/api/v1/publisher/keys`, { method: "POST", body: JSON.stringify({ publisher_id: publisherId, name, label: name }) });
+export const revokePublisherApiKey = (publisherId: number, keyId: number) => apiFetch<void>(`/api/v1/publisher/${publisherId}/keys/${keyId}`, { method: "DELETE" });
+
+// Webhooks
+export interface Webhook { id: number; owner_type: string; owner_id: number; url: string; events: string[]; is_active: boolean; created_at: string; updated_at: string; }
+export interface WebhookCreateResponse extends Webhook { secret: string; }
+export interface WebhookInput { url: string; events: string[]; is_active?: boolean; }
+export const listWebhooks = () => apiFetch<Webhook[]>("/api/v1/webhooks");
+export const createWebhook = (payload: WebhookInput) => apiFetch<WebhookCreateResponse>("/api/v1/webhooks", { method: "POST", body: JSON.stringify(payload) });
+export const updateWebhook = (id: number, payload: Partial<WebhookInput>) => apiFetch<Webhook>(`/api/v1/webhooks/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
+export const deleteWebhook = (id: number) => apiFetch<void>(`/api/v1/webhooks/${id}`, { method: "DELETE" });
+export const testWebhook = (id: number, payload?: any) => apiFetch<{success: boolean; status_code?: number; response?: string}>(`/api/v1/webhooks/${id}/test`, { method: "POST", body: payload ? JSON.stringify(payload) : undefined });
+

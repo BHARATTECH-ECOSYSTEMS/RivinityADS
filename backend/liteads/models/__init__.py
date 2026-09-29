@@ -15,6 +15,7 @@ from liteads.models.geo import GeoLocation
 from liteads.models.publisher import AdSlot, Publisher, PublisherApiKey, PublisherDailyStat, PublisherProperty
 from liteads.models.auth import AuditLog, OneTimeToken, RefreshToken, User
 from liteads.models.finance import Transaction, PlatformSettings
+from liteads.models.webhook import Webhook
 from liteads.models.base import (
     Base,
     BidType,
@@ -55,4 +56,5 @@ __all__ = [
     "GeoLocation",
     "Transaction",
     "PlatformSettings",
+    "Webhook",
 ]

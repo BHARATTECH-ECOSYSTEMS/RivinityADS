@@ -113,6 +113,20 @@ class EventService:
             if event_type_enum == EventType.IMPRESSION and user_id:
                 await self._update_frequency(user_id, campaign_id)
 
+            # ── Webhook dispatch (fire-and-forget background tasks) ──────
+            await self._dispatch_webhooks(
+                event_type=event_type,
+                request_id=request_id,
+                ad_id=ad_id,
+                campaign_id=campaign_id,
+                creative_id=creative_id,
+                user_id=user_id,
+                cost=cost,
+                advertiser_id=campaign.advertiser_id if campaign else None,
+                publisher_id=publisher_id,
+                extra=extra,
+            )
+
             logger.info(
                 "Event tracked",
                 event_id=event.id,
@@ -285,3 +299,43 @@ class EventService:
                 await user_profile.record_activity(user_id, sectors, event_type)
         except Exception as e:
             logger.error(f"Failed to update user profile: {e}")
+
+    async def _dispatch_webhooks(
+        self,
+        event_type: str,
+        request_id: str,
+        ad_id: str,
+        campaign_id: int | None,
+        creative_id: int | None,
+        user_id: str | None,
+        cost: float,
+        advertiser_id: int | None,
+        publisher_id: int | None,
+        extra: dict[str, Any] | None,
+    ) -> None:
+        """Helper to invoke the async webhook dispatcher."""
+        try:
+            from liteads.ad_server.services.webhook_dispatcher import build_event_payload, dispatch_webhooks
+            from liteads.common.database import db
+
+            payload = build_event_payload(
+                event_type=event_type,
+                request_id=request_id,
+                ad_id=ad_id,
+                campaign_id=campaign_id,
+                creative_id=creative_id,
+                user_id=user_id,
+                cost=cost,
+                extra=extra,
+            )
+
+            await dispatch_webhooks(
+                session=self.session,
+                event_type=event_type,
+                payload=payload,
+                advertiser_id=advertiser_id,
+                publisher_id=publisher_id,
+                session_factory=db.session_factory,
+            )
+        except Exception as e:
+            logger.error(f"Webhook dispatch failed: {e}")

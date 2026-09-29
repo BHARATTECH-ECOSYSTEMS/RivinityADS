@@ -218,6 +218,15 @@ class SlotResponse(ORMModel):
     updated_at: datetime
 
 
+class DailyStatResponse(BaseModel):
+    stat_date: date
+    impressions: int
+    clicks: int
+    conversions: int
+    spend: Decimal | None = None
+    earnings: Decimal | None = None
+
+
 class PublisherReportingResponse(BaseModel):
     publisher_id: int
     slot_id: int | None = None
@@ -228,6 +237,21 @@ class PublisherReportingResponse(BaseModel):
     conversions: int
     earnings: Decimal
     ecpm: Decimal
+    daily_breakdown: list[DailyStatResponse] = []
+
+
+class AdvertiserReportingResponse(BaseModel):
+    advertiser_id: int
+    campaign_id: int | None = None
+    start_date: date
+    end_date: date
+    impressions: int
+    clicks: int
+    conversions: int
+    spend: Decimal
+    ctr: Decimal
+    cvr: Decimal
+    daily_breakdown: list[DailyStatResponse] = []
 
 
 class ApiKeyCreate(BaseModel):

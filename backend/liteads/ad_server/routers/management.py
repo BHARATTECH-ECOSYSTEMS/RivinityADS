@@ -14,6 +14,7 @@ from liteads.common.security import current_user, require_roles
 from liteads.models import (
     AdSlot,
     Advertiser,
+    AdEvent,
     Campaign,
     CampaignAssignment,
     Creative,
@@ -46,6 +47,8 @@ from liteads.schemas.management import (
     PublisherPropertyResponse,
     PublisherPropertyUpdate,
     PublisherReportingResponse,
+    AdvertiserReportingResponse,
+    DailyStatResponse,
     PublisherResponse,
     PublisherUpdate,
     SlotCreate,
@@ -95,7 +98,8 @@ async def create_advertiser(
 ) -> Advertiser:
     advertiser = Advertiser(**payload.model_dump())
     session.add(advertiser)
-    await session.flush()
+    await session.commit()
+    await session.refresh(advertiser)
     return advertiser
 
 
@@ -118,7 +122,8 @@ async def update_advertiser(
         raise _not_found("Advertiser", advertiser_id)
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(advertiser, key, value)
-    await session.flush()
+    await session.commit()
+    await session.refresh(advertiser)
     return advertiser
 
 
@@ -146,7 +151,8 @@ async def create_campaign(
         raise _not_found("Advertiser", payload.advertiser_id)
     campaign = Campaign(**payload.model_dump())
     session.add(campaign)
-    await session.flush()
+    await session.commit()
+    await session.refresh(campaign)
     return campaign
 
 
@@ -172,7 +178,8 @@ async def update_campaign(
     _assert_advertiser_access(user, campaign.advertiser_id)
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(campaign, key, value)
-    await session.flush()
+    await session.commit()
+    await session.refresh(campaign)
     return campaign
 
 
@@ -209,7 +216,8 @@ async def create_campaign_assignment(
     
     assignment = CampaignAssignment(**payload.model_dump())
     session.add(assignment)
-    await session.flush()
+    await session.commit()
+    await session.refresh(assignment)
     return assignment
 
 
@@ -221,7 +229,7 @@ async def delete_campaign_assignment(
     if assignment is None or assignment.campaign_id != campaign_id:
         raise _not_found("CampaignAssignment", assignment_id)
     await session.delete(assignment)
-    await session.flush()
+    await session.commit()
 
 
 @router.get("/creative", response_model=list[CreativeResponse], dependencies=[Depends(require_roles("admin", "advertiser"))])
@@ -245,7 +253,8 @@ async def create_creative(
     await _assert_campaign_access(user, payload.campaign_id, session)
     creative = Creative(**payload.model_dump())
     session.add(creative)
-    await session.flush()
+    await session.commit()
+    await session.refresh(creative)
     return creative
 
 
@@ -271,7 +280,8 @@ async def update_creative(
     await _assert_campaign_access(user, creative.campaign_id, session)
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(creative, key, value)
-    await session.flush()
+    await session.commit()
+    await session.refresh(creative)
     return creative
 
 @router.delete("/creative/{creative_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles("admin", "advertiser"))])
@@ -285,7 +295,7 @@ async def delete_creative(
         raise _not_found("Creative", creative_id)
     await _assert_campaign_access(user, creative.campaign_id, session)
     await session.delete(creative)
-    await session.flush()
+    await session.commit()
 
 
 @router.get("/publisher", response_model=list[PublisherResponse], dependencies=[Depends(require_roles("admin"))])
@@ -300,7 +310,8 @@ async def create_publisher(
 ) -> Publisher:
     publisher = Publisher(**payload.model_dump())
     session.add(publisher)
-    await session.flush()
+    await session.commit()
+    await session.refresh(publisher)
     return publisher
 
 
@@ -371,7 +382,8 @@ async def update_publisher(
         raise _not_found("Publisher", publisher_id)
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(publisher, key, value)
-    await session.flush()
+    await session.commit()
+    await session.refresh(publisher)
     return publisher
 
 
@@ -435,7 +447,8 @@ async def create_slot(payload: SlotCreate, user: User = Depends(current_user), s
     data["publisher_id"] = publisher_id
     slot = AdSlot(**data)
     session.add(slot)
-    await session.flush()
+    await session.commit()
+    await session.refresh(slot)
     return slot
 
 
@@ -458,8 +471,95 @@ async def update_slot(
     _assert_publisher_access(user, slot.publisher_id)
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(slot, key, value)
-    await session.flush()
+    await session.commit()
+    await session.refresh(slot)
     return slot
+
+
+@router.get("/advertiser/{advertiser_id}/reporting", response_model=AdvertiserReportingResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
+async def advertiser_reporting(
+    advertiser_id: int,
+    user: User = Depends(current_user),
+    campaign_id: int | None = Query(default=None),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> AdvertiserReportingResponse:
+    if user.role == "advertiser" and user.advertiser_id != advertiser_id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this advertiser")
+    if await session.get(Advertiser, advertiser_id) is None:
+        raise _not_found("Advertiser", advertiser_id)
+    
+    today = date.today()
+    start = start_date or today
+    end = end_date or today
+    if end < start:
+        raise HTTPException(status_code=422, detail="end_date must be on or after start_date")
+        
+    start_dt = datetime.combine(start, datetime.min.time())
+    end_dt = datetime.combine(end, datetime.max.time())
+    
+    query = select(
+        func.date(AdEvent.event_time).label('stat_date'),
+        func.count().filter(AdEvent.event_type == 1).label('impressions'),
+        func.count().filter(AdEvent.event_type == 2).label('clicks'),
+        func.count().filter(AdEvent.event_type == 3).label('conversions'),
+        func.sum(AdEvent.cost).label('spend'),
+    ).join(Campaign, Campaign.id == AdEvent.campaign_id).where(
+        Campaign.advertiser_id == advertiser_id,
+        AdEvent.event_time >= start_dt,
+        AdEvent.event_time <= end_dt,
+    )
+    if campaign_id:
+        query = query.where(AdEvent.campaign_id == campaign_id)
+        
+    query = query.group_by(func.date(AdEvent.event_time)).order_by(func.date(AdEvent.event_time))
+    result = await session.execute(query)
+    
+    total_impressions = 0
+    total_clicks = 0
+    total_conversions = 0
+    total_spend = Decimal("0")
+    breakdown = []
+    
+    for row in result.all():
+        d_impressions = int(row.impressions or 0)
+        d_clicks = int(row.clicks or 0)
+        d_conversions = int(row.conversions or 0)
+        d_spend = Decimal(row.spend or 0)
+        
+        # In SQLite func.date returns a string 'YYYY-MM-DD', we need a date object
+        stat_date = datetime.strptime(str(row.stat_date), "%Y-%m-%d").date()
+        
+        breakdown.append(DailyStatResponse(
+            stat_date=stat_date,
+            impressions=d_impressions,
+            clicks=d_clicks,
+            conversions=d_conversions,
+            spend=d_spend,
+        ))
+        
+        total_impressions += d_impressions
+        total_clicks += d_clicks
+        total_conversions += d_conversions
+        total_spend += d_spend
+        
+    ctr_val = (Decimal(total_clicks) / Decimal(total_impressions) * Decimal(100)) if total_impressions else Decimal("0")
+    cvr_val = (Decimal(total_conversions) / Decimal(total_clicks) * Decimal(100)) if total_clicks else Decimal("0")
+    
+    return AdvertiserReportingResponse(
+        advertiser_id=advertiser_id,
+        campaign_id=campaign_id,
+        start_date=start,
+        end_date=end,
+        impressions=total_impressions,
+        clicks=total_clicks,
+        conversions=total_conversions,
+        spend=total_spend,
+        ctr=ctr_val,
+        cvr=cvr_val,
+        daily_breakdown=breakdown,
+    )
 
 
 @router.get("/publisher/{publisher_id}/reporting", response_model=PublisherReportingResponse, dependencies=[Depends(require_roles("admin", "publisher"))])
@@ -493,6 +593,28 @@ async def publisher_reporting(
     impressions, clicks, conversions, earnings = result.one()
     earnings = Decimal(earnings or 0)
     ecpm = (earnings / Decimal(impressions) * Decimal(1000)) if impressions else Decimal("0")
+    
+    # Fetch daily breakdown
+    daily_result = await session.execute(
+        select(PublisherDailyStat).where(
+            PublisherDailyStat.publisher_id == publisher_id,
+            PublisherDailyStat.stat_date >= start,
+            PublisherDailyStat.stat_date <= end,
+        ).order_by(PublisherDailyStat.stat_date)
+    )
+    daily_stats = daily_result.scalars().all()
+    
+    breakdown = [
+        DailyStatResponse(
+            stat_date=stat.stat_date,
+            impressions=stat.impressions,
+            clicks=stat.clicks,
+            conversions=stat.conversions,
+            earnings=stat.earnings,
+        )
+        for stat in daily_stats
+    ]
+    
     return PublisherReportingResponse(
         publisher_id=publisher_id,
         start_date=start,
@@ -502,6 +624,7 @@ async def publisher_reporting(
         conversions=int(conversions),
         earnings=earnings,
         ecpm=ecpm,
+        daily_breakdown=breakdown,
     )
 
 
@@ -526,7 +649,8 @@ async def create_publisher_property(
     data["publisher_id"] = publisher_id
     property_obj = PublisherProperty(**data)
     session.add(property_obj)
-    await session.flush()
+    await session.commit()
+    await session.refresh(property_obj)
     return property_obj
 
 
@@ -551,7 +675,8 @@ async def update_publisher_property(
     _assert_publisher_access(user, property_obj.publisher_id)
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(property_obj, key, value)
-    await session.flush()
+    await session.commit()
+    await session.refresh(property_obj)
     return property_obj
 
 
@@ -707,4 +832,4 @@ async def revoke_publisher_api_key(
         raise HTTPException(status_code=404, detail=f"API key {key_id} not found")
     _assert_publisher_access(user, api_key.publisher_id)
     api_key.status = 0  # revoked
-    await session.flush()
+    await session.commit()
