@@ -43,6 +43,9 @@ class Advertiser(Base, TimestampMixin):
     balance: Mapped[Decimal] = mapped_column(Numeric(12, 4), default=Decimal("0"))
     daily_budget: Mapped[Decimal] = mapped_column(Numeric(12, 4), default=Decimal("0"))
     status: Mapped[int] = mapped_column(Integer, default=Status.ACTIVE)
+    owner_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     # Relationships
     campaigns: Mapped[list["Campaign"]] = relationship(

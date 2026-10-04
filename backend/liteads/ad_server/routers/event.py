@@ -48,6 +48,9 @@ async def track_event(
         raise HTTPException(status_code=400, detail="Missing signature")
     verify_tracking(event.request_id, event.ad_id, event.slot_id or "", event.sig)
 
+    from liteads.ad_server.services.replay_guard import enforce_replay_guard
+    await enforce_replay_guard(event.event_type, event.request_id, event.ad_id)
+
     # Record the event
     success = await event_service.track_event(
         request_id=event.request_id,
@@ -88,6 +91,9 @@ async def track_event_get(
 
     from liteads.common.tracking_sig import verify_tracking
     verify_tracking(req, ad, slot or "", sig)
+
+    from liteads.ad_server.services.replay_guard import enforce_replay_guard
+    await enforce_replay_guard(type, req, ad)
 
     success = await event_service.track_event(
         request_id=req,

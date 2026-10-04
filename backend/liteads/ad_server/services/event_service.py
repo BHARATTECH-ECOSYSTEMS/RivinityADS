@@ -92,9 +92,9 @@ class EventService:
                 campaign_id=campaign_id,
                 creative_id=creative_id,
                 event_type=event_type_enum,
-                event_time=datetime.fromtimestamp(timestamp, tz=timezone.utc)
+                event_time=datetime.fromtimestamp(timestamp, tz=timezone.utc).replace(tzinfo=None)
                 if timestamp
-                else datetime.now(timezone.utc),
+                else datetime.utcnow(),
                 user_id=user_id,
                 cost=cost,
             )
@@ -226,7 +226,14 @@ class EventService:
         )
         stat = result.scalar_one_or_none()
         if stat is None:
-            stat = PublisherDailyStat(publisher_id=slot.publisher_id, stat_date=stat_date)
+            stat = PublisherDailyStat(
+                publisher_id=slot.publisher_id,
+                stat_date=stat_date,
+                impressions=0,
+                clicks=0,
+                conversions=0,
+                earnings=Decimal("0.000000")
+            )
             self.session.add(stat)
         if event_type == EventType.IMPRESSION:
             stat.impressions += 1

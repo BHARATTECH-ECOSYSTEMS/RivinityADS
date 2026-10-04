@@ -51,7 +51,8 @@ class TargetingRetrieval(BaseRetrieval):
         5. Return matching candidates
         """
         # Resolve slot dimensions and format for size matching
-        slot_width, slot_height, slot_format, publisher_id = await self._get_slot_info(slot_id)
+        slot_width, slot_height, slot_format, slot_pub_id = await self._get_slot_info(slot_id)
+        logger.debug(f"Resolved slot {slot_id} to pub {slot_pub_id} (w={slot_width} h={slot_height})")
 
         # Get active campaigns (with caching)
         campaigns = await self._get_active_campaigns()
@@ -60,22 +61,29 @@ class TargetingRetrieval(BaseRetrieval):
             logger.debug("No active campaigns found")
             return []
 
-        candidates: list[AdCandidate] = []
+        assigned_candidates: list[AdCandidate] = []
+        unassigned_candidates: list[AdCandidate] = []
 
         for campaign_data in campaigns:
-            # Enforce explicit campaign assignments if any exist
+            # Determine if this campaign has assignments and whether it matches this slot
             assignments = campaign_data.get("assignments", [])
-            if assignments and publisher_id is not None:
-                is_assigned = False
+            is_explicitly_assigned = False
+            if assignments and slot_pub_id is not None:
+                matched = False
                 for assignment in assignments:
-                    if assignment["publisher_id"] == publisher_id:
+                    if assignment["publisher_id"] == slot_pub_id:
                         # If assignment has no specific slot, or matches current slot exactly
                         if assignment["slot_id"] is None or assignment["slot_id"] == slot_id:
-                            is_assigned = True
+                            matched = True
                             break
-                if not is_assigned:
+                if not matched:
+                    # Campaign has assignments but NOT to this publisher/slot — skip
                     continue
-            
+                is_explicitly_assigned = True
+            elif assignments and slot_pub_id is None:
+                # Campaign has assignments but we can't resolve slot publisher — skip
+                continue
+
             # Check if campaign matches user targeting
             if not self._match_targeting(campaign_data, user_context):
                 continue
@@ -119,13 +127,29 @@ class TargetingRetrieval(BaseRetrieval):
                     height=creative_data.get("height"),
                     metadata={"sectors": targeted_sectors},
                 )
-                candidates.append(candidate)
 
-                if len(candidates) >= limit:
+                if is_explicitly_assigned:
+                    assigned_candidates.append(candidate)
+                else:
+                    unassigned_candidates.append(candidate)
+
+                if len(assigned_candidates) + len(unassigned_candidates) >= limit:
                     break
 
-            if len(candidates) >= limit:
+            if len(assigned_candidates) + len(unassigned_candidates) >= limit:
                 break
+
+        # Prefer assigned campaigns; fall back to unassigned only if none are assigned
+        if assigned_candidates:
+            candidates = assigned_candidates
+            logger.debug(
+                f"Using {len(candidates)} assigned candidates (ignoring {len(unassigned_candidates)} unassigned)",
+            )
+        else:
+            candidates = unassigned_candidates
+            logger.debug(
+                f"No assigned candidates; using {len(candidates)} unassigned candidates",
+            )
 
         logger.debug(f"Retrieved {len(candidates)} candidates from targeting")
         return candidates
@@ -141,7 +165,7 @@ class TargetingRetrieval(BaseRetrieval):
             if slot:
                 return (slot.width or 0, slot.height or 0, slot.format, slot.publisher_id)
         except Exception as e:
-            logger.debug(f"Could not resolve slot info for {slot_id}: {e}")
+            logger.error(f"Could not resolve slot info for {slot_id}: {e}", exc_info=True)
         return 0, 0, None, None
 
     async def _get_active_campaigns(self) -> list[dict[str, Any]]:

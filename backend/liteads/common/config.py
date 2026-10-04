@@ -118,7 +118,7 @@ class TrackingSettings(BaseSettings):
     )
 
     secret: str = ""
-    signature_ttl_seconds: int = 7 * 24 * 3600
+    signature_ttl_seconds: int = 600
 
     @field_validator("secret")
     @classmethod

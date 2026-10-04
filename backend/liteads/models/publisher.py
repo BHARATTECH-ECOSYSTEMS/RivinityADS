@@ -22,6 +22,9 @@ class Publisher(Base, TimestampMixin):
     status: Mapped[int] = mapped_column(Integer, default=Status.ACTIVE, nullable=False)
     balance: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"), nullable=False)
     payout_details: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    owner_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     slots: Mapped[list["AdSlot"]] = relationship(
         "AdSlot", back_populates="publisher", cascade="all, delete-orphan", lazy="selectin"

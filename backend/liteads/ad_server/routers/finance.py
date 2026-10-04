@@ -9,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from liteads.ad_server.services.billing import BillingService
 from liteads.common.database import get_session
 from liteads.common.logger import get_logger
-from liteads.models import Advertiser, Publisher
+from liteads.common.security import current_user
+from liteads.models import Advertiser, Publisher, User
 from liteads.models.finance import Transaction
 from liteads.schemas.finance import DepositRequest, LedgerResponse, PayoutRequest, TransactionResponse
 
@@ -21,11 +22,15 @@ router = APIRouter(prefix="/finance", tags=["finance"])
 async def get_advertiser_ledger(
     advertiser_id: int,
     session: AsyncSession = Depends(get_session),
+    user: User = Depends(current_user),
 ) -> LedgerResponse:
     """Get the financial ledger and balance for an advertiser."""
     adv = await session.get(Advertiser, advertiser_id)
     if not adv:
         raise HTTPException(status_code=404, detail="Advertiser not found")
+
+    if user.role != "admin" and adv.owner_user_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this ledger")
 
     result = await session.execute(
         select(Transaction)
@@ -46,8 +51,15 @@ async def deposit_funds(
     advertiser_id: int,
     request: DepositRequest,
     session: AsyncSession = Depends(get_session),
+    user: User = Depends(current_user),
 ) -> TransactionResponse:
     """Deposit funds into an advertiser wallet."""
+    if user.role != "admin":
+        raise HTTPException(
+            status_code=403, 
+            detail="Deposits must happen through the payment flow."
+        )
+        
     try:
         tx = await BillingService.record_deposit(
             session=session,
@@ -67,11 +79,15 @@ async def deposit_funds(
 async def get_publisher_ledger(
     publisher_id: int,
     session: AsyncSession = Depends(get_session),
+    user: User = Depends(current_user),
 ) -> LedgerResponse:
     """Get the financial ledger and balance for a publisher."""
     pub = await session.get(Publisher, publisher_id)
     if not pub:
         raise HTTPException(status_code=404, detail="Publisher not found")
+
+    if user.role != "admin" and pub.owner_user_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this ledger")
 
     result = await session.execute(
         select(Transaction)
@@ -92,8 +108,16 @@ async def request_payout(
     publisher_id: int,
     request: PayoutRequest,
     session: AsyncSession = Depends(get_session),
+    user: User = Depends(current_user),
 ) -> TransactionResponse:
     """Request a payout from publisher earnings."""
+    pub = await session.get(Publisher, publisher_id)
+    if not pub:
+        raise HTTPException(status_code=404, detail="Publisher not found")
+
+    if user.role != "admin" and pub.owner_user_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to request payout for this publisher")
+
     try:
         tx = await BillingService.record_payout(
             session=session,
