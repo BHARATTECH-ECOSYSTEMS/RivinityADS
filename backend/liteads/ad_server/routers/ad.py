@@ -8,6 +8,7 @@ Includes:
 """
 
 import hashlib
+import html as html_lib
 import re
 from urllib.parse import quote
 
@@ -346,10 +347,10 @@ async def serve_ad_iframe(
 
     imp_url = f"{base_url}/api/v1/event/track?type=impression&req={request_id}&ad={ad_id}&slot={slot_q}{sig_param}"
     clk_url = f"{base_url}/api/v1/event/track?type=click&req={request_id}&ad={ad_id}&slot={slot_q}{sig_param}"
-    landing = c.landing_url or "#"
-    title = c.title or "Advertisement"
-    description = c.description or ""
-    image_url = c.image_url or ""
+    landing = html_lib.escape(c.landing_url or "#", quote=True)
+    title = html_lib.escape(c.title or "Advertisement", quote=True)
+    description = html_lib.escape(c.description or "", quote=True)
+    image_url = html_lib.escape(c.image_url or "", quote=True)
     creative_w = w or c.width or 300
     creative_h = h or c.height or 250
 

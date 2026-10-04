@@ -63,18 +63,36 @@ def decode_token(token: str, expected_type: str) -> dict[str, Any]:
 
 
 async def check_login_rate_limit(request: Request, email: str) -> None:
+    ip = request.client.host if request.client else "unknown"
+    normalized_email = email.strip().lower()
+    
+    ip_key = f"rate_limit:login:ip:{ip}"
+    account_key = f"rate_limit:login:account:{normalized_email}"
+    window = get_settings().auth.login_window_seconds
+    max_attempts = get_settings().auth.max_login_attempts
+    
     try:
-        key = f"rate_limit:login:{request.client.host if request.client else 'unknown'}:{email.lower()}"
-        window = get_settings().auth.login_window_seconds
-        attempts = await redis_client.incr(key)
-        if attempts == 1:
-            await redis_client.expire(key, window)
-        if attempts > get_settings().auth.max_login_attempts:
+        pipeline = redis_client.pipeline()
+        pipeline.incr(ip_key)
+        pipeline.incr(account_key)
+        results = await pipeline.execute()
+        
+        ip_attempts, account_attempts = results
+        
+        expire_pipe = redis_client.pipeline()
+        if ip_attempts == 1:
+            expire_pipe.expire(ip_key, window)
+        if account_attempts == 1:
+            expire_pipe.expire(account_key, window)
+        if len(expire_pipe.command_stack) > 0:
+            await expire_pipe.execute()
+            
+        if ip_attempts > max_attempts or account_attempts > max_attempts:
             raise HTTPException(status_code=429, detail="Too many login attempts")
     except HTTPException:
         raise
     except Exception:
-        pass
+        raise HTTPException(status_code=503, detail="Service unavailable")
 
 
 async def current_user(

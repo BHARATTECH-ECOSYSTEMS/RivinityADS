@@ -3,7 +3,18 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from urllib.parse import urlparse
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+
+def _validate_https_url(v: str | None) -> str | None:
+    if not v:
+        return v
+    parsed = urlparse(v.strip())
+    if parsed.scheme.lower() != "https":
+        raise ValueError("Only HTTPS URLs are allowed")
+    if not parsed.netloc:
+        raise ValueError("Invalid URL: missing host")
+    return v.strip()
 
 
 class ORMModel(BaseModel):
@@ -104,6 +115,11 @@ class CreativeCreate(BaseModel):
     status: int = Field(default=1, ge=0, le=4)
     quality_score: int = Field(default=80, ge=0, le=100)
 
+    @field_validator("landing_url", "image_url", "video_url")
+    @classmethod
+    def validate_urls(cls, v: str | None) -> str | None:
+        return _validate_https_url(v)
+
 
 class CreativeUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
@@ -116,6 +132,11 @@ class CreativeUpdate(BaseModel):
     height: int | None = Field(default=None, ge=0)
     status: int | None = Field(default=None, ge=0, le=4)
     quality_score: int | None = Field(default=None, ge=0, le=100)
+
+    @field_validator("landing_url", "image_url", "video_url")
+    @classmethod
+    def validate_urls(cls, v: str | None) -> str | None:
+        return _validate_https_url(v)
 
 
 class CreativeResponse(ORMModel):

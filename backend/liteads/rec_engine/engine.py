@@ -133,7 +133,7 @@ class RecommendationEngine:
         filters: list[BaseFilter] = []
 
         if self.config.enable_budget_filter:
-            filters.append(BudgetFilter())
+            filters.append(BudgetFilter(session=self.session))
 
         if self.config.enable_frequency_filter:
             filters.append(FrequencyFilter())

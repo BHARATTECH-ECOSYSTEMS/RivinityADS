@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, Cookie, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,18 +45,26 @@ def _user_response(user: User) -> UserResponse:
     )
 
 
-async def _tokens(user: User, session: AsyncSession) -> AuthResponse:
+async def _tokens(user: User, session: AsyncSession, response: Response) -> AuthResponse:
     refresh = create_refresh_token(user)
     session.add(RefreshToken(
         user_id=user.id,
         token_hash=token_digest(refresh),
         expires_at=datetime.utcnow() + timedelta(days=get_settings().auth.refresh_token_days),
     ))
-    return AuthResponse(user=_user_response(user), access_token=create_access_token(user), refresh_token=refresh)
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/api/v1/auth"
+    )
+    return AuthResponse(user=_user_response(user), access_token=create_access_token(user))
 
 
 @router.post("/auth/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
-async def register(payload: RegisterRequest, session: AsyncSession = Depends(get_session)) -> AuthResponse:
+async def register(payload: RegisterRequest, response: Response, session: AsyncSession = Depends(get_session)) -> AuthResponse:
     email = str(payload.email).lower()
     if await session.scalar(select(User).where(User.email == email)) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email is already registered")
@@ -73,24 +81,26 @@ async def register(payload: RegisterRequest, session: AsyncSession = Depends(get
     session.add(user)
     await session.flush()
     session.add(AuditLog(user_id=user.id, action="register"))
-    return await _tokens(user, session)
+    return await _tokens(user, session, response)
 
 
 @router.post("/auth/login", response_model=AuthResponse)
-async def login(request: Request, payload: LoginRequest, session: AsyncSession = Depends(get_session)) -> AuthResponse:
+async def login(request: Request, payload: LoginRequest, response: Response, session: AsyncSession = Depends(get_session)) -> AuthResponse:
     email = str(payload.email).lower()
     await check_login_rate_limit(request, email)
     user = await session.scalar(select(User).where(User.email == email))
     if user is None or not verify_password(payload.password, user.password_hash) or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
     session.add(AuditLog(user_id=user.id, action="login", ip_address=request.client.host if request.client else None))
-    return await _tokens(user, session)
+    return await _tokens(user, session, response)
 
 
 @router.post("/auth/refresh", response_model=AuthResponse)
-async def refresh(payload: RefreshRequest, session: AsyncSession = Depends(get_session)) -> AuthResponse:
-    claims = decode_token(payload.refresh_token, "refresh")
-    stored = await session.scalar(select(RefreshToken).where(RefreshToken.token_hash == token_digest(payload.refresh_token)))
+async def refresh(response: Response, refresh_token: str | None = Cookie(None), session: AsyncSession = Depends(get_session)) -> AuthResponse:
+    if not refresh_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing refresh token")
+    claims = decode_token(refresh_token, "refresh")
+    stored = await session.scalar(select(RefreshToken).where(RefreshToken.token_hash == token_digest(refresh_token)))
     now = datetime.utcnow()
     if stored is None or stored.revoked_at is not None or stored.expires_at <= now:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh session is invalid")
@@ -98,16 +108,29 @@ async def refresh(payload: RefreshRequest, session: AsyncSession = Depends(get_s
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User is inactive or missing")
     stored.revoked_at = now
-    response = await _tokens(user, session)
-    stored.replaced_by = token_digest(response.refresh_token)
-    return response
+    result = await _tokens(user, session, response)
+    
+    # After _tokens, find the new token hash
+    new_token_hash = None
+    for obj in session.new:
+        if isinstance(obj, RefreshToken):
+            new_token_hash = obj.token_hash
+            break
+            
+    if new_token_hash:
+        stored.replaced_by = new_token_hash
+        
+    return result
 
 
 @router.post("/auth/logout", response_model=MessageResponse)
-async def logout(payload: LogoutRequest, session: AsyncSession = Depends(get_session)) -> MessageResponse:
-    stored = await session.scalar(select(RefreshToken).where(RefreshToken.token_hash == token_digest(payload.refresh_token)))
-    if stored is not None:
-        stored.revoked_at = datetime.utcnow()
+async def logout(response: Response, refresh_token: str | None = Cookie(None), session: AsyncSession = Depends(get_session)) -> MessageResponse:
+    if refresh_token:
+        stored = await session.scalar(select(RefreshToken).where(RefreshToken.token_hash == token_digest(refresh_token)))
+        if stored is not None:
+            stored.revoked_at = datetime.utcnow()
+            
+    response.delete_cookie("refresh_token", path="/api/v1/auth", httponly=True, secure=True, samesite="lax")
     return MessageResponse(message="Logged out")
 
 

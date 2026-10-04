@@ -83,6 +83,7 @@ class EventService:
                 )
                 if not success_bill:
                     logger.warning(f"Billing failed for event {request_id}")
+                    return False
             elif campaign and campaign.updated_at.date() < datetime.now(timezone.utc).date():
                 campaign.spent_today = 0
 

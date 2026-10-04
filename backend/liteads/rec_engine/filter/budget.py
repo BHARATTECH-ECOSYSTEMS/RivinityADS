@@ -24,14 +24,16 @@ class BudgetFilter(BaseFilter):
     3. Advertiser balance sufficient
     """
 
-    def __init__(self, buffer_ratio: float = 0.95):
+    def __init__(self, buffer_ratio: float = 0.95, session=None):
         """
         Initialize budget filter.
 
         Args:
             buffer_ratio: Budget buffer to prevent overspending (0.95 = 95%)
+            session: SQLAlchemy AsyncSession for DB queries (balance checks)
         """
         self.buffer_ratio = buffer_ratio
+        self.session = session
         self._budget_cache: dict[int, BudgetInfo] = {}
 
     async def filter(
@@ -48,12 +50,29 @@ class BudgetFilter(BaseFilter):
         campaign_ids = list(set(c.campaign_id for c in candidates))
         budget_infos = await self._get_budget_batch(campaign_ids)
 
-        # Filter
-        result = []
+        # Filter by campaign budget
+        temp_result = []
         for candidate in candidates:
             budget_info = budget_infos.get(candidate.campaign_id)
             if budget_info and budget_info.has_budget:
-                result.append(candidate)
+                temp_result.append(candidate)
+
+        # Filter by advertiser balance
+        result = []
+        if temp_result and self.session:
+            from sqlalchemy import select
+            from liteads.models import Advertiser
+            advertiser_ids = list(set(c.advertiser_id for c in temp_result))
+            stmt = select(Advertiser.id, Advertiser.balance).where(Advertiser.id.in_(advertiser_ids))
+            db_res = await self.session.execute(stmt)
+            balances = {row.id: row.balance for row in db_res.all()}
+
+            for candidate in temp_result:
+                balance = balances.get(candidate.advertiser_id, 0)
+                if balance > 0:
+                    result.append(candidate)
+        else:
+            result = temp_result
 
         filtered_count = len(candidates) - len(result)
         if filtered_count > 0:
@@ -69,7 +88,19 @@ class BudgetFilter(BaseFilter):
     ) -> bool:
         """Check if single candidate has budget."""
         budget_info = await self._get_budget(candidate.campaign_id)
-        return budget_info.has_budget
+        if not budget_info.has_budget:
+            return False
+
+        if self.session:
+            from sqlalchemy import select
+            from liteads.models import Advertiser
+            stmt = select(Advertiser.balance).where(Advertiser.id == candidate.advertiser_id)
+            db_res = await self.session.execute(stmt)
+            balance = db_res.scalar_one_or_none()
+            if balance is None or balance <= 0:
+                return False
+
+        return True
 
     async def _get_budget_batch(
         self, campaign_ids: list[int]

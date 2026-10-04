@@ -17,10 +17,11 @@ def sign_tracking(request_id: str, ad_id: str, slot_id: str) -> str:
 def verify_tracking(request_id: str, ad_id: str, slot_id: str, signed: str) -> None:
     try:
         ts, sig = signed.split(".", 1)
-    except ValueError:
+        ts_int = int(ts)
+    except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail="Bad signature")
     ttl = get_settings().tracking.signature_ttl_seconds
-    if abs(int(time.time()) - int(ts)) > ttl:
+    if abs(int(time.time()) - ts_int) > ttl:
         raise HTTPException(status_code=400, detail="Expired signature")
     msg = f"{request_id}|{ad_id}|{slot_id}|{ts}".encode()
     expected = hmac.new(get_settings().tracking.secret.encode(), msg, hashlib.sha256).hexdigest()[:32]

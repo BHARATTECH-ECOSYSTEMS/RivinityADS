@@ -25,11 +25,11 @@ class LoginRequest(BaseModel):
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str = Field(min_length=1)
+    pass
 
 
 class LogoutRequest(BaseModel):
-    refresh_token: str = Field(min_length=1)
+    pass
 
 
 class ResetPasswordRequest(BaseModel):
@@ -40,7 +40,6 @@ class ResetPasswordRequest(BaseModel):
 class AuthResponse(BaseModel):
     user: UserResponse
     access_token: str
-    refresh_token: str
     token_type: str = "bearer"
 
 
