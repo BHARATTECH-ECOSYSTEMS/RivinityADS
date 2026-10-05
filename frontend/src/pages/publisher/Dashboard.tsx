@@ -45,15 +45,21 @@ export default function PublisherDashboard() {
     setLoading(true);
     setError(null);
     try {
-      const [reportData, ledgerData, assignData] = await Promise.all([
-        getPublisherReporting(publisherId, dateRange.startDate, dateRange.endDate),
-        getPublisherLedger(publisherId),
-        listPublisherAssignments()
-      ]);
-      
+      // Core reporting data first
+      const reportData = await getPublisherReporting(publisherId, dateRange.startDate, dateRange.endDate);
       setReporting(reportData);
-      setLedger(ledgerData);
-      setAssignments(assignData);
+
+      // Fetch non-blocking data independently
+      getPublisherLedger(publisherId).then(setLedger).catch(err => {
+        console.error("Ledger fetch failed:", err);
+        setError(err instanceof Error ? err.message : "Failed to load ledger");
+      });
+
+      listPublisherAssignments().then(setAssignments).catch(err => {
+        console.error("Assignments fetch failed:", err);
+        // Do not set global error for assignments failure to allow ledger/reporting to show
+      });
+      
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load dashboard data");
     } finally {

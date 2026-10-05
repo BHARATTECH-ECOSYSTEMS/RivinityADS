@@ -80,6 +80,7 @@ async def register(payload: RegisterRequest, response: Response, session: AsyncS
         user = User(name=payload.name, email=email, password_hash=hash_password(payload.password), role=payload.role, publisher_id=account.id)
     session.add(user)
     await session.flush()
+    account.owner_user_id = user.id
     session.add(AuditLog(user_id=user.id, action="register"))
     return await _tokens(user, session, response)
 
