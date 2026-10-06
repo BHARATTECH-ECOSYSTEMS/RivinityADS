@@ -77,6 +77,7 @@ class CampaignUpdate(BaseModel):
     start_time: datetime | None = None
     end_time: datetime | None = None
     status: int | None = Field(default=None, ge=0, le=4)
+    autopilot: bool | None = None
 
 
 class CampaignResponse(ORMModel):
@@ -95,11 +96,26 @@ class CampaignResponse(ORMModel):
     start_time: datetime | None
     end_time: datetime | None
     status: int
+    autopilot: bool
     impressions: int
     clicks: int
     conversions: int
     created_at: datetime
     updated_at: datetime
+
+
+class SuggestionResponse(ORMModel):
+    id: int
+    campaign_id: int
+    action: dict
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SuggestionStatusPatch(BaseModel):
+    status: str
+
 
 
 class CreativeCreate(BaseModel):

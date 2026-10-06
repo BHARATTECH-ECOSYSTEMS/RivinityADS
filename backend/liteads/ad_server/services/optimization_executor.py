@@ -63,6 +63,7 @@ class OptimizationExecutor:
         suggestion = Suggestion(
             campaign_id=campaign.id,
             action=action_payload,
+            status="PENDING",
         )
         self.session.add(suggestion)
         await self.session.commit()

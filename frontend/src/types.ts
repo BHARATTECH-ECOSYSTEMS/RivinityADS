@@ -13,7 +13,22 @@ export interface AdResponse { ad_id: string; campaign_id: number; creative_id: n
 export interface AdListResponse { request_id: string; ads: AdResponse[]; count: number; }
 export interface HealthResponse { status: string; version: string; database: boolean; redis: boolean; }
 export interface Advertiser { id: number; name: string; company?: string; contact_email?: string; balance: number; daily_budget: number; status: number; }
-export interface Campaign { id: number; advertiser_id: number; name: string; description?: string; budget_daily: number; budget_total: number; spent_today: number; spent_total: number; bid_type: number; bid_amount: number; freq_cap_daily: number; freq_cap_hourly: number; start_time?: string; end_time?: string; status: number; impressions: number; clicks: number; conversions: number; }
+export interface Campaign { id: number; advertiser_id: number; name: string; description?: string; budget_daily: number; budget_total: number; spent_today: number; spent_total: number; bid_type: number; bid_amount: number; freq_cap_daily: number; freq_cap_hourly: number; start_time?: string; end_time?: string; status: number; autopilot: boolean; impressions: number; clicks: number; conversions: number; }
 export interface Creative { id: number; campaign_id: number; title: string; description?: string; image_url?: string; video_url?: string; landing_url: string; creative_type: number; width: number; height: number; status: number; quality_score: number; }
 export interface Publisher { id: number; name: string; email?: string; site_url?: string; status: number; }
 export interface AdSlot { id: number; publisher_id: number; slot_id: string; name: string; format: number; width: number; height: number; status: number; ecpm_today?: number; }
+export interface SuggestionAction {
+  action: string;
+  confidence?: number;
+  proposed_budget_delta?: number;
+  operation_type?: string;
+  target_payload?: any;
+}
+export interface Suggestion {
+  id: number;
+  campaign_id: number;
+  action: SuggestionAction;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}

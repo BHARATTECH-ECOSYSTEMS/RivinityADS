@@ -259,6 +259,7 @@ class Suggestion(Base, TimestampMixin):
         Integer, ForeignKey("campaigns.id"), nullable=False
     )
     action: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, server_default="PENDING", default="PENDING")
 
 
 class CampaignChangeLog(Base, TimestampMixin):

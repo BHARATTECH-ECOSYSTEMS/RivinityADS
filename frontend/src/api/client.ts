@@ -1,4 +1,4 @@
-import type { AdListResponse, AdRequestPayload, Advertiser, Campaign, Creative, HealthResponse, Publisher, Session } from "../types";
+import type { AdListResponse, AdRequestPayload, Advertiser, Campaign, Creative, HealthResponse, Publisher, Session, Suggestion } from "../types";
 const BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "";
 let memoryToken: string | null = null;
 export const setMemoryToken = (token: string | null) => { memoryToken = token; };
@@ -143,3 +143,7 @@ export const updateWebhook = (id: number, payload: Partial<WebhookInput>) => api
 export const deleteWebhook = (id: number) => apiFetch<void>(`/api/v1/webhooks/${id}`, { method: "DELETE" });
 export const testWebhook = (id: number, payload?: any) => apiFetch<{success: boolean; status_code?: number; response?: string}>(`/api/v1/webhooks/${id}/test`, { method: "POST", body: payload ? JSON.stringify(payload) : undefined });
 
+
+// Suggestions
+export const getCampaignSuggestions = (campaignId: number) => apiFetch<Suggestion[]>(`/api/v1/campaign/${campaignId}/suggestions`);
+export const updateSuggestionStatus = (suggestionId: number, status: string) => apiFetch<Suggestion>(`/api/v1/suggestion/${suggestionId}`, { method: "PATCH", body: JSON.stringify({ status }) });

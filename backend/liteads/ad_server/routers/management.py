@@ -55,7 +55,12 @@ from liteads.schemas.management import (
     SlotResponse,
     SlotUpdate,
     PublisherAssignmentResponse,
+    SuggestionResponse,
+    SuggestionStatusPatch,
 )
+from liteads.ad_server.services.optimization_executor import OptimizationExecutor
+from liteads.ad_server.services.optimization_policy import OptimizationPolicyResult
+from liteads.models.ad import Suggestion
 
 router = APIRouter(dependencies=[Depends(current_user)])
 
@@ -833,3 +838,80 @@ async def revoke_publisher_api_key(
     _assert_publisher_access(user, api_key.publisher_id)
     api_key.status = 0  # revoked
     await session.commit()
+
+
+@router.get("/campaign/{campaign_id}/suggestions", response_model=list[SuggestionResponse], dependencies=[Depends(require_roles("admin", "advertiser"))])
+async def get_campaign_suggestions(
+    campaign_id: int, 
+    user: User = Depends(current_user), 
+    session: AsyncSession = Depends(get_session)
+) -> list[Suggestion]:
+    campaign = await session.get(Campaign, campaign_id)
+    if campaign is None:
+        raise _not_found("Campaign", campaign_id)
+    _assert_advertiser_access(user, campaign.advertiser_id)
+    result = await session.execute(
+        select(Suggestion).where(Suggestion.campaign_id == campaign_id).where(Suggestion.status == "PENDING").order_by(Suggestion.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+@router.patch("/suggestion/{suggestion_id}", response_model=SuggestionResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
+async def update_suggestion_status(
+    suggestion_id: int,
+    payload: SuggestionStatusPatch,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session)
+) -> Suggestion:
+    if payload.status not in ("APPLIED", "REJECTED"):
+        raise HTTPException(status_code=400, detail="Invalid status transition")
+        
+    result = await session.execute(
+        select(Suggestion).where(Suggestion.id == suggestion_id).with_for_update()
+    )
+    suggestion = result.scalar_one_or_none()
+    
+    if suggestion is None:
+        raise _not_found("Suggestion", suggestion_id)
+        
+    campaign = await session.get(Campaign, suggestion.campaign_id, with_for_update=True)
+    if campaign is None:
+        raise _not_found("Campaign", suggestion.campaign_id)
+        
+    _assert_advertiser_access(user, campaign.advertiser_id)
+    
+    if suggestion.status != "PENDING":
+        raise HTTPException(status_code=400, detail="Suggestion is no longer PENDING")
+        
+    if payload.status == "REJECTED":
+        suggestion.status = "REJECTED"
+        await session.commit()
+        await session.refresh(suggestion)
+        return suggestion
+        
+    policy_result = OptimizationPolicyResult(
+        accepted=True,
+        reason="Manual approval",
+        action=suggestion.action.get("action"),
+        confidence=suggestion.action.get("confidence", 1.0),
+        autopilot=campaign.autopilot,
+        proposed_budget_delta=suggestion.action.get("proposed_budget_delta"),
+        operation_type=suggestion.action.get("operation_type")
+    )
+    
+    executor = OptimizationExecutor(session)
+    try:
+        await executor._execute_autopilot_on(
+            campaign=campaign,
+            policy_result=policy_result,
+            action_payload=suggestion.action,
+            target_payload=suggestion.action.get("target_payload")
+        )
+    except Exception as e:
+        await session.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+        
+    suggestion.status = "APPLIED"
+    await session.commit()
+    await session.refresh(suggestion)
+    return suggestion
