@@ -17,6 +17,7 @@ services:
       - LITEADS_REDIS__PORT=6379
       - LITEADS_AUTH__JWT_SECRET=${LITEADS_JWT_SECRET}
       - LITEADS_TRACKING__SECRET=${LITEADS_TRACKING_SECRET}
+      - LAYA_BASE_URL=http://laya:8000
     depends_on:
       postgres:
         condition: service_healthy
@@ -98,8 +99,18 @@ services:
     restart: unless-stopped
     networks:
       - liteads-network
-    profiles:
-      - monitoring
+
+  # Laya optimization sidecar
+  laya:
+    build: https://github.com/NandhaKishorM/laya.git
+    command: ["laya-serve"]
+    environment:
+      - LAYA_HOST=0.0.0.0
+      - LAYA_PORT=8000
+      - LAYA_PRELOAD=0
+    networks:
+      - liteads-network
+    restart: unless-stopped
 
   # Grafana Dashboard (optional)
   grafana:

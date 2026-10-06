@@ -10,6 +10,8 @@ from liteads.models.ad import (
     Creative,
     HourlyStat,
     TargetingRule,
+    Suggestion,
+    CampaignChangeLog,
 )
 from liteads.models.geo import GeoLocation
 from liteads.models.publisher import AdSlot, Publisher, PublisherApiKey, PublisherDailyStat, PublisherProperty
@@ -57,4 +59,6 @@ __all__ = [
     "Transaction",
     "PlatformSettings",
     "Webhook",
+    "Suggestion",
+    "CampaignChangeLog",
 ]

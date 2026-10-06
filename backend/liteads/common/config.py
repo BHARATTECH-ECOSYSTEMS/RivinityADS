@@ -128,6 +128,13 @@ class TrackingSettings(BaseSettings):
         return v
 
 
+class LayaSettings(BaseSettings):
+    """Laya sidecar configuration."""
+
+    base_url: str = "http://laya:8000"
+    timeout_ms: int = 30000
+
+
 class AuthSettings(BaseSettings):
     """Authentication and token configuration."""
 
@@ -179,6 +186,7 @@ class Settings(BaseSettings):
     auth: AuthSettings = Field(default_factory=AuthSettings)
     tracking: TrackingSettings = Field(default_factory=TrackingSettings)
     geo: GeoSettings = Field(default_factory=GeoSettings)
+    laya: LayaSettings = Field(default_factory=LayaSettings)
 
     @field_validator("env")
     @classmethod
@@ -264,6 +272,8 @@ def get_settings() -> Settings:
         flat_config["auth"] = AuthSettings(**merged["auth"])
     if "tracking" in merged:
         flat_config["tracking"] = TrackingSettings(**merged["tracking"])
+    if "laya" in merged:
+        flat_config["laya"] = LayaSettings(**merged["laya"])
 
     # Nested settings are created from YAML above, so apply environment overrides
     # explicitly for deployments such as Docker Compose.
@@ -285,6 +295,13 @@ def get_settings() -> Settings:
             "port": int(os.getenv("LITEADS_REDIS__PORT", redis.port)),
             "db": int(os.getenv("LITEADS_REDIS__DB", redis.db)),
             "password": os.getenv("LITEADS_REDIS__PASSWORD", redis.password),
+        }
+    )
+
+    laya = flat_config.get("laya", LayaSettings())
+    flat_config["laya"] = laya.model_copy(
+        update={
+            "base_url": os.getenv("LAYA_BASE_URL", laya.base_url),
         }
     )
 

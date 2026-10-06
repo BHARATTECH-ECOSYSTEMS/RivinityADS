@@ -49,12 +49,19 @@ async def lifespan(app: FastAPI):
     # Initialize Redis
     await redis_client.connect()
 
+    from liteads.ad_server.services.optimization_scheduler import optimization_loop
+    optimization_loop.start()
+
     logger.info("LiteAds server started successfully")
 
     yield
 
     # Shutdown
     logger.info("Shutting down LiteAds server")
+    
+    from liteads.ad_server.services.optimization_scheduler import optimization_loop
+    await optimization_loop.stop()
+    
     await redis_client.close()
     await close_db()
     logger.info("LiteAds server stopped")
