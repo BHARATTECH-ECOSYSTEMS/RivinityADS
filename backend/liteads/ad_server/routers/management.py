@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from liteads.common.database import get_session
 from liteads.common.security import current_user, require_roles
+from liteads.ad_server.services.campaign_activation import activate_campaign_logic, CampaignActivationError
 from liteads.models import (
     AdSlot,
     Advertiser,
@@ -154,7 +155,12 @@ async def create_campaign(
     _assert_advertiser_access(user, payload.advertiser_id)
     if await session.get(Advertiser, payload.advertiser_id) is None:
         raise _not_found("Advertiser", payload.advertiser_id)
-    campaign = Campaign(**payload.model_dump())
+    
+    # Phase 3E: All campaigns must start as DRAFT (Status.DRAFT = 5)
+    data = payload.model_dump()
+    data["status"] = 5
+    
+    campaign = Campaign(**data)
     session.add(campaign)
     await session.commit()
     await session.refresh(campaign)
@@ -186,6 +192,45 @@ async def update_campaign(
     await session.commit()
     await session.refresh(campaign)
     return campaign
+
+
+@router.post("/campaign/{campaign_id}/activate", response_model=CampaignResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
+async def activate_campaign(
+    campaign_id: int,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Campaign:
+    """Activate a DRAFT campaign."""
+    _assert_advertiser_access(user, campaign_id) # wait, _assert_advertiser_access takes advertiser_id. Let's not call it if the service handles it. Actually we don't need it if the service checks it.
+    
+    # We need to pass the advertiser id. We can get it from the user.
+    if user.role == "advertiser":
+        advertiser_id = user.advertiser_id
+    else:
+        # If admin, they could activate any campaign, but we need to pass the campaign's advertiser_id.
+        # So we fetch the campaign here first, or let the service do it.
+        # To maintain identical behavior, let's just fetch it.
+        pass
+
+    # Wait, _assert_advertiser_access takes user and advertiser_id.
+    campaign = await session.get(Campaign, campaign_id)
+    if campaign is None:
+        raise _not_found("Campaign", campaign_id)
+        
+    _assert_advertiser_access(user, campaign.advertiser_id)
+
+    try:
+        campaign = await activate_campaign_logic(session, campaign_id, campaign.advertiser_id)
+    except CampaignActivationError as e:
+        msg = str(e)
+        if msg in ("Campaign not found", "Advertiser not found"):
+            raise _not_found(msg.split()[0], campaign_id)
+        raise HTTPException(status_code=400, detail=msg)
+        
+    await session.commit()
+    await session.refresh(campaign)
+    return campaign
+
 
 
 @router.get("/campaign/{campaign_id}/assignments", response_model=list[CampaignAssignmentResponse], dependencies=[Depends(require_roles("admin"))])

@@ -491,3 +491,8 @@ class CacheKeys:
     @staticmethod
     def rate_limit(client_id: str, endpoint: str) -> str:
         return f"ratelimit:{client_id}:{endpoint}"
+
+    # Chat sessions
+    @staticmethod
+    def chat_session(session_id: str) -> str:
+        return f"chat:session:{session_id}"

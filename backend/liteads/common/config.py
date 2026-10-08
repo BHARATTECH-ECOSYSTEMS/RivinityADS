@@ -159,6 +159,30 @@ class AuthSettings(BaseSettings):
         return v
 
 
+class PaymentSettings(BaseSettings):
+    """Payment integration configuration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="RAZORPAY_",
+        extra="ignore",
+    )
+
+    key_id: str = ""
+    key_secret: str = ""
+    webhook_secret: str = ""
+
+
+class OpenAISettings(BaseSettings):
+    """OpenAI API configuration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="OPENAI_",
+        extra="ignore",
+    )
+
+    api_key: str = ""
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
@@ -187,6 +211,8 @@ class Settings(BaseSettings):
     tracking: TrackingSettings = Field(default_factory=TrackingSettings)
     geo: GeoSettings = Field(default_factory=GeoSettings)
     laya: LayaSettings = Field(default_factory=LayaSettings)
+    payment: PaymentSettings = Field(default_factory=PaymentSettings)
+    openai: OpenAISettings = Field(default_factory=OpenAISettings)
 
     @field_validator("env")
     @classmethod
@@ -274,6 +300,10 @@ def get_settings() -> Settings:
         flat_config["tracking"] = TrackingSettings(**merged["tracking"])
     if "laya" in merged:
         flat_config["laya"] = LayaSettings(**merged["laya"])
+    if "payment" in merged:
+        flat_config["payment"] = PaymentSettings(**merged["payment"])
+    if "openai" in merged:
+        flat_config["openai"] = OpenAISettings(**merged["openai"])
 
     # Nested settings are created from YAML above, so apply environment overrides
     # explicitly for deployments such as Docker Compose.
@@ -302,6 +332,22 @@ def get_settings() -> Settings:
     flat_config["laya"] = laya.model_copy(
         update={
             "base_url": os.getenv("LAYA_BASE_URL", laya.base_url),
+        }
+    )
+
+    payment = flat_config.get("payment", PaymentSettings())
+    flat_config["payment"] = payment.model_copy(
+        update={
+            "key_id": os.getenv("RAZORPAY_KEY_ID", payment.key_id),
+            "key_secret": os.getenv("RAZORPAY_KEY_SECRET", payment.key_secret),
+            "webhook_secret": os.getenv("RAZORPAY_WEBHOOK_SECRET", payment.webhook_secret),
+        }
+    )
+
+    openai = flat_config.get("openai", OpenAISettings())
+    flat_config["openai"] = openai.model_copy(
+        update={
+            "api_key": os.getenv("OPENAI_API_KEY", openai.api_key),
         }
     )
 

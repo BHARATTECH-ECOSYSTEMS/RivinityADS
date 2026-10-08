@@ -31,7 +31,7 @@ class Transaction(Base):
     )
     
     # E.g. Stripe charge ID, payout reference, or internal tracking string
-    reference_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    reference_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True, unique=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(

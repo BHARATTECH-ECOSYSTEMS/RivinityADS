@@ -62,7 +62,6 @@ class CampaignCreate(BaseModel):
     freq_cap_hourly: int = Field(default=3, ge=0)
     start_time: datetime | None = None
     end_time: datetime | None = None
-    status: int = Field(default=1, ge=0, le=4)
 
 
 class CampaignUpdate(BaseModel):

@@ -43,3 +43,17 @@ class PayoutRequest(BaseModel):
 
     amount: Decimal = Field(..., gt=0, description="Amount to payout")
     reference_id: str | None = Field(None, description="External payout reference")
+
+
+class PaymentOrderRequest(BaseModel):
+    """Request to create a payment order."""
+
+    amount: Decimal = Field(..., ge=100, description="Amount to top up (minimum ₹100)")
+
+
+class PaymentOrderResponse(BaseModel):
+    """Response containing payment order details."""
+
+    order_id: str
+    amount: Decimal
+    currency: str

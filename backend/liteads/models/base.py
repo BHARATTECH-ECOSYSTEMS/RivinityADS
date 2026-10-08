@@ -32,6 +32,7 @@ class Status(IntEnum):
     PAUSED = 2
     DELETED = 3
     PENDING = 4
+    DRAFT = 5
 
 
 class BidType(IntEnum):
