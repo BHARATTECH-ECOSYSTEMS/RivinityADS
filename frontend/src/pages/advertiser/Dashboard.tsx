@@ -127,7 +127,10 @@ export default function AdvertiserDashboard() {
                 <div>
                     <div className="flex row space-between align-center" style={{ marginBottom: "16px" }}>
                         <h2>Campaign Performance</h2>
-                        <Link className="btn primary" to="/advertiser/campaigns/new">New Campaign</Link>
+                        <div className="actions">
+                            <Link className="btn primary" to="/advertiser/campaign-builder">New Campaign (AI)</Link>
+                            <Link className="btn secondary" to="/advertiser/campaigns/new">Manual</Link>
+                        </div>
                     </div>
                     <div className="card">
                         <table className="table">

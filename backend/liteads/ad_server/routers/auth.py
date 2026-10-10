@@ -1,4 +1,4 @@
-"""Authentication, session, verification, and password reset endpoints."""
+"""Authentication, session, and password reset endpoints."""
 
 from datetime import datetime, timedelta
 import secrets
@@ -42,6 +42,7 @@ def _user_response(user: User) -> UserResponse:
         role=user.role,
         advertiser_id=user.advertiser_id,
         publisher_id=user.publisher_id,
+        email_verified=user.email_verified,
     )
 
 
@@ -82,6 +83,11 @@ async def register(payload: RegisterRequest, response: Response, session: AsyncS
     await session.flush()
     account.owner_user_id = user.id
     session.add(AuditLog(user_id=user.id, action="register"))
+    
+    user.email_verified = True
+    await session.commit()
+    await session.refresh(user)
+
     return await _tokens(user, session, response)
 
 
@@ -133,19 +139,6 @@ async def logout(response: Response, refresh_token: str | None = Cookie(None), s
             
     response.delete_cookie("refresh_token", path="/api/v1/auth", httponly=True, secure=True, samesite="lax")
     return MessageResponse(message="Logged out")
-
-
-@router.post("/auth/verify-email", response_model=MessageResponse)
-async def verify_email(token: str, session: AsyncSession = Depends(get_session)) -> MessageResponse:
-    record = await session.scalar(select(OneTimeToken).where(OneTimeToken.token_hash == token_digest(token), OneTimeToken.purpose == "email_verification"))
-    if record is None or record.used_at is not None or record.expires_at <= datetime.utcnow():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Verification token is invalid")
-    user = await session.get(User, record.user_id)
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Verification token is invalid")
-    user.email_verified = True
-    record.used_at = datetime.utcnow()
-    return MessageResponse(message="Email verified")
 
 
 @router.post("/auth/request-password-reset", response_model=MessageResponse)

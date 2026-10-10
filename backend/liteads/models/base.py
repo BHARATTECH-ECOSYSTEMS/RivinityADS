@@ -35,6 +35,13 @@ class Status(IntEnum):
     DRAFT = 5
 
 
+class ModerationStatus(IntEnum):
+    """Creative moderation status."""
+    PENDING_REVIEW = 1
+    APPROVED = 2
+    REJECTED = 3
+
+
 class BidType(IntEnum):
     """Bid type enum."""
     CPM = 1   # Cost per mille (1000 impressions)

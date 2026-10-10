@@ -13,7 +13,7 @@ from decimal import Decimal
 from liteads.ad_server.services.billing import BillingService
 from liteads.common.database import get_session
 from liteads.common.logger import get_logger
-from liteads.common.security import current_user
+from liteads.common.security import current_user, verified_user
 from liteads.models import Advertiser, Publisher, User
 from liteads.models.finance import Transaction
 from liteads.schemas.finance import (
@@ -24,6 +24,7 @@ from liteads.schemas.finance import (
     PaymentOrderRequest,
     PaymentOrderResponse,
 )
+from liteads.models.finance import Transaction, PaymentRequest
 from liteads.ad_server.services.razorpay_client import get_razorpay_client, RazorpayClient, RazorpayClientError
 
 logger = get_logger(__name__)
@@ -34,7 +35,7 @@ router = APIRouter(prefix="/finance", tags=["finance"])
 async def get_advertiser_ledger(
     advertiser_id: int,
     session: AsyncSession = Depends(get_session),
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
 ) -> LedgerResponse:
     """Get the financial ledger and balance for an advertiser."""
     adv = await session.get(Advertiser, advertiser_id)
@@ -63,7 +64,7 @@ async def deposit_funds(
     advertiser_id: int,
     request: DepositRequest,
     session: AsyncSession = Depends(get_session),
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
 ) -> TransactionResponse:
     """Deposit funds into an advertiser wallet."""
     if user.role != "admin":
@@ -92,10 +93,9 @@ async def create_payment_request(
     advertiser_id: int,
     request: PaymentOrderRequest,
     session: AsyncSession = Depends(get_session),
-    user: User = Depends(current_user),
-    razorpay_client: RazorpayClient = Depends(get_razorpay_client),
+    user: User = Depends(verified_user),
 ) -> PaymentOrderResponse:
-    """Create a Razorpay payment order for wallet top-up."""
+    """Create a Razorpay payment order/QR for wallet top-up."""
     adv = await session.get(Advertiser, advertiser_id)
     if not adv:
         raise HTTPException(status_code=404, detail="Advertiser not found")
@@ -103,19 +103,17 @@ async def create_payment_request(
     if user.role != "admin" and adv.owner_user_id != user.id:
         raise HTTPException(status_code=403, detail="Not authorized to create payment request for this advertiser")
 
+    from liteads.ad_server.services.tools import request_payment, ToolError, ToolValidationError, ToolAuthorizationError
     try:
-        order = razorpay_client.create_order(
-            amount=request.amount,
-            receipt=f"adv_{advertiser_id}_topup"
-        )
-        return PaymentOrderResponse(
-            order_id=order["id"],
-            amount=request.amount,
-            currency=order.get("currency", "INR")
-        )
-    except RazorpayClientError as e:
-        logger.error(f"Razorpay order creation failed for adv {advertiser_id}: {e}")
-        raise HTTPException(status_code=502, detail="Payment gateway error")
+        # Re-use the existing service function that handles QR creation and persistence
+        return await request_payment(user=user, session=session, amount=request.amount)
+    except ToolValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except ToolAuthorizationError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ToolError as e:
+        logger.error(f"Payment request failed for adv {advertiser_id}: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @router.post("/webhooks/razorpay")
@@ -141,24 +139,41 @@ async def razorpay_webhook(
         
     event = payload.get("event")
     
-    if event != "order.paid":
+    if event not in ("order.paid", "qr_code.credited"):
         return {"status": "ignored", "reason": "unsupported event"}
         
-    order_entity = payload.get("payload", {}).get("order", {}).get("entity", {})
-    if not order_entity:
-        return {"status": "ignored", "reason": "missing order entity"}
+    if event == "order.paid":
+        order_entity = payload.get("payload", {}).get("order", {}).get("entity", {})
+        if not order_entity:
+            return {"status": "ignored", "reason": "missing order entity"}
+            
+        order_id = order_entity.get("id")
+        amount_in_paise = order_entity.get("amount", 0)
+        currency = order_entity.get("currency", "")
+        receipt = order_entity.get("receipt", "")
+        status = order_entity.get("status")
         
-    order_id = order_entity.get("id")
-    amount_in_paise = order_entity.get("amount", 0)
-    currency = order_entity.get("currency", "")
-    receipt = order_entity.get("receipt", "")
-    status = order_entity.get("status")
-    
-    if not order_id:
-        return {"status": "ignored", "reason": "missing order_id"}
+        if not order_id:
+            return {"status": "ignored", "reason": "missing order_id"}
+        if status != "paid":
+            return {"status": "ignored", "reason": "order not paid"}
+    else:
+        # qr_code.credited
+        payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
+        qr_code_entity = payload.get("payload", {}).get("qr_code", {}).get("entity", {})
+        if not payment_entity or not qr_code_entity:
+            return {"status": "ignored", "reason": "missing payment or qr_code entity"}
+            
+        order_id = qr_code_entity.get("id")
+        amount_in_paise = payment_entity.get("amount", 0)
+        currency = payment_entity.get("currency", "")
+        receipt = payment_entity.get("notes", {}).get("receipt", "")
+        status = payment_entity.get("status")
         
-    if status != "paid":
-        return {"status": "ignored", "reason": "order not paid"}
+        if not order_id:
+            return {"status": "ignored", "reason": "missing qr_id"}
+        if status != "captured":
+            return {"status": "ignored", "reason": "payment not captured"}
         
     if currency != "INR":
         return {"status": "ignored", "reason": "invalid currency"}
@@ -167,7 +182,7 @@ async def razorpay_webhook(
     if amount <= Decimal("0"):
         return {"status": "ignored", "reason": "invalid amount"}
         
-    if not receipt.startswith("adv_") or not receipt.endswith("_topup"):
+    if not receipt or not receipt.startswith("adv_"):
         return {"status": "ignored", "reason": "unrecognized receipt format"}
         
     try:
@@ -181,6 +196,23 @@ async def razorpay_webhook(
         result = await session.execute(stmt)
         if result.scalar_one_or_none():
             return {"status": "already_processed"}
+            
+        # Additional validation for QR payments against our PaymentRequest
+        if event == "qr_code.credited":
+            pr_stmt = select(PaymentRequest).where(PaymentRequest.provider_order_id == order_id)
+            pr_result = await session.execute(pr_stmt)
+            pr = pr_result.scalar_one_or_none()
+            if not pr:
+                return {"status": "ignored", "reason": "unknown payment request"}
+            if pr.amount != amount:
+                return {"status": "ignored", "reason": "amount mismatch"}
+            if pr.currency != currency:
+                return {"status": "ignored", "reason": "currency mismatch"}
+            if pr.advertiser_id != advertiser_id:
+                return {"status": "ignored", "reason": "advertiser mismatch"}
+            
+            pr.status = "paid"
+            session.add(pr)
             
         await BillingService.record_deposit(
             session=session,
@@ -204,7 +236,7 @@ async def razorpay_webhook(
 async def get_publisher_ledger(
     publisher_id: int,
     session: AsyncSession = Depends(get_session),
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
 ) -> LedgerResponse:
     """Get the financial ledger and balance for a publisher."""
     pub = await session.get(Publisher, publisher_id)
@@ -233,7 +265,7 @@ async def request_payout(
     publisher_id: int,
     request: PayoutRequest,
     session: AsyncSession = Depends(get_session),
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
 ) -> TransactionResponse:
     """Request a payout from publisher earnings."""
     pub = await session.get(Publisher, publisher_id)

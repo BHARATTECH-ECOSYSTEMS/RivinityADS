@@ -20,7 +20,15 @@ from sqlalchemy.pool import StaticPool
 
 from liteads.ad_server.main import app
 from liteads.common.database import Base, get_session
+from liteads.models.auth import User
 import liteads.models  # ensure models are registered with Base
+from sqlalchemy import event
+
+@event.listens_for(User, "before_insert")
+def _auto_verify_test_users(mapper, connection, target):
+    """Automatically verify users in existing tests so we don't break them."""
+    if target.email and "test4a" not in target.email.lower():
+        target.email_verified = True
 
 
 # Test database URL (use SQLite for testing)

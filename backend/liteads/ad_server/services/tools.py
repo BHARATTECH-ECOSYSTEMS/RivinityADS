@@ -54,7 +54,6 @@ async def create_draft_campaign(
     # 1. Resolve and validate authenticated advertiser context
     if not user.advertiser_id:
         raise ToolAuthorizationError("User does not have an associated advertiser account")
-        
     advertiser = await session.get(Advertiser, user.advertiser_id)
     if advertiser is None:
         raise ToolAuthorizationError("Advertiser account not found")
@@ -130,7 +129,6 @@ async def update_campaign(
     # 1. Resolve advertiser context
     if not user.advertiser_id:
         raise ToolAuthorizationError("User does not have an associated advertiser account")
-
     # 2. Fetch campaign
     campaign = await session.get(Campaign, campaign_id)
     if not campaign:
@@ -229,7 +227,6 @@ async def update_targeting(
     """
     if not user.advertiser_id:
         raise ToolAuthorizationError("User does not have an associated advertiser account")
-
     campaign = await session.get(Campaign, campaign_id)
     if not campaign:
         raise ToolValidationError(f"Campaign {campaign_id} not found")
@@ -306,6 +303,7 @@ async def update_targeting(
 
 async def request_payment(
     user: User,
+    session: AsyncSession,
     amount: Decimal,
 ) -> PaymentOrderResponse:
     """
@@ -323,20 +321,41 @@ async def request_payment(
     """
     if not user.advertiser_id:
         raise ToolAuthorizationError("User does not have an associated advertiser account")
-
     if amount < Decimal("100"):
         raise ToolValidationError("Amount to top up must be at least ₹100")
 
+    import uuid
+    from liteads.models.finance import PaymentRequest
+    
+    internal_reference = f"adv_{user.advertiser_id}_qr_{uuid.uuid4().hex[:12]}"
+    
     razorpay_client = get_razorpay_client()
     try:
-        order = razorpay_client.create_order(
+        # Create Razorpay QR code instead of regular order
+        qr = razorpay_client.create_qr_code(
             amount=amount,
-            receipt=f"adv_{user.advertiser_id}_topup"
+            receipt=internal_reference,
+            advertiser_id=user.advertiser_id
         )
-        return PaymentOrderResponse(
-            order_id=order["id"],
+        qr_id = qr["id"]
+        qr_image_url = qr.get("image_url")
+
+        # Persist the request
+        payment_request = PaymentRequest(
+            advertiser_id=user.advertiser_id,
             amount=amount,
-            currency=order.get("currency", "INR")
+            currency="INR",
+            provider_order_id=qr_id,
+            status="pending"
+        )
+        session.add(payment_request)
+        await session.commit()
+
+        return PaymentOrderResponse(
+            order_id=qr_id,
+            amount=amount,
+            currency="INR",
+            qr_image_url=qr_image_url
         )
     except RazorpayClientError as e:
         raise ToolError(f"Payment gateway error: {str(e)}") from e
@@ -363,7 +382,6 @@ async def activate_campaign(
     """
     if not user.advertiser_id:
         raise ToolAuthorizationError("User does not have an associated advertiser account")
-
     try:
         campaign = await activate_campaign_logic(
             session=session,

@@ -200,6 +200,16 @@ async def draft_campaign(test_db: AsyncSession, advertiser_user: User):
     test_db.add(campaign)
     await test_db.commit()
     await test_db.refresh(campaign)
+    
+    # Add required relations for validation
+    from liteads.models.ad import Creative, TargetingRule
+    cr = Creative(campaign_id=campaign.id, title="Test", landing_url="https://test.com", status=Status.ACTIVE)
+    tr = TargetingRule(campaign_id=campaign.id, rule_type="geo", rule_value={"entries": []})
+    test_db.add(cr)
+    test_db.add(tr)
+    await test_db.commit()
+    await test_db.refresh(campaign)
+    
     return campaign
 
 
@@ -216,6 +226,15 @@ async def active_campaign(test_db: AsyncSession, advertiser_user: User):
     test_db.add(campaign)
     await test_db.commit()
     await test_db.refresh(campaign)
+    
+    from liteads.models.ad import Creative, TargetingRule
+    cr = Creative(campaign_id=campaign.id, title="Test", landing_url="https://test.com", status=Status.ACTIVE)
+    tr = TargetingRule(campaign_id=campaign.id, rule_type="geo", rule_value={"entries": []})
+    test_db.add(cr)
+    test_db.add(tr)
+    await test_db.commit()
+    await test_db.refresh(campaign)
+    
     return campaign
 
 
@@ -669,24 +688,23 @@ async def test_request_payment_success(test_db: AsyncSession, advertiser_user: U
     initial_balance = adv.balance
     
     # Mock successful creation
-    mock_razorpay_client.create_order.return_value = {
+    mock_razorpay_client.create_qr_code.return_value = {
         "id": "order_test123",
         "currency": "INR",
-        "amount": 50000
+        "amount": 50000,
+        "image_url": "http://qr"
     }
     
     amount = Decimal("500.00")
-    result = await request_payment(user=advertiser_user, amount=amount)
+    result = await request_payment(user=advertiser_user, session=test_db, amount=amount)
     
     assert isinstance(result, PaymentOrderResponse)
     assert result.order_id == "order_test123"
     assert result.amount == amount
     assert result.currency == "INR"
+    assert result.qr_image_url == "http://qr"
     
-    mock_razorpay_client.create_order.assert_called_once_with(
-        amount=amount,
-        receipt=f"adv_{advertiser_user.advertiser_id}_topup"
-    )
+    mock_razorpay_client.create_qr_code.assert_called_once()
     
     await test_db.refresh(adv)
     assert adv.balance == initial_balance
@@ -697,38 +715,38 @@ async def test_request_payment_success(test_db: AsyncSession, advertiser_user: U
     assert len(txs) == 0
 
 @pytest.mark.asyncio
-async def test_request_payment_missing_advertiser(publisher_user: User):
+async def test_request_payment_missing_advertiser(test_db: AsyncSession, publisher_user: User):
     # 5. Missing advertiser context rejected.
     with pytest.raises(ToolAuthorizationError, match="User does not have an associated advertiser account"):
-        await request_payment(user=publisher_user, amount=Decimal("500.00"))
+        await request_payment(user=publisher_user, session=test_db, amount=Decimal("500.00"))
 
 @pytest.mark.asyncio
-async def test_request_payment_zero_amount(advertiser_user: User):
+async def test_request_payment_zero_amount(test_db: AsyncSession, advertiser_user: User):
     # 6. Zero amount rejected.
     with pytest.raises(ToolValidationError, match="Amount to top up must be at least ₹100"):
-        await request_payment(user=advertiser_user, amount=Decimal("0.00"))
+        await request_payment(user=advertiser_user, session=test_db, amount=Decimal("0.00"))
 
 @pytest.mark.asyncio
-async def test_request_payment_negative_amount(advertiser_user: User):
+async def test_request_payment_negative_amount(test_db: AsyncSession, advertiser_user: User):
     # 7. Negative amount rejected.
     with pytest.raises(ToolValidationError, match="Amount to top up must be at least ₹100"):
-        await request_payment(user=advertiser_user, amount=Decimal("-500.00"))
+        await request_payment(user=advertiser_user, session=test_db, amount=Decimal("-500.00"))
 
 @pytest.mark.asyncio
-async def test_request_payment_invalid_amount(advertiser_user: User):
+async def test_request_payment_invalid_amount(test_db: AsyncSession, advertiser_user: User):
     # 8. Invalid amount rejected (less than min).
     with pytest.raises(ToolValidationError, match="Amount to top up must be at least ₹100"):
-        await request_payment(user=advertiser_user, amount=Decimal("50.00"))
+        await request_payment(user=advertiser_user, session=test_db, amount=Decimal("50.00"))
 
 @pytest.mark.asyncio
-async def test_request_payment_razorpay_failure(advertiser_user: User, mock_razorpay_client):
+async def test_request_payment_razorpay_failure(test_db: AsyncSession, advertiser_user: User, mock_razorpay_client):
     # 9. Razorpay provider failure handled safely.
-    mock_razorpay_client.create_order.side_effect = RazorpayClientError("Gateway down")
+    mock_razorpay_client.create_qr_code.side_effect = RazorpayClientError("Gateway down")
     
     with pytest.raises(ToolError, match="Payment gateway error: Gateway down"):
-        await request_payment(user=advertiser_user, amount=Decimal("500.00"))
+        await request_payment(user=advertiser_user, session=test_db, amount=Decimal("500.00"))
     
-    mock_razorpay_client.create_order.assert_called_once()
+    mock_razorpay_client.create_qr_code.assert_called_once()
 
 
 from liteads.ad_server.services.tools import activate_campaign, ActivateCampaignResult
@@ -815,3 +833,56 @@ async def test_activate_campaign_missing_advertiser_context(test_db: AsyncSessio
     # 8. Missing advertiser context rejected.
     with pytest.raises(ToolAuthorizationError, match="User does not have an associated advertiser account"):
         await activate_campaign(user=publisher_user, session=test_db, campaign_id=draft_campaign.id)
+
+@pytest.mark.asyncio
+async def test_activate_campaign_missing_creative(test_db: AsyncSession, advertiser_user: User, draft_campaign: Campaign):
+    from liteads.models.ad import Creative
+    from sqlalchemy import delete
+    adv = await test_db.get(Advertiser, advertiser_user.advertiser_id)
+    adv.balance = Decimal("100.00")
+    await test_db.flush()
+    
+    await test_db.execute(delete(Creative).where(Creative.campaign_id == draft_campaign.id))
+    await test_db.flush()
+    
+    with pytest.raises(ToolValidationError, match="Campaign must have at least one creative"):
+        await activate_campaign(user=advertiser_user, session=test_db, campaign_id=draft_campaign.id)
+
+@pytest.mark.asyncio
+async def test_activate_campaign_missing_targeting(test_db: AsyncSession, advertiser_user: User, draft_campaign: Campaign):
+    from liteads.models.ad import TargetingRule
+    from sqlalchemy import delete
+    adv = await test_db.get(Advertiser, advertiser_user.advertiser_id)
+    adv.balance = Decimal("100.00")
+    await test_db.flush()
+    
+    await test_db.execute(delete(TargetingRule).where(TargetingRule.campaign_id == draft_campaign.id))
+    await test_db.flush()
+    
+    with pytest.raises(ToolValidationError, match="Campaign must have targeting configured"):
+        await activate_campaign(user=advertiser_user, session=test_db, campaign_id=draft_campaign.id)
+
+@pytest.mark.asyncio
+async def test_activate_campaign_zero_budget(test_db: AsyncSession, advertiser_user: User, draft_campaign: Campaign):
+    adv = await test_db.get(Advertiser, advertiser_user.advertiser_id)
+    adv.balance = Decimal("100.00")
+    await test_db.flush()
+    
+    draft_campaign.budget_daily = Decimal("0.00")
+    await test_db.flush()
+    
+    with pytest.raises(ToolValidationError, match="Campaign must have a daily budget greater than zero"):
+        await activate_campaign(user=advertiser_user, session=test_db, campaign_id=draft_campaign.id)
+
+@pytest.mark.asyncio
+async def test_activate_campaign_total_budget_less_than_daily(test_db: AsyncSession, advertiser_user: User, draft_campaign: Campaign):
+    adv = await test_db.get(Advertiser, advertiser_user.advertiser_id)
+    adv.balance = Decimal("100.00")
+    await test_db.flush()
+
+    draft_campaign.budget_daily = Decimal("100.00")
+    draft_campaign.budget_total = Decimal("50.00")
+    await test_db.flush()
+    
+    with pytest.raises(ToolValidationError, match="Total budget cannot be less than daily budget"):
+        await activate_campaign(user=advertiser_user, session=test_db, campaign_id=draft_campaign.id)

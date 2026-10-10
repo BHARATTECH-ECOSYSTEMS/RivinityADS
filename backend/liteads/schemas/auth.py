@@ -10,6 +10,7 @@ class UserResponse(BaseModel):
     role: str
     advertiser_id: int | None = None
     publisher_id: int | None = None
+    email_verified: bool = False
 
 
 class RegisterRequest(BaseModel):

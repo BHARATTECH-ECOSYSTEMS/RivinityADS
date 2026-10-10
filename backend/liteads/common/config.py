@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -65,6 +66,7 @@ class ServerSettings(BaseSettings):
     port: int = 8000
     workers: int = 4
     reload: bool = False
+    frontend_url: str = "http://localhost:5173"
 
 
 class AdServingSettings(BaseSettings):
@@ -159,6 +161,24 @@ class AuthSettings(BaseSettings):
         return v
 
 
+class EmailSettings(BaseSettings):
+    """Email delivery configuration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="LITEADS_EMAIL__",
+        extra="ignore",
+    )
+
+    host: str = ""
+    port: int = 587
+    user: str = ""
+    password: str = ""
+    from_address: str = "noreply@liteads.local"
+    use_tls: bool = True
+    timeout_seconds: int = 10
+    mock_delivery: bool = False  # Set to True in test environments
+
+
 class PaymentSettings(BaseSettings):
     """Payment integration configuration."""
 
@@ -181,6 +201,30 @@ class OpenAISettings(BaseSettings):
     )
 
     api_key: str = ""
+
+
+class GeminiSettings(BaseSettings):
+    """Google Gemini API configuration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="GEMINI_",
+        extra="ignore",
+    )
+
+    api_key: str = ""
+    model: str = "gemini-flash-latest"
+
+
+class GroqSettings(BaseSettings):
+    """Groq API configuration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="GROQ_",
+        extra="ignore",
+    )
+
+    api_key: str = ""
+    model: str = "openai/gpt-oss-120b"
 
 
 class Settings(BaseSettings):
@@ -208,11 +252,15 @@ class Settings(BaseSettings):
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
+    email: EmailSettings = Field(default_factory=EmailSettings)
     tracking: TrackingSettings = Field(default_factory=TrackingSettings)
     geo: GeoSettings = Field(default_factory=GeoSettings)
     laya: LayaSettings = Field(default_factory=LayaSettings)
     payment: PaymentSettings = Field(default_factory=PaymentSettings)
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
+    gemini: GeminiSettings = Field(default_factory=GeminiSettings)
+    groq: GroqSettings = Field(default_factory=GroqSettings)
+    llm_provider: Literal["openai", "gemini", "groq"] = "openai"
 
     @field_validator("env")
     @classmethod
@@ -254,6 +302,7 @@ def get_settings() -> Settings:
     """
     import os
 
+    load_dotenv(Path(__file__).parent.parent.parent / ".env")
     env = os.getenv("LITEADS_ENV", "dev")
 
     # Find config directory
@@ -296,6 +345,8 @@ def get_settings() -> Settings:
         flat_config["monitoring"] = MonitoringSettings(**merged["monitoring"])
     if "auth" in merged:
         flat_config["auth"] = AuthSettings(**merged["auth"])
+    if "email" in merged:
+        flat_config["email"] = EmailSettings(**merged["email"])
     if "tracking" in merged:
         flat_config["tracking"] = TrackingSettings(**merged["tracking"])
     if "laya" in merged:
@@ -304,6 +355,10 @@ def get_settings() -> Settings:
         flat_config["payment"] = PaymentSettings(**merged["payment"])
     if "openai" in merged:
         flat_config["openai"] = OpenAISettings(**merged["openai"])
+    if "gemini" in merged:
+        flat_config["gemini"] = GeminiSettings(**merged["gemini"])
+    if "groq" in merged:
+        flat_config["groq"] = GroqSettings(**merged["groq"])
 
     # Nested settings are created from YAML above, so apply environment overrides
     # explicitly for deployments such as Docker Compose.
@@ -318,6 +373,13 @@ def get_settings() -> Settings:
         }
     )
 
+    server = flat_config.get("server", ServerSettings())
+    flat_config["server"] = server.model_copy(
+        update={
+            "frontend_url": os.getenv("LITEADS_SERVER__FRONTEND_URL", server.frontend_url),
+        }
+    )
+
     redis = flat_config.get("redis", RedisSettings())
     flat_config["redis"] = redis.model_copy(
         update={
@@ -327,6 +389,38 @@ def get_settings() -> Settings:
             "password": os.getenv("LITEADS_REDIS__PASSWORD", redis.password),
         }
     )
+
+    email = flat_config.get("email", EmailSettings())
+    flat_config["email"] = email.model_copy(
+        update={
+            "host": os.getenv("LITEADS_EMAIL__HOST", email.host),
+            "port": int(os.getenv("LITEADS_EMAIL__PORT", str(email.port))),
+            "user": os.getenv("LITEADS_EMAIL__USER", email.user),
+            "password": os.getenv("LITEADS_EMAIL__PASSWORD", email.password),
+            "from_address": os.getenv("LITEADS_EMAIL__FROM_ADDRESS", email.from_address),
+            "mock_delivery": os.getenv("LITEADS_EMAIL__MOCK_DELIVERY", str(email.mock_delivery)).lower() in ("true", "1", "yes"),
+        }
+    )
+
+    openai = flat_config.get("openai", OpenAISettings())
+    flat_config["openai"] = openai.model_copy(
+        update={"api_key": os.getenv("OPENAI_API_KEY", openai.api_key)}
+    )
+    gemini = flat_config.get("gemini", GeminiSettings())
+    flat_config["gemini"] = gemini.model_copy(
+        update={
+            "api_key": os.getenv("GEMINI_API_KEY", gemini.api_key),
+            "model": os.getenv("GEMINI_MODEL", gemini.model),
+        }
+    )
+    groq = flat_config.get("groq", GroqSettings())
+    flat_config["groq"] = groq.model_copy(
+        update={
+            "api_key": os.getenv("GROQ_API_KEY", groq.api_key),
+            "model": os.getenv("GROQ_MODEL", groq.model),
+        }
+    )
+    flat_config["llm_provider"] = os.getenv("LLM_PROVIDER", "openai").lower()
 
     laya = flat_config.get("laya", LayaSettings())
     flat_config["laya"] = laya.model_copy(

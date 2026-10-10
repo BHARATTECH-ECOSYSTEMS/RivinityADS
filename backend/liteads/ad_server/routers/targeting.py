@@ -7,11 +7,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from liteads.common.database import get_session
-from liteads.common.security import current_user, require_roles
+from liteads.common.security import current_user, require_roles, verified_user
 from liteads.models import Campaign, TargetingRule, User
 from liteads.schemas.targeting import GeoEntry, TargetingResponse, TargetingSet
 
-router = APIRouter(dependencies=[Depends(current_user)])
+router = APIRouter(dependencies=[Depends(verified_user)])
 
 
 async def _assert_campaign_access(user: User, campaign_id: int, session: AsyncSession) -> Campaign:

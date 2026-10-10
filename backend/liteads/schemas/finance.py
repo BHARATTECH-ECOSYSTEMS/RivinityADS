@@ -57,3 +57,4 @@ class PaymentOrderResponse(BaseModel):
     order_id: str
     amount: Decimal
     currency: str
+    qr_image_url: str | None = None

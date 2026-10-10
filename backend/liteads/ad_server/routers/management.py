@@ -10,8 +10,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from liteads.common.database import get_session
-from liteads.common.security import current_user, require_roles
+from liteads.common.security import current_user, verified_user, require_roles, verified_user
 from liteads.ad_server.services.campaign_activation import activate_campaign_logic, CampaignActivationError
+from liteads.ad_server.services.creative_moderation import CreativeModerationService
+from liteads.ad_server.services.domain_verification import DomainVerificationService
 from liteads.models import (
     AdSlot,
     Advertiser,
@@ -24,6 +26,8 @@ from liteads.models import (
     PublisherDailyStat,
     PublisherProperty,
     User,
+    Status,
+    ModerationStatus,
 )
 from liteads.management.api_key_service import ApiKeyService
 from liteads.schemas.management import (
@@ -63,7 +67,7 @@ from liteads.ad_server.services.optimization_executor import OptimizationExecuto
 from liteads.ad_server.services.optimization_policy import OptimizationPolicyResult
 from liteads.models.ad import Suggestion
 
-router = APIRouter(dependencies=[Depends(current_user)])
+router = APIRouter(dependencies=[Depends(verified_user)])
 
 
 def _not_found(entity: str, entity_id: int) -> HTTPException:
@@ -136,7 +140,7 @@ async def update_advertiser(
 @router.get("/campaign", response_model=list[CampaignResponse], dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def list_campaigns(
     advertiser_id: int | None = Query(default=None),
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[Campaign]:
     query = select(Campaign).order_by(Campaign.id)
@@ -150,7 +154,7 @@ async def list_campaigns(
 
 @router.post("/campaign", response_model=CampaignResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def create_campaign(
-    payload: CampaignCreate, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+    payload: CampaignCreate, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)
 ) -> Campaign:
     _assert_advertiser_access(user, payload.advertiser_id)
     if await session.get(Advertiser, payload.advertiser_id) is None:
@@ -168,7 +172,7 @@ async def create_campaign(
 
 
 @router.get("/campaign/{campaign_id}", response_model=CampaignResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
-async def get_campaign(campaign_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)) -> Campaign:
+async def get_campaign(campaign_id: int, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)) -> Campaign:
     campaign = await session.get(Campaign, campaign_id)
     if campaign is None:
         raise _not_found("Campaign", campaign_id)
@@ -180,7 +184,7 @@ async def get_campaign(campaign_id: int, user: User = Depends(current_user), ses
 async def update_campaign(
     campaign_id: int,
     payload: CampaignUpdate,
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session),
 ) -> Campaign:
     campaign = await session.get(Campaign, campaign_id)
@@ -197,22 +201,10 @@ async def update_campaign(
 @router.post("/campaign/{campaign_id}/activate", response_model=CampaignResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def activate_campaign(
     campaign_id: int,
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session),
 ) -> Campaign:
     """Activate a DRAFT campaign."""
-    _assert_advertiser_access(user, campaign_id) # wait, _assert_advertiser_access takes advertiser_id. Let's not call it if the service handles it. Actually we don't need it if the service checks it.
-    
-    # We need to pass the advertiser id. We can get it from the user.
-    if user.role == "advertiser":
-        advertiser_id = user.advertiser_id
-    else:
-        # If admin, they could activate any campaign, but we need to pass the campaign's advertiser_id.
-        # So we fetch the campaign here first, or let the service do it.
-        # To maintain identical behavior, let's just fetch it.
-        pass
-
-    # Wait, _assert_advertiser_access takes user and advertiser_id.
     campaign = await session.get(Campaign, campaign_id)
     if campaign is None:
         raise _not_found("Campaign", campaign_id)
@@ -285,7 +277,7 @@ async def delete_campaign_assignment(
 @router.get("/creative", response_model=list[CreativeResponse], dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def list_creatives(
     campaign_id: int,
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[Creative]:
     await _assert_campaign_access(user, campaign_id, session)
@@ -297,11 +289,34 @@ async def list_creatives(
 @router.post("/creative", response_model=CreativeResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def create_creative(
     payload: CreativeCreate,
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session)
 ) -> Creative:
     await _assert_campaign_access(user, payload.campaign_id, session)
-    creative = Creative(**payload.model_dump())
+    
+    if payload.landing_url and user.role == "advertiser":
+        domain_service = DomainVerificationService(session)
+        is_verified = await domain_service.is_url_verified_for_advertiser(user.advertiser_id, payload.landing_url)
+        if not is_verified:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Landing URL domain is not verified")
+    
+    decision = await CreativeModerationService.moderate_creative(
+        title=payload.title,
+        description=payload.description,
+        image_url=payload.image_url,
+        video_url=payload.video_url,
+        landing_url=payload.landing_url
+    )
+    
+    data = payload.model_dump()
+    data["moderation_status"] = decision.status
+    data["moderation_reason"] = decision.reason
+    
+    # If not approved, force delivery status to PENDING so it cannot be served
+    if decision.status != ModerationStatus.APPROVED and data.get("status") == Status.ACTIVE:
+        data["status"] = Status.PENDING
+        
+    creative = Creative(**data)
     session.add(creative)
     await session.commit()
     await session.refresh(creative)
@@ -309,7 +324,7 @@ async def create_creative(
 
 
 @router.get("/creative/{creative_id}", response_model=CreativeResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
-async def get_creative(creative_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)) -> Creative:
+async def get_creative(creative_id: int, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)) -> Creative:
     creative = await session.get(Creative, creative_id)
     if creative is None:
         raise _not_found("Creative", creative_id)
@@ -321,7 +336,7 @@ async def get_creative(creative_id: int, user: User = Depends(current_user), ses
 async def update_creative(
     creative_id: int,
     payload: CreativeUpdate,
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session),
 ) -> Creative:
     creative = await session.get(Creative, creative_id)
@@ -330,6 +345,32 @@ async def update_creative(
     await _assert_campaign_access(user, creative.campaign_id, session)
     for key, value in payload.model_dump(exclude_unset=True).items():
         setattr(creative, key, value)
+        
+    if "landing_url" in payload.model_dump(exclude_unset=True) and user.role == "advertiser":
+        domain_service = DomainVerificationService(session)
+        is_verified = await domain_service.is_url_verified_for_advertiser(user.advertiser_id, creative.landing_url)
+        if not is_verified:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Landing URL domain is not verified")
+        
+    # If sensitive fields changed, re-evaluate moderation
+    updated_fields = payload.model_dump(exclude_unset=True)
+    if any(k in updated_fields for k in ("title", "description", "image_url", "video_url", "landing_url")):
+        decision = await CreativeModerationService.moderate_creative(
+            title=creative.title,
+            description=creative.description,
+            image_url=creative.image_url,
+            video_url=creative.video_url,
+            landing_url=creative.landing_url
+        )
+        creative.moderation_status = decision.status
+        creative.moderation_reason = decision.reason
+        creative.moderated_at = None
+        creative.moderated_by_id = None
+        
+    # Force status to PENDING if it's not approved and user wants it ACTIVE
+    if creative.moderation_status != ModerationStatus.APPROVED and creative.status == Status.ACTIVE:
+        creative.status = Status.PENDING
+        
     await session.commit()
     await session.refresh(creative)
     return creative
@@ -337,7 +378,7 @@ async def update_creative(
 @router.delete("/creative/{creative_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def delete_creative(
     creative_id: int,
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session),
 ) -> None:
     creative = await session.get(Creative, creative_id)
@@ -367,7 +408,7 @@ async def create_publisher(
 
 @router.get("/publisher/assignments", response_model=list[PublisherAssignmentResponse], dependencies=[Depends(require_roles("publisher"))])
 async def get_publisher_assignments(
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[PublisherAssignmentResponse]:
     if not user.publisher_id:
@@ -413,7 +454,7 @@ async def get_publisher_assignments(
 
 
 @router.get("/publisher/{publisher_id}", response_model=PublisherResponse, dependencies=[Depends(require_roles("admin", "publisher"))])
-async def get_publisher(publisher_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)) -> Publisher:
+async def get_publisher(publisher_id: int, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)) -> Publisher:
     publisher = await session.get(Publisher, publisher_id)
     if publisher is None:
         raise _not_found("Publisher", publisher_id)
@@ -439,7 +480,7 @@ async def update_publisher(
 
 @router.get("/publisher/{publisher_id}/keys", response_model=list[ApiKeyResponse], dependencies=[Depends(require_roles("admin", "publisher"))])
 async def list_publisher_keys(
-    publisher_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+    publisher_id: int, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)
 ) -> list[ApiKeyResponse]:
     _assert_publisher_access(user, publisher_id)
     if await session.get(Publisher, publisher_id) is None:
@@ -449,7 +490,7 @@ async def list_publisher_keys(
 
 @router.post("/publisher/{publisher_id}/keys", response_model=ApiKeyResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin", "publisher"))])
 async def create_publisher_key(
-    publisher_id: int, payload: ApiKeyCreate, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+    publisher_id: int, payload: ApiKeyCreate, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)
 ) -> ApiKeyResponse:
     _assert_publisher_access(user, publisher_id)
     if await session.get(Publisher, publisher_id) is None:
@@ -463,7 +504,7 @@ async def create_publisher_key(
 
 @router.delete("/publisher/{publisher_id}/keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles("admin", "publisher"))])
 async def revoke_publisher_key(
-    publisher_id: int, key_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+    publisher_id: int, key_id: int, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)
 ) -> None:
     _assert_publisher_access(user, publisher_id)
     if not await ApiKeyService.revoke_api_key(session, publisher_id, key_id):
@@ -473,7 +514,7 @@ async def revoke_publisher_key(
 @router.get("/slot", response_model=list[SlotResponse], dependencies=[Depends(require_roles("admin", "publisher"))])
 async def list_slots(
     publisher_id: int | None = Query(default=None),
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[AdSlot]:
     query = select(AdSlot).order_by(AdSlot.id)
@@ -486,7 +527,7 @@ async def list_slots(
 
 
 @router.post("/slot", response_model=SlotResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin", "publisher"))])
-async def create_slot(payload: SlotCreate, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)) -> AdSlot:
+async def create_slot(payload: SlotCreate, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)) -> AdSlot:
     publisher_id = payload.publisher_id or user.publisher_id
     if not publisher_id:
         raise HTTPException(status_code=400, detail="publisher_id is required")
@@ -503,7 +544,7 @@ async def create_slot(payload: SlotCreate, user: User = Depends(current_user), s
 
 
 @router.get("/slot/{slot_id}", response_model=SlotResponse, dependencies=[Depends(require_roles("admin", "publisher"))])
-async def get_slot(slot_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)) -> AdSlot:
+async def get_slot(slot_id: int, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)) -> AdSlot:
     slot = await session.get(AdSlot, slot_id)
     if slot is None:
         raise _not_found("Slot", slot_id)
@@ -513,7 +554,7 @@ async def get_slot(slot_id: int, user: User = Depends(current_user), session: As
 
 @router.patch("/slot/{slot_id}", response_model=SlotResponse, dependencies=[Depends(require_roles("admin", "publisher"))])
 async def update_slot(
-    slot_id: int, payload: SlotUpdate, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+    slot_id: int, payload: SlotUpdate, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)
 ) -> AdSlot:
     slot = await session.get(AdSlot, slot_id)
     if slot is None:
@@ -529,7 +570,7 @@ async def update_slot(
 @router.get("/advertiser/{advertiser_id}/reporting", response_model=AdvertiserReportingResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def advertiser_reporting(
     advertiser_id: int,
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
     campaign_id: int | None = Query(default=None),
     start_date: date | None = Query(default=None),
     end_date: date | None = Query(default=None),
@@ -615,7 +656,7 @@ async def advertiser_reporting(
 @router.get("/publisher/{publisher_id}/reporting", response_model=PublisherReportingResponse, dependencies=[Depends(require_roles("admin", "publisher"))])
 async def publisher_reporting(
     publisher_id: int,
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
     start_date: date | None = Query(default=None),
     end_date: date | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
@@ -680,7 +721,7 @@ async def publisher_reporting(
 
 @router.get("/publisher/{publisher_id}/property", response_model=list[PublisherPropertyResponse], dependencies=[Depends(require_roles("admin", "publisher"))])
 async def list_publisher_properties(
-    publisher_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+    publisher_id: int, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)
 ) -> list[PublisherProperty]:
     _assert_publisher_access(user, publisher_id)
     query = select(PublisherProperty).where(PublisherProperty.publisher_id == publisher_id).order_by(PublisherProperty.id)
@@ -690,7 +731,7 @@ async def list_publisher_properties(
 
 @router.post("/publisher/{publisher_id}/property", response_model=PublisherPropertyResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin", "publisher"))])
 async def create_publisher_property(
-    publisher_id: int, payload: PublisherPropertyCreate, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+    publisher_id: int, payload: PublisherPropertyCreate, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)
 ) -> PublisherProperty:
     _assert_publisher_access(user, publisher_id)
     if await session.get(Publisher, publisher_id) is None:
@@ -706,7 +747,7 @@ async def create_publisher_property(
 
 @router.get("/publisher/property/{property_id}", response_model=PublisherPropertyResponse, dependencies=[Depends(require_roles("admin", "publisher"))])
 async def get_publisher_property(
-    property_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+    property_id: int, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)
 ) -> PublisherProperty:
     property_obj = await session.get(PublisherProperty, property_id)
     if property_obj is None:
@@ -717,7 +758,7 @@ async def get_publisher_property(
 
 @router.patch("/publisher/property/{property_id}", response_model=PublisherPropertyResponse, dependencies=[Depends(require_roles("admin", "publisher"))])
 async def update_publisher_property(
-    property_id: int, payload: PublisherPropertyUpdate, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+    property_id: int, payload: PublisherPropertyUpdate, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)
 ) -> PublisherProperty:
     property_obj = await session.get(PublisherProperty, property_id)
     if property_obj is None:
@@ -732,7 +773,7 @@ async def update_publisher_property(
 
 @router.get("/slot/{slot_id}/tag", dependencies=[Depends(require_roles("admin", "publisher"))])
 async def generate_slot_tag(
-    slot_id: int, user: User = Depends(current_user), session: AsyncSession = Depends(get_session)
+    slot_id: int, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)
 ):
     slot = await session.get(AdSlot, slot_id)
     if slot is None:
@@ -762,7 +803,7 @@ async def generate_slot_tag(
 async def create_api_key_for_publisher(
     publisher_id: int,
     payload: ApiKeyCreate,
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session),
 ) -> ApiKeyResponse:
     _assert_publisher_access(user, publisher_id)
@@ -796,7 +837,7 @@ async def create_api_key_for_publisher(
 )
 async def create_publisher_api_key(
     payload: PublisherApiKeyCreate,
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session),
 ) -> PublisherApiKeyCreateResponse:
     pub_id = payload.publisher_id or user.id
@@ -826,7 +867,7 @@ async def create_publisher_api_key(
 )
 async def list_publisher_api_keys(
     publisher_id: int,
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[ApiKeyResponse]:
     _assert_publisher_access(user, publisher_id)
@@ -857,7 +898,7 @@ async def list_publisher_api_keys(
 async def revoke_publisher_api_key_by_pub(
     publisher_id: int,
     key_id: int,
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session),
 ) -> None:
     _assert_publisher_access(user, publisher_id)
@@ -874,7 +915,7 @@ async def revoke_publisher_api_key_by_pub(
 )
 async def revoke_publisher_api_key(
     key_id: int,
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session),
 ) -> None:
     api_key = await session.get(PublisherApiKey, key_id)
@@ -888,7 +929,7 @@ async def revoke_publisher_api_key(
 @router.get("/campaign/{campaign_id}/suggestions", response_model=list[SuggestionResponse], dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def get_campaign_suggestions(
     campaign_id: int, 
-    user: User = Depends(current_user), 
+    user: User = Depends(verified_user), 
     session: AsyncSession = Depends(get_session)
 ) -> list[Suggestion]:
     campaign = await session.get(Campaign, campaign_id)
@@ -905,7 +946,7 @@ async def get_campaign_suggestions(
 async def update_suggestion_status(
     suggestion_id: int,
     payload: SuggestionStatusPatch,
-    user: User = Depends(current_user),
+    user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session)
 ) -> Suggestion:
     if payload.status not in ("APPLIED", "REJECTED"):

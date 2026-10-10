@@ -14,6 +14,7 @@ from liteads.common.cache import CacheKeys, redis_client
 from liteads.common.logger import get_logger
 from liteads.common.utils import json_dumps, json_loads
 from liteads.models import Campaign, Creative, Status, TargetingRule
+from liteads.models.base import ModerationStatus
 from liteads.rec_engine.retrieval.base import BaseRetrieval
 from liteads.schemas.internal import AdCandidate, UserContext
 from liteads.ad_server.services.targeting import match_geo, match_sector
@@ -225,7 +226,7 @@ class TargetingRetrieval(BaseRetrieval):
 
             # Add creatives
             for creative in campaign.creatives:
-                if creative.status == Status.ACTIVE:
+                if creative.status == Status.ACTIVE and creative.moderation_status == ModerationStatus.APPROVED.value:
                     campaign_data["creatives"].append({
                         "id": creative.id,
                         "title": creative.title,

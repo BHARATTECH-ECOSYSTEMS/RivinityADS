@@ -48,7 +48,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const register = async (name: string, email: string, password: string, role: "advertiser" | "publisher") => {
     const sess = await apiRegister(name, email, password, role);
     setMemoryToken(sess.token);
-    setSession(sess);
+    try {
+      await apiLogout();
+    } finally {
+      setMemoryToken(null);
+      setSession(null);
+    }
     return sess;
   };
 

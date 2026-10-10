@@ -43,6 +43,32 @@ class Transaction(Base):
     campaign: Mapped["Campaign"] = relationship("Campaign", lazy="selectin")
 
 
+class PaymentRequest(Base):
+    """Pending payment requests for verification against webhooks."""
+
+    __tablename__ = "payment_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    advertiser_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("advertisers.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), default="INR", nullable=False)
+    
+    provider_order_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True, unique=True)
+    status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False) # e.g. pending, paid, failed
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    advertiser: Mapped["Advertiser"] = relationship("Advertiser", lazy="selectin")
+
+
 class PlatformSettings(Base):
     """Global dynamic platform settings."""
 

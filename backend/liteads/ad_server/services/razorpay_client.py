@@ -62,6 +62,30 @@ class RazorpayClient:
             logger.error(f"Failed to create Razorpay order: {str(e)}")
             raise RazorpayClientError("Could not create payment request") from e
 
+    def create_qr_code(self, amount: Decimal, receipt: str, advertiser_id: int) -> dict[str, Any]:
+        """
+        Create a Razorpay UPI QR code.
+        """
+        amount_in_smallest_unit = int(amount * 100)
+        data: dict[str, Any] = {
+            "type": "upi_qr",
+            "name": "OpenAdServer",
+            "usage": "single_use",
+            "fixed_amount": True,
+            "payment_amount": amount_in_smallest_unit,
+            "description": receipt,
+            "notes": {
+                "receipt": receipt,
+                "advertiser_id": str(advertiser_id)
+            }
+        }
+        try:
+            qr = self._client.qrcode.create(data=data)
+            return dict(qr)
+        except Exception as e:
+            logger.error(f"Failed to create Razorpay QR code: {str(e)}")
+            raise RazorpayClientError("Could not create QR code payment request") from e
+
     def verify_webhook_signature(self, body: bytes, signature: str) -> bool:
         """Verify the Razorpay webhook signature."""
         settings = get_settings()

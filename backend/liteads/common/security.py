@@ -108,6 +108,14 @@ async def current_user(
     return user
 
 
+async def verified_user(
+    user: User = Depends(current_user),
+) -> User:
+    """Compatibility dependency that now only requires authentication."""
+
+    return user
+
+
 def require_roles(*roles: str):
     async def dependency(user: User = Depends(current_user)) -> User:
         if user.role not in roles:

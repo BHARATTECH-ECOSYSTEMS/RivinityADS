@@ -27,6 +27,7 @@ from liteads.models.base import (
     CreativeType,
     EventType,
     Status,
+    ModerationStatus,
     TimestampMixin,
 )
 
@@ -144,6 +145,12 @@ class Creative(Base, TimestampMixin):
 
     # Status
     status: Mapped[int] = mapped_column(Integer, default=Status.ACTIVE)
+
+    # Moderation
+    moderation_status: Mapped[int] = mapped_column(Integer, default=ModerationStatus.PENDING_REVIEW, server_default="2")
+    moderation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    moderated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    moderated_by_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
     # Quality score (0-100)
     quality_score: Mapped[int] = mapped_column(Integer, default=80)

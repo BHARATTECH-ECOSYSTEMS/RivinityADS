@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from liteads.common.database import get_session
-from liteads.common.security import current_user
+from liteads.common.security import current_user, verified_user
 from liteads.models.auth import User
 from liteads.models.ad import TargetingRule
 from liteads.schemas.targeting import TargetingSet, GeoEntry
@@ -25,7 +25,7 @@ from liteads.ad_server.services.tools import (
     ToolError
 )
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(verified_user)])
 
 class ChatRequest(BaseModel):
     session_id: str
@@ -36,6 +36,19 @@ class ChatResponse(BaseModel):
     assistant_message: str
     intent: str
     tool_status: str | None = None
+    payload: dict | None = None
+
+class ChatSessionResponse(BaseModel):
+    session_id: str
+
+@router.post("/chat/session", response_model=ChatSessionResponse)
+async def create_chat_session(
+    user: User = Depends(current_user)
+):
+    if user.role != "advertiser" or not user.advertiser_id:
+        raise HTTPException(status_code=403, detail="Only advertisers can create chat sessions")
+    session = await ConversationStateService.create_session(user_id=user.id, advertiser_id=user.advertiser_id)
+    return ChatSessionResponse(session_id=session.session_id)
 
 @router.post("/chat", response_model=ChatResponse)
 async def process_chat(
@@ -65,6 +78,7 @@ async def process_chat(
         return ChatResponse(session_id=request.session_id, assistant_message=err_msg, intent="UNKNOWN", tool_status="Failed: LLM Malformed")
 
     tool_status = None
+    payload = None
     assistant_reply = intent_result.reply or "Processing your request."
 
     try:
@@ -78,6 +92,7 @@ async def process_chat(
             )
             chat_session.current_campaign_id = res.campaign_id
             tool_status = "Success: Campaign Created"
+            payload = {"campaign_id": res.campaign_id}
 
         elif intent_result.intent in ["SET_BUDGET", "SET_GEO", "SET_SECTOR", "LAUNCH_CAMPAIGN"]:
             if not chat_session.current_campaign_id:
@@ -114,19 +129,37 @@ async def process_chat(
                             
                     if intent_result.intent == "SET_GEO":
                         has_geo = any([intent_result.slots.country, intent_result.slots.state, intent_result.slots.city])
-                        if has_geo and not intent_result.slots.country:
-                            raise ToolValidationError("Please specify the country for this location.")
+                        
+                        # Infer country from existing targeting if missing
+                        inferred_country = intent_result.slots.country
+                        if has_geo and not inferred_country:
+                            existing_countries = {g.country for g in geo_inc + geo_exc if g.country}
+                            if len(existing_countries) == 1:
+                                inferred_country = list(existing_countries)[0]
+                            else:
+                                raise ToolValidationError("Please specify the country for this location.")
 
-                        if intent_result.slots.country:
-                            new_geo = GeoEntry(
-                                country=intent_result.slots.country,
-                                state=intent_result.slots.state,
-                                city=intent_result.slots.city
-                            )
+                        if intent_result.slots.city and not intent_result.slots.state:
+                            raise ToolValidationError("Please specify the state for this city.")
+
+                        if inferred_country:
+                            try:
+                                new_geo = GeoEntry(
+                                    country=inferred_country,
+                                    state=intent_result.slots.state,
+                                    city=intent_result.slots.city
+                                )
+                            except ValueError as ve:
+                                raise ToolValidationError(str(ve))
+                            
                             is_exc = bool(intent_result.slots.is_exclude)
                             
                             def geo_equal(a: GeoEntry, b: GeoEntry) -> bool:
-                                return a.country == b.country and a.state == b.state and a.city == b.city and a.pincode == b.pincode
+                                def norm(s): return str(s).strip().lower() if s else ""
+                                return (norm(a.country) == norm(b.country) and 
+                                        norm(a.state) == norm(b.state) and 
+                                        norm(a.city) == norm(b.city) and 
+                                        norm(a.pincode) == norm(b.pincode))
 
                             if is_exc:
                                 geo_inc = [g for g in geo_inc if not geo_equal(g, new_geo)]
@@ -168,8 +201,14 @@ async def process_chat(
                 assistant_reply = "Please specify an amount to add to your wallet."
                 tool_status = "Failed: Missing Amount"
             else:
-                res = await request_payment(user=user, amount=intent_result.slots.amount)
+                res = await request_payment(user=user, session=session, amount=intent_result.slots.amount)
                 tool_status = "Success: Payment Order Created"
+                payload = {
+                    "order_id": res.order_id,
+                    "amount": str(res.amount),
+                    "currency": res.currency,
+                    "qr_image_url": res.qr_image_url
+                }
                 
     except ToolValidationError as e:
         assistant_reply = str(e)
@@ -191,5 +230,6 @@ async def process_chat(
         session_id=request.session_id,
         assistant_message=assistant_reply,
         intent=intent_result.intent,
-        tool_status=tool_status
+        tool_status=tool_status,
+        payload=payload
     )

@@ -1,4 +1,4 @@
-import type { AdListResponse, AdRequestPayload, Advertiser, Campaign, Creative, HealthResponse, Publisher, Session, Suggestion } from "../types";
+import type { AdListResponse, AdRequestPayload, Advertiser, Campaign, Creative, HealthResponse, Publisher, Session, Suggestion, ChatSessionResponse, ChatResponse } from "../types";
 const BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "";
 let memoryToken: string | null = null;
 export const setMemoryToken = (token: string | null) => { memoryToken = token; };
@@ -21,6 +21,7 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
     } catch { /* non-json error */ }
     throw new ApiError(message, res.status);
   }
+  if (res.status === 204) return undefined as T;
   return await res.json() as T;
 }
 export const getHealth = () => apiFetch<HealthResponse>("/health");
@@ -32,6 +33,44 @@ export const register = async (name: string, email: string, password: string, ro
   const response = await apiFetch<{ user: Session["user"]; access_token: string }>("/api/v1/auth/register", { method: "POST", body: JSON.stringify({ name, email, password, role }) });
   return { user: response.user, token: response.access_token };
 };
+export interface AdvertiserDomain {
+  id: number;
+  advertiser_id: number;
+  domain: string;
+  status: "PENDING" | "VERIFIED" | "FAILED";
+  verification_method: "DNS_TXT";
+  verification_token: string;
+  verified_at: string | null;
+  last_checked_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+export interface DomainVerificationInstructions {
+  domain: string;
+  record_type: string;
+  record_name: string;
+  record_value: string;
+  instructions: string;
+}
+export const listAdvertiserDomains = () => apiFetch<AdvertiserDomain[]>("/api/v1/domain");
+export const registerAdvertiserDomain = (domain: string) => apiFetch<AdvertiserDomain>("/api/v1/domain", { method: "POST", body: JSON.stringify({ domain }) });
+export const getDomainInstructions = (domainId: number) => apiFetch<DomainVerificationInstructions>(`/api/v1/domain/${domainId}/instructions`);
+export const verifyAdvertiserDomain = (domainId: number) => apiFetch<AdvertiserDomain>(`/api/v1/domain/${domainId}/verify`, { method: "POST" });
+export const regenerateDomainChallenge = (domainId: number) => apiFetch<AdvertiserDomain>(`/api/v1/domain/${domainId}/regenerate-challenge`, { method: "POST" });
+export const deleteAdvertiserDomain = (domainId: number) => apiFetch<void>(`/api/v1/domain/${domainId}`, { method: "DELETE" });
+export interface ModerationCreative extends Creative {
+  moderation_status: 1 | 2 | 3;
+  moderation_reason: string | null;
+  moderated_at: string | null;
+  moderated_by_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+export const listPendingCreatives = () => apiFetch<ModerationCreative[]>("/api/v1/moderation/creatives/pending");
+export const approveCreative = (creativeId: number) => apiFetch<ModerationCreative>(`/api/v1/moderation/creatives/${creativeId}/approve`, { method: "POST" });
+export const rejectCreative = (creativeId: number, reason: string) => apiFetch<ModerationCreative>(`/api/v1/moderation/creatives/${creativeId}/reject`, { method: "POST", body: JSON.stringify({ reason }) });
+export const reopenCreative = (creativeId: number) => apiFetch<ModerationCreative>(`/api/v1/moderation/creatives/${creativeId}/reopen`, { method: "POST" });
 export const refreshSession = async (): Promise<Session> => {
   const response = await apiFetch<{ user: Session["user"]; access_token: string }>("/api/v1/auth/refresh", { method: "POST" });
   return { user: response.user, token: response.access_token };
@@ -53,6 +92,7 @@ export const createCampaign = (payload: CampaignInput) => apiFetch<Campaign>("/a
 export const getCampaign = (id: number) => apiFetch<Campaign>(`/api/v1/campaign/${id}`);
 export const updateCampaign = (id: number, payload: Partial<Campaign>) => apiFetch<Campaign>(`/api/v1/campaign/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
 export const setCampaignStatus = (id: number, status: number) => updateCampaign(id, { status });
+export const activateCampaign = (id: number) => apiFetch<Campaign>(`/api/v1/campaign/${id}/activate`, { method: "POST" });
 export const listCreatives = (campaignId: number) => apiFetch<Creative[]>(`/api/v1/creative?campaign_id=${campaignId}`);
 export const createCreative = (payload: CreativeInput) => apiFetch<Creative>("/api/v1/creative", { method: "POST", body: JSON.stringify(payload) });
 export interface SlotData { id: number; publisher_id: number; property_id: number | null; slot_id: string; name: string; format: number; width: number; height: number; status: number; floor_price: number; }
@@ -147,3 +187,14 @@ export const testWebhook = (id: number, payload?: any) => apiFetch<{success: boo
 // Suggestions
 export const getCampaignSuggestions = (campaignId: number) => apiFetch<Suggestion[]>(`/api/v1/campaign/${campaignId}/suggestions`);
 export const updateSuggestionStatus = (suggestionId: number, status: string) => apiFetch<Suggestion>(`/api/v1/suggestion/${suggestionId}`, { method: "PATCH", body: JSON.stringify({ status }) });
+
+// Chat API
+export const createChatSession = () => apiFetch<ChatSessionResponse>("/api/v1/chat/session", { method: "POST" });
+export const sendChatMessage = (sessionId: string, message: string) => {
+    if (!sessionId || !sessionId.trim()) throw new Error("session_id is required");
+    if (!message || !message.trim()) throw new Error("message is required");
+    return apiFetch<ChatResponse>("/api/v1/chat", {
+        method: "POST",
+        body: JSON.stringify({ session_id: sessionId, message })
+    });
+};

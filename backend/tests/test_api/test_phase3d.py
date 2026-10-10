@@ -6,9 +6,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from unittest.mock import patch, MagicMock
 
-from liteads.models.ad import Advertiser, Campaign
+from liteads.models.ad import Advertiser, Campaign, Creative, TargetingRule
+from liteads.models.domain import AdvertiserDomain
 from liteads.models.finance import Transaction
 from liteads.models import User
+from liteads.models.base import ModerationStatus
 from liteads.common.security import create_access_token
 
 
@@ -31,8 +33,13 @@ async def test_successful_activation(client: AsyncClient, test_db: AsyncSession,
     user.advertiser_id = adv.id
     await test_db.commit()
 
-    campaign = Campaign(advertiser_id=adv.id, name="Test Campaign", status=5) # DRAFT
+    campaign = Campaign(advertiser_id=adv.id, name="Test Campaign", status=5, budget_daily=Decimal("10.0"), budget_total=Decimal("100.0")) # DRAFT
     test_db.add(campaign)
+    await test_db.flush()
+    creative = Creative(campaign_id=campaign.id, title="Test", landing_url="https://example.com", status=1, moderation_status=ModerationStatus.APPROVED.value)
+    targeting = TargetingRule(campaign_id=campaign.id, rule_type="geo", rule_value={"countries": ["US"]})
+    domain = AdvertiserDomain(advertiser_id=adv.id, domain="example.com", status="VERIFIED", verification_token="test_token")
+    test_db.add_all([creative, targeting, domain])
     await test_db.commit()
     await test_db.refresh(campaign)
 
@@ -66,8 +73,13 @@ async def test_unauthenticated(client: AsyncClient, test_db: AsyncSession):
     test_db.add_all([user, adv])
     await test_db.commit()
 
-    campaign = Campaign(advertiser_id=adv.id, name="Test Campaign 2", status=5) # DRAFT
+    campaign = Campaign(advertiser_id=adv.id, name="Test Campaign 2", status=5, budget_daily=Decimal("10.0"), budget_total=Decimal("100.0")) # DRAFT
     test_db.add(campaign)
+    await test_db.flush()
+    creative = Creative(campaign_id=campaign.id, title="Test", landing_url="https://example.com", status=1, moderation_status=ModerationStatus.APPROVED.value)
+    targeting = TargetingRule(campaign_id=campaign.id, rule_type="geo", rule_value={"countries": ["US"]})
+    domain = AdvertiserDomain(advertiser_id=adv.id, domain="example.com", status="VERIFIED", verification_token="test_token")
+    test_db.add_all([creative, targeting, domain])
     await test_db.commit()
     await test_db.refresh(campaign)
 
@@ -93,8 +105,13 @@ async def test_wrong_advertiser(client: AsyncClient, test_db: AsyncSession, auth
     user2.advertiser_id = adv2.id
     await test_db.commit()
 
-    campaign1 = Campaign(advertiser_id=adv1.id, name="Test Campaign", status=5)
+    campaign1 = Campaign(advertiser_id=adv1.id, name="Test Campaign", status=5, budget_daily=Decimal("10.0"), budget_total=Decimal("100.0"))
     test_db.add(campaign1)
+    await test_db.flush()
+    creative = Creative(campaign_id=campaign1.id, title="Test", landing_url="https://example.com", status=1, moderation_status=ModerationStatus.APPROVED.value)
+    targeting = TargetingRule(campaign_id=campaign1.id, rule_type="geo", rule_value={"countries": ["US"]})
+    domain = AdvertiserDomain(advertiser_id=adv1.id, domain="example.com", status="VERIFIED", verification_token="test_token")
+    test_db.add_all([creative, targeting, domain])
     await test_db.commit()
     await test_db.refresh(campaign1)
 
@@ -117,8 +134,13 @@ async def test_non_draft_campaign(client: AsyncClient, test_db: AsyncSession, au
     await test_db.commit()
 
     # Create ACTIVE campaign
-    campaign = Campaign(advertiser_id=adv.id, name="Test Campaign", status=1) # ACTIVE
+    campaign = Campaign(advertiser_id=adv.id, name="Test Campaign", status=1, budget_daily=Decimal("10.0"), budget_total=Decimal("100.0")) # ACTIVE
     test_db.add(campaign)
+    await test_db.flush()
+    creative = Creative(campaign_id=campaign.id, title="Test", landing_url="https://example.com", status=1, moderation_status=ModerationStatus.APPROVED.value)
+    targeting = TargetingRule(campaign_id=campaign.id, rule_type="geo", rule_value={"countries": ["US"]})
+    domain = AdvertiserDomain(advertiser_id=adv.id, domain="example.com", status="VERIFIED", verification_token="test_token")
+    test_db.add_all([creative, targeting, domain])
     await test_db.commit()
     await test_db.refresh(campaign)
 
@@ -141,8 +163,13 @@ async def test_insufficient_balance(client: AsyncClient, test_db: AsyncSession, 
     user.advertiser_id = adv.id
     await test_db.commit()
 
-    campaign = Campaign(advertiser_id=adv.id, name="Test Campaign", status=5) # DRAFT
+    campaign = Campaign(advertiser_id=adv.id, name="Test Campaign", status=5, budget_daily=Decimal("10.0"), budget_total=Decimal("100.0")) # DRAFT
     test_db.add(campaign)
+    await test_db.flush()
+    creative = Creative(campaign_id=campaign.id, title="Test", landing_url="https://example.com", status=1, moderation_status=ModerationStatus.APPROVED.value)
+    targeting = TargetingRule(campaign_id=campaign.id, rule_type="geo", rule_value={"countries": ["US"]})
+    domain = AdvertiserDomain(advertiser_id=adv.id, domain="example.com", status="VERIFIED", verification_token="test_token")
+    test_db.add_all([creative, targeting, domain])
     await test_db.commit()
     await test_db.refresh(campaign)
 
@@ -167,8 +194,13 @@ async def test_double_activation(client: AsyncClient, test_db: AsyncSession, aut
     user.advertiser_id = adv.id
     await test_db.commit()
 
-    campaign = Campaign(advertiser_id=adv.id, name="Test Campaign", status=5) # DRAFT
+    campaign = Campaign(advertiser_id=adv.id, name="Test Campaign", status=5, budget_daily=Decimal("10.0"), budget_total=Decimal("100.0")) # DRAFT
     test_db.add(campaign)
+    await test_db.flush()
+    creative = Creative(campaign_id=campaign.id, title="Test", landing_url="https://example.com", status=1, moderation_status=ModerationStatus.APPROVED.value)
+    targeting = TargetingRule(campaign_id=campaign.id, rule_type="geo", rule_value={"countries": ["US"]})
+    domain = AdvertiserDomain(advertiser_id=adv.id, domain="example.com", status="VERIFIED", verification_token="test_token")
+    test_db.add_all([creative, targeting, domain])
     await test_db.commit()
     await test_db.refresh(campaign)
 

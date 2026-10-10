@@ -65,6 +65,7 @@ class CampaignCreate(BaseModel):
 
 
 class CampaignUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
     budget_daily: Decimal | None = Field(default=None, ge=0)
@@ -75,7 +76,6 @@ class CampaignUpdate(BaseModel):
     freq_cap_hourly: int | None = Field(default=None, ge=0)
     start_time: datetime | None = None
     end_time: datetime | None = None
-    status: int | None = Field(default=None, ge=0, le=4)
     autopilot: bool | None = None
 
 
@@ -166,6 +166,10 @@ class CreativeResponse(ORMModel):
     width: int
     height: int
     status: int
+    moderation_status: int
+    moderation_reason: str | None
+    moderated_at: datetime | None
+    moderated_by_id: int | None
     quality_score: int
     created_at: datetime
     updated_at: datetime
