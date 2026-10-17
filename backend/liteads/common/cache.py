@@ -178,6 +178,98 @@ class RedisClient:
         except Exception:
             return -2
 
+    async def release_lock(self, key: str, token: str) -> bool:
+        """Release a distributed lock atomically only if the token matches."""
+        if not self._connected or not token:
+            return False
+        lua_script = """
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+            return redis.call("del", KEYS[1])
+        else
+            return 0
+        end
+        """
+        try:
+            result = await self.client.eval(lua_script, 1, key, token)
+            return bool(result)
+        except Exception as e:
+            logger.warning("Failed to safely release Redis lock", key=key, error=str(e))
+            return False
+
+    async def renew_lock(self, key: str, token: str, ttl: int) -> bool:
+        """Renew a distributed lock TTL atomically only if the token matches."""
+        if not self._connected or not token:
+            return False
+        lua_script = """
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+            return redis.call("expire", KEYS[1], ARGV[2])
+        else
+            return 0
+        end
+        """
+        try:
+            result = await self.client.eval(lua_script, 1, key, token, str(ttl))
+            return bool(result)
+        except Exception as e:
+            logger.warning("Failed to renew Redis lock", key=key, error=str(e))
+            return False
+
+    async def finalize_digest_cycle(
+        self,
+        active_cycle_key: str,
+        active_target_date_key: str,
+        last_successful_cycle_key: str,
+        delivered_key: str,
+        expected_cycle_id: str,
+        timestamp_str: str,
+        timestamp_ttl: int,
+        retention_ttl: int,
+    ) -> bool:
+        """
+        Atomically finalize a completed digest cycle via Lua script:
+        1. Verifies that active_cycle_key currently equals expected_cycle_id.
+        2. Applies retention TTL to the delivered ledger key.
+        3. Records the successful cycle timestamp with its expiration TTL.
+        4. Removes active cycle identity keys.
+
+        Returns True if the cycle was successfully verified and finalized,
+        or False if cycle ID mismatched or Redis is unavailable.
+        """
+        if not self._connected or not expected_cycle_id:
+            return False
+
+        lua_script = """
+        local current_active_id = redis.call('get', KEYS[1])
+        if current_active_id ~= ARGV[1] then
+            return 0
+        end
+        redis.call('expire', KEYS[4], tonumber(ARGV[4]))
+        redis.call('set', KEYS[3], ARGV[2], 'EX', tonumber(ARGV[3]))
+        redis.call('del', KEYS[1], KEYS[2])
+        return 1
+        """
+        try:
+            result = await self.client.eval(
+                lua_script,
+                4,
+                active_cycle_key,
+                active_target_date_key,
+                last_successful_cycle_key,
+                delivered_key,
+                expected_cycle_id,
+                timestamp_str,
+                str(timestamp_ttl),
+                str(retention_ttl),
+            )
+            return bool(result)
+        except Exception as e:
+            logger.warning(
+                "Failed to atomically finalize digest cycle in Redis",
+                expected_cycle_id=expected_cycle_id,
+                error=str(e),
+            )
+            return False
+
     # ==================== JSON Operations ====================
 
     async def get_json(self, key: str) -> Any:
@@ -458,19 +550,40 @@ class CacheKeys:
     def campaign_creative(campaign_id: int, creative_id: int) -> str:
         return f"ad:creative:{campaign_id}:{creative_id}"
 
+    @staticmethod
+    def _safe_user_key(user_id: str) -> str:
+        """Ensure user_id embedded in Redis keys is never raw PII.
+
+        If already a 64-hex SHA-256 hash, normalizes to lowercase.
+        Otherwise computes SHA-256 digest to prevent raw PII from ever being
+        placed into Redis key space.
+        """
+        if not user_id:
+            return "anonymous"
+        if len(user_id) == 64 and all(c in "0123456789abcdefABCDEF" for c in user_id):
+            return user_id.lower()
+        import hashlib
+        return hashlib.sha256(user_id.encode("utf-8")).hexdigest()
+
     # User features
     @staticmethod
     def user_feature(user_id: str) -> str:
-        return f"user:feature:{user_id}"
+        return f"user:feature:{CacheKeys._safe_user_key(user_id)}"
 
     # Frequency control
     @staticmethod
-    def freq_daily(user_id: str, campaign_id: int, date: str) -> str:
-        return f"freq:daily:{user_id}:{campaign_id}:{date}"
+    def freq_daily(user_id: str, campaign_id: int, date: str, slot_id: str | None = None) -> str:
+        safe_user = CacheKeys._safe_user_key(user_id)
+        if slot_id:
+            return f"freq:daily:{safe_user}:{campaign_id}:{slot_id}:{date}"
+        return f"freq:daily:{safe_user}:{campaign_id}:{date}"
 
     @staticmethod
-    def freq_hourly(user_id: str, campaign_id: int, hour: str) -> str:
-        return f"freq:hourly:{user_id}:{campaign_id}:{hour}"
+    def freq_hourly(user_id: str, campaign_id: int, hour: str, slot_id: str | None = None) -> str:
+        safe_user = CacheKeys._safe_user_key(user_id)
+        if slot_id:
+            return f"freq:hourly:{safe_user}:{campaign_id}:{slot_id}:{hour}"
+        return f"freq:hourly:{safe_user}:{campaign_id}:{hour}"
 
     # Statistics
     @staticmethod

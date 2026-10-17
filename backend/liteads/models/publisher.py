@@ -3,7 +3,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, Numeric, String, JSON
+from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, JSON, UniqueConstraint, text
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -20,6 +20,7 @@ class Publisher(Base, TimestampMixin):
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     site_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     status: Mapped[int] = mapped_column(Integer, default=Status.ACTIVE, nullable=False)
+    is_sandbox: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
     balance: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"), nullable=False)
     payout_details: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     owner_user_id: Mapped[int | None] = mapped_column(
@@ -74,6 +75,7 @@ class AdSlot(Base, TimestampMixin):
     width: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     height: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     status: Mapped[int] = mapped_column(Integer, default=Status.ACTIVE, nullable=False)
+    is_chat_surface: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
     floor_price: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"), nullable=False)
     property_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("publisher_properties.id", ondelete="SET NULL"), nullable=True
@@ -96,6 +98,10 @@ class PublisherApiKey(Base, TimestampMixin):
     """
 
     __tablename__ = "publisher_api_keys"
+    __table_args__ = (
+        CheckConstraint("rate_limit_per_minute > 0", name="ck_publisher_api_keys_rate_limit_positive"),
+        CheckConstraint("daily_quota > 0", name="ck_publisher_api_keys_daily_quota_positive"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     publisher_id: Mapped[int] = mapped_column(
@@ -104,6 +110,15 @@ class PublisherApiKey(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     key_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
     key_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_sandbox: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
+    secret_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    rate_limit_per_minute: Mapped[int] = mapped_column(
+        Integer, default=60, server_default=text("60"), nullable=False
+    )
+    daily_quota: Mapped[int] = mapped_column(
+        Integer, default=10000, server_default=text("10000"), nullable=False
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     publisher: Mapped[Publisher] = relationship("Publisher", back_populates="api_keys")
@@ -144,6 +159,10 @@ class PublisherDailyStat(Base, TimestampMixin):
     """Persisted publisher delivery and earnings aggregate for one day."""
 
     __tablename__ = "publisher_daily_stats"
+    __table_args__ = (
+        UniqueConstraint("publisher_id", "slot_id", "stat_date", name="uq_pub_daily_stats_slot_date"),
+        Index("idx_pub_daily_stats_lookup", "publisher_id", "stat_date"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     publisher_id: Mapped[int] = mapped_column(
@@ -160,3 +179,30 @@ class PublisherDailyStat(Base, TimestampMixin):
 
     publisher: Mapped[Publisher] = relationship("Publisher", back_populates="daily_stats")
     slot: Mapped["AdSlot"] = relationship("AdSlot")
+
+
+class ApiKeyDailyStat(Base, TimestampMixin):
+    """Persisted daily usage metrics for an API key."""
+
+    __tablename__ = "api_key_daily_stats"
+    __table_args__ = (
+        UniqueConstraint("api_key_id", "stat_date", name="uq_api_key_daily_stats_key_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    api_key_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("publisher_api_keys.id", ondelete="CASCADE"), nullable=False
+    )
+    publisher_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("publishers.id", ondelete="CASCADE"), nullable=False
+    )
+    stat_date: Mapped[date] = mapped_column(Date, nullable=False)
+    total_requests: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    admitted_requests: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    rate_limited_requests: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    quota_exceeded_requests: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    served_ads: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    is_sandbox: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    api_key: Mapped["PublisherApiKey"] = relationship("PublisherApiKey", backref="daily_stats")
+

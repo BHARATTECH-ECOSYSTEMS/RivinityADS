@@ -203,10 +203,12 @@ async def draft_campaign(test_db: AsyncSession, advertiser_user: User):
     
     # Add required relations for validation
     from liteads.models.ad import Creative, TargetingRule
-    cr = Creative(campaign_id=campaign.id, title="Test", landing_url="https://test.com", status=Status.ACTIVE)
+    from liteads.models.base import ModerationStatus
+    from liteads.models.domain import AdvertiserDomain
+    domain = AdvertiserDomain(advertiser_id=advertiser_user.advertiser_id, domain="test.com", status="VERIFIED", verification_token="tok")
+    cr = Creative(campaign_id=campaign.id, title="Test", landing_url="https://test.com", status=Status.ACTIVE, moderation_status=ModerationStatus.APPROVED.value)
     tr = TargetingRule(campaign_id=campaign.id, rule_type="geo", rule_value={"entries": []})
-    test_db.add(cr)
-    test_db.add(tr)
+    test_db.add_all([domain, cr, tr])
     await test_db.commit()
     await test_db.refresh(campaign)
     
@@ -228,10 +230,12 @@ async def active_campaign(test_db: AsyncSession, advertiser_user: User):
     await test_db.refresh(campaign)
     
     from liteads.models.ad import Creative, TargetingRule
-    cr = Creative(campaign_id=campaign.id, title="Test", landing_url="https://test.com", status=Status.ACTIVE)
+    from liteads.models.base import ModerationStatus
+    from liteads.models.domain import AdvertiserDomain
+    domain = AdvertiserDomain(advertiser_id=advertiser_user.advertiser_id, domain="test.com", status="VERIFIED", verification_token="tok2")
+    cr = Creative(campaign_id=campaign.id, title="Test", landing_url="https://test.com", status=Status.ACTIVE, moderation_status=ModerationStatus.APPROVED.value)
     tr = TargetingRule(campaign_id=campaign.id, rule_type="geo", rule_value={"entries": []})
-    test_db.add(cr)
-    test_db.add(tr)
+    test_db.add_all([domain, cr, tr])
     await test_db.commit()
     await test_db.refresh(campaign)
     

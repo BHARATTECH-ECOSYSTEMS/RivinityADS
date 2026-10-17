@@ -215,9 +215,9 @@ class TestPublisherFromApiKeyDependency:
 class TestVerifyHmacSignature:
     """verify_hmac_signature raises HTTP 401 on any tampering."""
 
-    def _make_sig(self, key: str, ts: str, body: bytes) -> str:
+    def _make_sig(self, key: str, ts: str, body: bytes, method: str = "POST", path: str = "/api/v1/ad/request") -> str:
         body_sha = hashlib.sha256(body).hexdigest()
-        msg = f"{key}|{ts}|{body_sha}".encode()
+        msg = f"{method.upper()}|{path}|{ts}|{body_sha}".encode()
         return hmac.new(key.encode(), msg, hashlib.sha256).hexdigest()
 
     def test_valid_signature_passes(self) -> None:
@@ -227,6 +227,16 @@ class TestVerifyHmacSignature:
         sig = self._make_sig(key, ts, body)
         # Should not raise
         verify_hmac_signature(key, ts, body, sig)
+
+    def test_legacy_signature_passes_with_version_1(self) -> None:
+        key = "rk_live_testkey"
+        ts = str(int(time.time()))
+        body = b'{"slot_id":"s1","device":{"os":"web"}}'
+        body_sha = hashlib.sha256(body).hexdigest()
+        msg = f"{key}|{ts}|{body_sha}".encode()
+        sig = hmac.new(key.encode(), msg, hashlib.sha256).hexdigest()
+        # Should not raise when version="1" is specified
+        verify_hmac_signature(key, ts, body, sig, signature_version="1")
 
     def test_bad_signature_raises_401(self) -> None:
         from fastapi import HTTPException

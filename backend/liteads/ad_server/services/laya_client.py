@@ -43,6 +43,7 @@ class LayaDecisionResult:
     ]
     confidence: float
     raw_response: dict[str, Any]
+    target_payload: dict[str, Any] | None = None
 
 
 class LayaDecisionClient:

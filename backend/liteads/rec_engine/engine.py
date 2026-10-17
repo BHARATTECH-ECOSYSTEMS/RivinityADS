@@ -215,7 +215,7 @@ class RecommendationEngine:
             with Timer() as filter_timer:
                 if self._filter_chain:
                     candidates = await self._filter_chain.filter(
-                        candidates, user_context
+                        candidates, user_context, slot_id=slot_id, **kwargs
                     )
             metrics.filter_ms = filter_timer.elapsed_ms
             metrics.post_filter_count = len(candidates)

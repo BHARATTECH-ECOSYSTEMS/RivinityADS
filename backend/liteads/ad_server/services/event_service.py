@@ -9,6 +9,9 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from liteads.common.cache import CacheKeys, redis_client
@@ -219,30 +222,85 @@ class EventService:
         if slot is None:
             return
         stat_date = datetime.now(timezone.utc).date()
-        result = await self.session.execute(
-            select(PublisherDailyStat).where(
-                PublisherDailyStat.publisher_id == slot.publisher_id,
-                PublisherDailyStat.stat_date == stat_date,
-            )
-        )
-        stat = result.scalar_one_or_none()
-        if stat is None:
-            stat = PublisherDailyStat(
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        delta_impressions = 1 if event_type == EventType.IMPRESSION else 0
+        delta_clicks = 1 if event_type == EventType.CLICK else 0
+        delta_conversions = 1 if event_type == EventType.CONVERSION else 0
+        delta_earnings = cost * Decimal("0.70")
+
+        # Database-atomic upsert across supported dialects
+        dialect_name = self.session.get_bind().dialect.name
+        if dialect_name == "postgresql":
+            stmt = pg_insert(PublisherDailyStat).values(
                 publisher_id=slot.publisher_id,
+                slot_id=slot.id,
                 stat_date=stat_date,
-                impressions=0,
-                clicks=0,
-                conversions=0,
-                earnings=Decimal("0.000000")
+                impressions=delta_impressions,
+                clicks=delta_clicks,
+                conversions=delta_conversions,
+                earnings=delta_earnings,
+                created_at=now_utc,
+                updated_at=now_utc,
             )
-            self.session.add(stat)
-        if event_type == EventType.IMPRESSION:
-            stat.impressions += 1
-        elif event_type == EventType.CLICK:
-            stat.clicks += 1
-        elif event_type == EventType.CONVERSION:
-            stat.conversions += 1
-        stat.earnings += cost * Decimal("0.70")
+            stmt = stmt.on_conflict_do_update(
+                constraint="uq_pub_daily_stats_slot_date",
+                set_={
+                    "impressions": PublisherDailyStat.impressions + stmt.excluded.impressions,
+                    "clicks": PublisherDailyStat.clicks + stmt.excluded.clicks,
+                    "conversions": PublisherDailyStat.conversions + stmt.excluded.conversions,
+                    "earnings": PublisherDailyStat.earnings + stmt.excluded.earnings,
+                    "updated_at": now_utc,
+                },
+            )
+            await self.session.execute(stmt)
+        elif dialect_name == "sqlite":
+            stmt = sqlite_insert(PublisherDailyStat).values(
+                publisher_id=slot.publisher_id,
+                slot_id=slot.id,
+                stat_date=stat_date,
+                impressions=delta_impressions,
+                clicks=delta_clicks,
+                conversions=delta_conversions,
+                earnings=delta_earnings,
+                created_at=now_utc,
+                updated_at=now_utc,
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["publisher_id", "slot_id", "stat_date"],
+                set_={
+                    "impressions": PublisherDailyStat.impressions + stmt.excluded.impressions,
+                    "clicks": PublisherDailyStat.clicks + stmt.excluded.clicks,
+                    "conversions": PublisherDailyStat.conversions + stmt.excluded.conversions,
+                    "earnings": PublisherDailyStat.earnings + stmt.excluded.earnings,
+                    "updated_at": now_utc,
+                },
+            )
+            await self.session.execute(stmt)
+        else:
+            result = await self.session.execute(
+                select(PublisherDailyStat).where(
+                    PublisherDailyStat.publisher_id == slot.publisher_id,
+                    PublisherDailyStat.slot_id == slot.id,
+                    PublisherDailyStat.stat_date == stat_date,
+                ).with_for_update()
+            )
+            stat = result.scalar_one_or_none()
+            if stat is None:
+                stat = PublisherDailyStat(
+                    publisher_id=slot.publisher_id,
+                    slot_id=slot.id,
+                    stat_date=stat_date,
+                    impressions=0,
+                    clicks=0,
+                    conversions=0,
+                    earnings=Decimal("0.000000"),
+                )
+                self.session.add(stat)
+            stat.impressions += delta_impressions
+            stat.clicks += delta_clicks
+            stat.conversions += delta_conversions
+            stat.earnings += delta_earnings
 
     async def _update_stats(self, campaign_id: int | None, event_type: int) -> None:
         """Update real-time statistics in Redis."""
@@ -263,23 +321,36 @@ class EventService:
         # Set TTL (48 hours)
         await redis_client.expire(key, 48 * 3600)
 
-    async def _update_frequency(self, user_id: str, campaign_id: int | None) -> None:
-        """Update frequency counter."""
-        if campaign_id is None:
+    async def _update_frequency(self, user_id: str, campaign_id: int | None, slot_id: str | None = None) -> None:
+        """Update frequency counter atomically with bounded TTL."""
+        if campaign_id is None or not user_id:
             return
 
         today = current_date()
         hour = current_hour()
 
-        # Update daily counter
-        daily_key = CacheKeys.freq_daily(user_id, campaign_id, today)
-        await redis_client.incr(daily_key)
-        await redis_client.expire(daily_key, 24 * 3600)
+        daily_key = CacheKeys.freq_daily(user_id, campaign_id, today, slot_id=slot_id)
+        hourly_key = CacheKeys.freq_hourly(user_id, campaign_id, hour, slot_id=slot_id)
 
-        # Update hourly counter
-        hourly_key = CacheKeys.freq_hourly(user_id, campaign_id, hour)
-        await redis_client.incr(hourly_key)
-        await redis_client.expire(hourly_key, 3600)
+        try:
+            if not redis_client.connected:
+                try:
+                    await redis_client.connect()
+                except Exception:
+                    pass
+            if redis_client.connected:
+                client = redis_client.client
+                _LUA = """
+                local current = redis.call('INCR', KEYS[1])
+                if current == 1 then
+                    redis.call('EXPIRE', KEYS[1], ARGV[1])
+                end
+                return current
+                """
+                await client.eval(_LUA, 1, daily_key, 86400)
+                await client.eval(_LUA, 1, hourly_key, 3600)
+        except Exception as e:
+            logger.error("failed_to_update_frequency", campaign_id=campaign_id, error=str(e))
 
     async def _update_user_profile(self, user_id: str | None, campaign_id: int | None, event_type: int) -> None:
         """Update the user's affinity profile based on ad interaction."""

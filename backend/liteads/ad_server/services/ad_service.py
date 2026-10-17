@@ -66,20 +66,29 @@ class AdService:
         # Build user context
         user_context = await self._build_user_context(request)
 
-        # Get floor price for the slot
+        # Get floor price and slot settings (including chat surface restriction)
         floor_price = 0.0
+        is_chat_surface = False
         if request.slot_id:
             try:
                 from liteads.models import AdSlot
                 from sqlalchemy import select
                 slot_res = await self.session.execute(
-                    select(AdSlot.floor_price).where(AdSlot.slot_id == request.slot_id)
+                    select(AdSlot.floor_price, AdSlot.is_chat_surface).where(AdSlot.slot_id == request.slot_id)
                 )
-                fp = slot_res.scalar_one_or_none()
-                if fp is not None:
-                    floor_price = float(fp)
+                slot_row = slot_res.one_or_none()
+                if slot_row is not None:
+                    if slot_row[0] is not None:
+                        floor_price = float(slot_row[0])
+                    is_chat_surface = bool(slot_row[1])
             except Exception as e:
-                logger.debug(f"Could not fetch floor price for {request.slot_id}: {e}")
+                logger.debug(f"Could not fetch slot info for {request.slot_id}: {e}")
+
+        # Chat surface restriction: interstitial format (4) is completely forbidden on chat surfaces
+        from liteads.models.base import CreativeType
+        if is_chat_surface and request.format == CreativeType.INTERSTITIAL.value:
+            logger.info("Interstitial ads prohibited on chat surface slots", slot_id=request.slot_id)
+            return []
 
         # Get recommendations
         candidates, metrics = await self.engine.recommend(
@@ -88,6 +97,10 @@ class AdService:
             num_ads=request.num_ads,
             floor_price=floor_price,
         )
+
+        # Enforce chat surface restrictions on retrieved candidates: interstitials are never permitted
+        if is_chat_surface and candidates:
+            candidates = [c for c in candidates if c.creative_type != CreativeType.INTERSTITIAL.value]
 
         # STEP 4.1 — per-request format selection
         # Filter by requested creative_type; fall back to unfiltered if no match.
@@ -101,6 +114,8 @@ class AdService:
                     requested_format=request.format,
                     candidate_types=list({c.creative_type for c in candidates}),
                 )
+            if is_chat_surface and candidates:
+                candidates = [c for c in candidates if c.creative_type != CreativeType.INTERSTITIAL.value]
 
         logger.info(
             "Ad serving completed",
@@ -142,7 +157,32 @@ class AdService:
             ctx.app_name = request.context.app_name or ""
             ctx.network = request.context.network or ""
             ctx.carrier = request.context.carrier or ""
-            ctx.sectors = request.context.sectors or []
+            ctx.sectors = list(request.context.sectors or [])
+
+        # Map nested Phase 5 user context if provided
+        if request.user:
+            if request.user.id:
+                ctx.user_id = request.user.id
+                ctx.user_hash = hash_user_id(request.user.id)
+            if request.user.sector_context:
+                existing_sectors = set(ctx.sectors)
+                for sec in request.user.sector_context:
+                    if sec not in existing_sectors:
+                        ctx.sectors.append(sec)
+                        existing_sectors.add(sec)
+            if request.user.geo:
+                if not ctx.country and request.user.geo.country:
+                    ctx.country = request.user.geo.country
+                if not ctx.region and (request.user.geo.region or request.user.geo.state):
+                    ctx.region = request.user.geo.region or request.user.geo.state or ""
+                if not ctx.city and request.user.geo.city:
+                    ctx.city = request.user.geo.city
+                if not ctx.pincode and request.user.geo.pincode:
+                    ctx.pincode = request.user.geo.pincode
+                if ctx.latitude is None and request.user.geo.latitude is not None:
+                    ctx.latitude = request.user.geo.latitude
+                if ctx.longitude is None and request.user.geo.longitude is not None:
+                    ctx.longitude = request.user.geo.longitude
 
         # Server-side IP -> Geo resolution (overrides request values if found)
         if ctx.ip:

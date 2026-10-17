@@ -15,14 +15,15 @@ logger = structlog.get_logger(__name__)
 
 class ApiKeyService:
     @staticmethod
-    def generate_key_pair() -> tuple[str, str, str]:
+    def generate_key_pair(is_sandbox: bool = False) -> tuple[str, str, str]:
         """
         Generate a cryptographically random API key.
         Returns:
             tuple: (raw_key, key_prefix, key_hash)
         """
         random_bytes = secrets.token_urlsafe(32)
-        key_prefix = f"pk_live_{random_bytes[:8]}"
+        tag = "pk_test" if is_sandbox else "pk_live"
+        key_prefix = f"{tag}_{random_bytes[:8]}"
         raw_key = f"{key_prefix}_{random_bytes[8:]}"
         key_hash = hash_password(raw_key)
         return raw_key, key_prefix, key_hash
@@ -44,14 +45,21 @@ class ApiKeyService:
         Create a new API key for a publisher.
         Returns the database model and the RAW KEY (which must be shown to the user once).
         """
-        raw_key, key_prefix, key_hash = ApiKeyService.generate_key_pair()
+        is_sandbox = getattr(schema, "is_sandbox", False)
+        rate_limit = getattr(schema, "rate_limit_per_minute", 60)
+        daily_quota = getattr(schema, "daily_quota", 10000)
+
+        raw_key, key_prefix, key_hash = ApiKeyService.generate_key_pair(is_sandbox=is_sandbox)
         
         db_key = PublisherApiKey(
             publisher_id=publisher_id,
             name=schema.name,
             key_prefix=key_prefix,
             key_hash=key_hash,
-            revoked_at=None
+            is_sandbox=is_sandbox,
+            rate_limit_per_minute=rate_limit,
+            daily_quota=daily_quota,
+            revoked_at=None,
         )
         db.add(db_key)
         await db.commit()
@@ -83,7 +91,7 @@ class ApiKeyService:
         if not db_key or db_key.revoked_at is not None:
             return False
             
-        db_key.revoked_at = datetime.now(timezone.utc)
+        db_key.revoked_at = datetime.now(timezone.utc).replace(tzinfo=None)
         await db.commit()
         return True
 

@@ -6,9 +6,11 @@ import {
     requestPayout, 
     getPublisherReporting, 
     listPublisherAssignments, 
+    getPlacementHealth,
     type LedgerResponse, 
     type PublisherReporting, 
-    type PublisherAssignment 
+    type PublisherAssignment,
+    type PlacementHealthResponse,
 } from "../../api/client";
 import StatCard from "../../components/StatCard";
 import DateRangeSelector, { type DateRangeState } from "../../components/DateRangeSelector";
@@ -21,6 +23,7 @@ export default function PublisherDashboard() {
   const [reporting, setReporting] = useState<PublisherReporting | null>(null);
   const [ledger, setLedger] = useState<LedgerResponse | null>(null);
   const [assignments, setAssignments] = useState<PublisherAssignment[]>([]);
+  const [placementHealth, setPlacementHealth] = useState<PlacementHealthResponse | null>(null);
   const [payoutAmount, setPayoutAmount] = useState<number | "">("");
   
   const [dateRange, setDateRange] = useState<DateRangeState>(() => {
@@ -57,7 +60,10 @@ export default function PublisherDashboard() {
 
       listPublisherAssignments().then(setAssignments).catch(err => {
         console.error("Assignments fetch failed:", err);
-        // Do not set global error for assignments failure to allow ledger/reporting to show
+      });
+
+      getPlacementHealth(publisherId, 30).then(setPlacementHealth).catch(err => {
+        console.error("Placement health fetch failed:", err);
       });
       
     } catch (err) {
@@ -131,6 +137,102 @@ export default function PublisherDashboard() {
               </div>
           </>
       ) : null}
+
+      {/* Placement Health Summary Section (Phase 6 WU3) */}
+      <div className="card" style={{ marginBottom: "32px" }}>
+        <div className="flex row space-between align-center" style={{ marginBottom: "16px", flexWrap: "wrap", gap: "8px" }}>
+          <div>
+            <h2 style={{ margin: "0 0 4px" }}>Placement Health (Rolling 30 Days)</h2>
+            <p className="muted" style={{ margin: 0, fontSize: "13px" }}>
+              Automated performance benchmarking and health classification for your ad inventory.
+            </p>
+          </div>
+          <Link to="/publisher/health" className="btn secondary small">
+            View Full Analysis &amp; Benchmarks →
+          </Link>
+        </div>
+
+        {!placementHealth ? (
+          <div style={{ padding: "20px", textAlign: "center" }} className="muted">
+            Loading placement health...
+          </div>
+        ) : placementHealth.placements.length === 0 ? (
+          <div style={{ padding: "24px", textAlign: "center" }} className="muted">
+            No placements found. Create ad units to receive health insights.
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Placement</th>
+                  <th>Format</th>
+                  <th style={{ textAlign: "right" }}>30d Volume</th>
+                  <th style={{ textAlign: "right" }}>CTR</th>
+                  <th style={{ textAlign: "right" }}>eCPM</th>
+                  <th>Verdict</th>
+                  <th>Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>
+                {placementHealth.placements.slice(0, 5).map((p) => (
+                  <tr key={p.slot_id}>
+                    <td>
+                      <div><b>{p.slot_name}</b></div>
+                      <div className="muted" style={{ fontSize: "11px", fontFamily: "monospace" }}>{p.slot_id}</div>
+                    </td>
+                    <td>
+                      <span style={{ fontSize: "11px", background: "#e2e8f0", padding: "2px 6px", borderRadius: "4px", textTransform: "uppercase", fontWeight: 600 }}>
+                        {p.format_name}
+                      </span>
+                    </td>
+                    <td style={{ textAlign: "right" }}>{num(p.impressions)}</td>
+                    <td style={{ textAlign: "right" }}>{(p.ctr * 100).toFixed(2)}%</td>
+                    <td style={{ textAlign: "right" }}>{money(p.ecpm)}</td>
+                    <td>
+                      <span
+                        style={{
+                          fontSize: "11px",
+                          fontWeight: 600,
+                          padding: "2px 8px",
+                          borderRadius: "999px",
+                          backgroundColor:
+                            p.verdict === "great"
+                              ? "#dcfce7"
+                              : p.verdict === "healthy"
+                              ? "#eff6ff"
+                              : p.verdict === "low_visibility"
+                              ? "#fef3c7"
+                              : "#f1f5f9",
+                          color:
+                            p.verdict === "great"
+                              ? "#15803d"
+                              : p.verdict === "healthy"
+                              ? "#1d4ed8"
+                              : p.verdict === "low_visibility"
+                              ? "#b45309"
+                              : "#475569",
+                        }}
+                      >
+                        {p.verdict === "great"
+                          ? "★ Great"
+                          : p.verdict === "healthy"
+                          ? "✓ Healthy"
+                          : p.verdict === "low_visibility"
+                          ? "⚠ Low Vis"
+                          : "⏳ Insufficient"}
+                      </span>
+                    </td>
+                    <td style={{ fontSize: "12px", color: "#334155" }}>
+                      {p.recommendation}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
       <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: "24px", alignItems: "start" }}>
         

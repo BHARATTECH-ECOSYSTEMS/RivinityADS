@@ -4,6 +4,8 @@ Frequency filter for controlling ad exposure per user.
 
 from typing import Any
 
+from fastapi import HTTPException, status
+
 from liteads.common.cache import CacheKeys, redis_client
 from liteads.common.config import get_settings
 from liteads.common.logger import get_logger
@@ -13,6 +15,14 @@ from liteads.schemas.internal import AdCandidate, FrequencyInfo, UserContext
 
 logger = get_logger(__name__)
 
+_ATOMIC_INCR_LUA = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
+"""
+
 
 class FrequencyFilter(BaseFilter):
     """
@@ -20,6 +30,7 @@ class FrequencyFilter(BaseFilter):
 
     Prevents showing the same ad too many times to the same user.
     Supports both daily and hourly caps.
+    Enforces privacy-safe user hashing and fail-closed security.
     """
 
     def __init__(
@@ -48,14 +59,24 @@ class FrequencyFilter(BaseFilter):
         if not candidates:
             return []
 
-        # Skip if no user ID (can't do frequency control)
+        # Skip if no user ID (requests without user hash are served without cap)
         if not user_context.user_id:
             return candidates
 
+        # Build campaign cap maps from candidate metadata if present
+        caps_map: dict[int, tuple[int, int]] = {}
+        for c in candidates:
+            c_daily = c.metadata.get("freq_cap_daily") if c.metadata else None
+            c_hourly = c.metadata.get("freq_cap_hourly") if c.metadata else None
+            daily_cap = int(c_daily) if c_daily and int(c_daily) > 0 else self.default_daily_cap
+            hourly_cap = int(c_hourly) if c_hourly and int(c_hourly) > 0 else self.default_hourly_cap
+            caps_map[c.campaign_id] = (daily_cap, hourly_cap)
+
         # Batch get frequency info
         campaign_ids = list(set(c.campaign_id for c in candidates))
+        slot_id = kwargs.get("slot_id")
         freq_infos = await self._get_frequency_batch(
-            user_context.user_id, campaign_ids
+            user_context.user_id, campaign_ids, caps_map=caps_map, slot_id=slot_id
         )
 
         # Filter
@@ -68,8 +89,7 @@ class FrequencyFilter(BaseFilter):
         filtered_count = len(candidates) - len(result)
         if filtered_count > 0:
             logger.debug(
-                f"Frequency filter removed {filtered_count} candidates",
-                user_id=user_context.user_id,
+                f"Frequency filter removed {filtered_count} candidates"
             )
 
         return result
@@ -85,7 +105,7 @@ class FrequencyFilter(BaseFilter):
             return True
 
         freq_info = await self._get_frequency(
-            user_context.user_id, candidate.campaign_id
+            user_context.user_id, candidate.campaign_id, slot_id=kwargs.get("slot_id")
         )
         return not freq_info.is_capped
 
@@ -93,22 +113,36 @@ class FrequencyFilter(BaseFilter):
         self,
         user_id: str,
         campaign_ids: list[int],
+        caps_map: dict[int, tuple[int, int]] | None = None,
+        slot_id: str | None = None,
     ) -> dict[int, FrequencyInfo]:
-        """Get frequency info for multiple campaigns."""
+        """Get frequency info for multiple campaigns with fail-closed error handling."""
         result: dict[int, FrequencyInfo] = {}
         today = current_date()
         hour = current_hour()
 
         # Build keys
         daily_keys = [
-            CacheKeys.freq_daily(user_id, cid, today) for cid in campaign_ids
+            CacheKeys.freq_daily(user_id, cid, today, slot_id=slot_id) for cid in campaign_ids
         ]
         hourly_keys = [
-            CacheKeys.freq_hourly(user_id, cid, hour) for cid in campaign_ids
+            CacheKeys.freq_hourly(user_id, cid, hour, slot_id=slot_id) for cid in campaign_ids
         ]
 
+        if not redis_client.connected:
+            try:
+                await redis_client.connect()
+            except Exception:
+                pass
+
+        if not redis_client.connected:
+            logger.error("frequency_cap_fail_closed_redis_unavailable")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Frequency capping service unavailable",
+            )
+
         try:
-            # Batch get from Redis
             pipeline = redis_client.pipeline()
             for key in daily_keys + hourly_keys:
                 pipeline.get(key)
@@ -121,27 +155,29 @@ class FrequencyFilter(BaseFilter):
                 daily_count = int(daily_values[i]) if daily_values[i] else 0
                 hourly_count = int(hourly_values[i]) if hourly_values[i] else 0
 
+                daily_cap, hourly_cap = (
+                    caps_map.get(campaign_id, (self.default_daily_cap, self.default_hourly_cap))
+                    if caps_map
+                    else (self.default_daily_cap, self.default_hourly_cap)
+                )
+
                 result[campaign_id] = FrequencyInfo(
                     user_id=user_id,
                     campaign_id=campaign_id,
                     daily_count=daily_count,
                     hourly_count=hourly_count,
-                    daily_cap=self.default_daily_cap,
-                    hourly_cap=self.default_hourly_cap,
+                    daily_cap=daily_cap,
+                    hourly_cap=hourly_cap,
                 )
 
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.warning(f"Failed to get frequency from cache: {e}")
-            # Return default (not capped)
-            for campaign_id in campaign_ids:
-                result[campaign_id] = FrequencyInfo(
-                    user_id=user_id,
-                    campaign_id=campaign_id,
-                    daily_count=0,
-                    hourly_count=0,
-                    daily_cap=self.default_daily_cap,
-                    hourly_cap=self.default_hourly_cap,
-                )
+            logger.error("frequency_cap_redis_error_fail_closed", error=str(e))
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Frequency capping service unavailable",
+            )
 
         return result
 
@@ -149,9 +185,10 @@ class FrequencyFilter(BaseFilter):
         self,
         user_id: str,
         campaign_id: int,
+        slot_id: str | None = None,
     ) -> FrequencyInfo:
         """Get frequency info for a single campaign."""
-        result = await self._get_frequency_batch(user_id, [campaign_id])
+        result = await self._get_frequency_batch(user_id, [campaign_id], slot_id=slot_id)
         return result.get(
             campaign_id,
             FrequencyInfo(user_id=user_id, campaign_id=campaign_id),
@@ -161,35 +198,39 @@ class FrequencyFilter(BaseFilter):
         self,
         user_id: str,
         campaign_id: int,
+        slot_id: str | None = None,
     ) -> None:
         """
-        Increment frequency counter after ad impression.
+        Increment frequency counter atomically after ad impression.
 
-        Called after ad is shown to user.
+        Uses atomic Lua script to guarantee key expiration (bounded TTL).
         """
         today = current_date()
         hour = current_hour()
 
-        daily_key = CacheKeys.freq_daily(user_id, campaign_id, today)
-        hourly_key = CacheKeys.freq_hourly(user_id, campaign_id, hour)
+        daily_key = CacheKeys.freq_daily(user_id, campaign_id, today, slot_id=slot_id)
+        hourly_key = CacheKeys.freq_hourly(user_id, campaign_id, hour, slot_id=slot_id)
 
         try:
-            pipeline = redis_client.pipeline()
-            pipeline.incr(daily_key)
-            pipeline.expire(daily_key, 86400)  # 24 hours
-            pipeline.incr(hourly_key)
-            pipeline.expire(hourly_key, 3600)  # 1 hour
-            await pipeline.execute()
+            if not redis_client.connected:
+                try:
+                    await redis_client.connect()
+                except Exception:
+                    pass
+            if redis_client.connected:
+                client = redis_client.client
+                await client.eval(_ATOMIC_INCR_LUA, 1, daily_key, 86400)
+                await client.eval(_ATOMIC_INCR_LUA, 1, hourly_key, 3600)
         except Exception as e:
             logger.error(
-                f"Failed to increment frequency for user {user_id}, "
-                f"campaign {campaign_id}: {e}"
+                f"Failed to increment frequency for campaign {campaign_id}: {e}"
             )
 
     async def reset(
         self,
         user_id: str,
         campaign_id: int | None = None,
+        slot_id: str | None = None,
     ) -> None:
         """
         Reset frequency counter for user.
@@ -197,18 +238,22 @@ class FrequencyFilter(BaseFilter):
         Args:
             user_id: User identifier
             campaign_id: Optional campaign ID. If None, resets all.
+            slot_id: Optional slot ID.
         """
         today = current_date()
         hour = current_hour()
 
         if campaign_id:
             keys = [
-                CacheKeys.freq_daily(user_id, campaign_id, today),
-                CacheKeys.freq_hourly(user_id, campaign_id, hour),
+                CacheKeys.freq_daily(user_id, campaign_id, today, slot_id=slot_id),
+                CacheKeys.freq_hourly(user_id, campaign_id, hour, slot_id=slot_id),
             ]
         else:
-            # Reset all (need pattern match - expensive)
             logger.warning("Resetting all frequency for user is expensive")
             return
 
-        await redis_client.delete(*keys)
+        try:
+            if redis_client.connected:
+                await redis_client.delete(*keys)
+        except Exception as e:
+            logger.error(f"Failed to reset frequency: {e}")

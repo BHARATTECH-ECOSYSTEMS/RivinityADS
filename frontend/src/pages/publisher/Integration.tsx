@@ -72,6 +72,53 @@ export default function Integration() {
 </script>`
     : "Select a slot first";
 
+  const s2sPythonSnippet = selectedSlot
+    ? `# Server-to-Server / AI Platform Integration (Python) — Slot: ${selectedSlot}
+# SECURITY NOTICE: Run this ONLY in backend servers. Never embed API keys in browser JavaScript!
+import hashlib, hmac, json, time, requests
+
+API_KEY = "pk_live_your_registered_api_key"  # From Publisher -> API Keys
+API_BASE = "${apiBase}"
+
+def request_ad(slot_id: str, platform_user_id: str, sector_context: list[str]):
+    # user.id MUST be a 64-character SHA-256 hex string to protect user privacy
+    user_hash = hashlib.sha256(platform_user_id.encode("utf-8")).hexdigest()
+
+    payload = {
+        "slot_id": slot_id,
+        "num_ads": 1,
+        "user": {
+            "id": user_hash,
+            "sector_context": sector_context,
+            "geo": {"country": "IN", "state": "Maharashtra", "city": "Mumbai", "pincode": "400001"}
+        }
+    }
+    body = json.dumps(payload).encode("utf-8")
+    ts = str(int(time.time()))
+
+    # Canonical HMAC (v2): HMAC-SHA256(api_key, "POST|/api/v1/ad/request|{timestamp}|{sha256(body)}")
+    body_sha256 = hashlib.sha256(body).hexdigest()
+    msg = f"POST|/api/v1/ad/request|{ts}|{body_sha256}".encode("utf-8")
+    sig = hmac.new(API_KEY.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+
+    response = requests.post(
+        f"{API_BASE}/api/v1/ad/request",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-API-Key": API_KEY,
+            "X-Timestamp": ts,
+            "X-Signature": sig,
+        },
+        timeout=5.0
+    )
+    response.raise_for_status()
+    return response.json()
+
+ad = request_ad("${selectedSlot}", "user_12345", ["developer"])
+print(ad)`
+    : "Select a slot first";
+
   const loadAd = async () => {
     if (!selectedSlot) return;
     setLoading(true);
@@ -79,8 +126,12 @@ export default function Integration() {
     try {
       const response = await requestAds({
         slot_id: selectedSlot,
-        device: { os: "web" },
         num_ads: 1,
+        user: {
+          id: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          sector_context: ["developer"],
+        },
+        device: { os: "web" },
       });
       const nextAd = response.ads[0] ?? null;
       setAd(nextAd);
@@ -255,6 +306,30 @@ export default function Integration() {
           <button
             className="btn secondary small"
             onClick={() => void copy(scriptSnippet)}
+            style={{ position: "absolute", top: "8px", right: "8px" }}
+          >
+            {copied ? "Copied!" : "Copy"}
+          </button>
+        </pre>
+      </div>
+
+      {/* Server-to-Server (AI Platforms) */}
+      <div className="card" style={{ border: "1px solid #3b82f6" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <span style={{ fontSize: "20px" }}>🔒</span>
+          <h2 style={{ margin: 0, color: "#60a5fa" }}>Server-to-Server / AI Platform Integration</h2>
+        </div>
+        <p className="muted" style={{ marginTop: "8px" }}>
+          For AI assistants, backend chat workflows, and server-to-server calls with cryptographic HMAC authentication.
+        </p>
+        <div style={{ background: "rgba(239, 68, 68, 0.1)", border: "1px solid #ef4444", borderRadius: "6px", padding: "10px 14px", margin: "12px 0", fontSize: "13px", color: "#fca5a5" }}>
+          <strong>⚠️ Security Requirement:</strong> Only execute this request from your private backend server. Never include API keys or sign requests inside browser JavaScript or public client code.
+        </div>
+        <pre style={{ position: "relative" }}>
+          {s2sPythonSnippet}
+          <button
+            className="btn secondary small"
+            onClick={() => void copy(s2sPythonSnippet)}
             style={{ position: "absolute", top: "8px", right: "8px" }}
           >
             {copied ? "Copied!" : "Copy"}

@@ -12,22 +12,25 @@ import html as html_lib
 import re
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from liteads.ad_server.services.ad_service import AdService
+from liteads.ad_server.services.rate_limit_service import RateLimitService
 from liteads.common.config import get_settings
 from liteads.common.database import get_session
 from liteads.common.logger import get_logger, log_context
 from liteads.common.security import (
+    AuthenticatedAdCaller,
+    authenticate_ad_request,
     authenticate_s2s_or_user,
     optional_publisher_from_api_key,
     verify_hmac_signature,
 )
 from liteads.common.utils import generate_request_id
-from liteads.models import AdSlot, Publisher
+from liteads.models import AdSlot, Publisher, Status
 from liteads.schemas.request import (
     AdRequest,
     DeviceInfo,
@@ -129,22 +132,25 @@ def get_ad_service(session: AsyncSession = Depends(get_session)) -> AdService:
 @router.post("/request", response_model=AdListResponse)
 async def request_ads(
     request: Request,
+    response: Response,
     ad_request: AdRequest,
+    caller: AuthenticatedAdCaller = Depends(authenticate_ad_request),
     ad_service: AdService = Depends(get_ad_service),
     session: AsyncSession = Depends(get_session),
-    publisher_id: int | None = Depends(optional_publisher_from_api_key),
 ) -> AdListResponse:
     """Request ads for a given slot.
 
     This is the main ad serving endpoint. It:
 
-    1. Optionally authenticates via ``X-API-Key`` (soft — logs publisher ID).
-    2. Validates an ``X-Signature`` HMAC when present (for AI-platform S2S callers).
-    3. Retrieves candidate ads based on targeting.
-    4. Filters by requested ``format`` (creative_type).
-    5. Filters by budget, frequency, and quality.
-    6. Predicts CTR/CVR using ML models.
-    7. Ranks ads by eCPM.
+    1. Validates and enforces S2S partner HMAC authentication (X-API-Key,
+       X-Timestamp, X-Signature) or dashboard JWT authentication.
+    2. Strict fail-closed security: malformed credentials, unknown keys,
+       revoked keys, expired timestamps, or invalid signatures are rejected (HTTP 401).
+    3. Anonymous callers with no credentials follow a separated unauthenticated path.
+    4. Enforces publisher slot ownership authorization (HTTP 403 on mismatch).
+    5. Retrieves candidate ads based on targeting and contextual sector affinities.
+    6. Filters by requested format (creative_type), budget, frequency, and quality.
+    7. Predicts CTR/CVR using ML models and ranks by eCPM.
     8. Returns top ads with signed tracking URLs.
 
     **AI-platform note:** Use ``format=2`` (native) to receive
@@ -155,46 +161,140 @@ async def request_ads(
     request_id = generate_request_id()
     settings = get_settings()
 
-    # ── Phase 4.3 — HMAC signature check (when present) ──────────────────
-    api_key_header = request.headers.get("X-API-Key", "")
-    signature = request.headers.get("X-Signature", "")
-    timestamp = request.headers.get("X-Timestamp", "")
-    if signature and api_key_header:
-        body_bytes = await request.body()
-        verify_hmac_signature(
-            raw_key=api_key_header,
-            timestamp_str=timestamp,
-            body_bytes=body_bytes,
-            signature=signature,
-        )
+    publisher_id = caller.publisher_id
 
-    # Add request context for logging
+    # Add request context for logging (mask full user_id to prevent PII exposure in logs)
+    masked_user = (
+        f"{ad_request.user_id[:8]}...{ad_request.user_id[-4:]}"
+        if ad_request.user_id and len(ad_request.user_id) >= 16
+        else ("<user_id>" if ad_request.user_id else None)
+    )
     log_context(
         request_id=request_id,
         slot_id=ad_request.slot_id,
-        user_id=ad_request.user_id,
-        publisher_id=publisher_id,   # None when no key is present
+        user_id=masked_user,
+        publisher_id=publisher_id,   # None when unauthenticated
     )
 
     logger.info(
         "Ad request received",
         num_requested=ad_request.num_ads,
         os=ad_request.device.os if ad_request.device else None,
-        authenticated=publisher_id is not None,
+        authenticated=caller.is_authenticated,
+        auth_type=caller.auth_type,
     )
+
+    # ── Phase 5.3: Rate Limiting & Daily Quota Enforcement ───────────────
+    if caller.is_authenticated and caller.auth_type == "api_key" and caller.api_key:
+        db_key = caller.api_key
+        key_id = db_key.get("id") if isinstance(db_key, dict) else getattr(db_key, "id", None)
+        rate_limit = (
+            db_key.get("rate_limit_per_minute", 60)
+            if isinstance(db_key, dict)
+            else getattr(db_key, "rate_limit_per_minute", 60)
+        )
+        daily_quota = (
+            db_key.get("daily_quota", 10000)
+            if isinstance(db_key, dict)
+            else getattr(db_key, "daily_quota", 10000)
+        )
+
+        if key_id:
+            # 1. Total request admitted to quota/rate limit evaluation
+            await RateLimitService.record_usage_metric(key_id, "total_requests", 1)
+
+            # 2. Check per-minute rate limit (atomic sliding window)
+            try:
+                allowed_rl, rem_rl, reset_rl = await RateLimitService.check_rate_limit(
+                    key_id=key_id,
+                    rate_limit_per_minute=rate_limit,
+                )
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error("rate_limit_fail_closed_error", error=str(e))
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Rate limit service unavailable",
+                )
+
+            if not allowed_rl:
+                await RateLimitService.record_usage_metric(key_id, "rate_limited_requests", 1)
+                rl_headers = {
+                    "Retry-After": str(reset_rl),
+                    "X-RateLimit-Limit": str(rate_limit),
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": str(reset_rl),
+                }
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Rate limit exceeded. Please retry after {reset_rl} seconds.",
+                    headers=rl_headers,
+                )
+
+            # 3. Check daily quota (atomic counter)
+            try:
+                allowed_quota, rem_quota, reset_quota = await RateLimitService.check_daily_quota(
+                    key_id=key_id,
+                    daily_quota=daily_quota,
+                )
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error("daily_quota_fail_closed_error", error=str(e))
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Daily quota service unavailable",
+                )
+
+            if not allowed_quota:
+                await RateLimitService.record_usage_metric(key_id, "quota_exceeded_requests", 1)
+                quota_headers = {
+                    "Retry-After": str(reset_quota),
+                    "X-Quota-Limit": str(daily_quota),
+                    "X-Quota-Remaining": "0",
+                    "X-Quota-Reset": str(reset_quota),
+                }
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Daily quota exceeded. Resets at 00:00 UTC.",
+                    headers=quota_headers,
+                )
+
+            # 4. Admitted to ad serving pipeline
+            await RateLimitService.record_usage_metric(key_id, "admitted_requests", 1)
+
+            # Attach rate-limit and quota headers to response
+            response.headers["X-RateLimit-Limit"] = str(rate_limit)
+            response.headers["X-RateLimit-Remaining"] = str(rem_rl)
+            response.headers["X-RateLimit-Reset"] = str(reset_rl)
+            response.headers["X-Quota-Limit"] = str(daily_quota)
+            response.headers["X-Quota-Remaining"] = str(rem_quota)
+            response.headers["X-Quota-Reset"] = str(reset_quota)
 
     # Get client IP from request
     client_ip = request.client.host if request.client else None
     if ad_request.geo and not ad_request.geo.ip:
         ad_request.geo.ip = client_ip
 
-    # Slot authorization if authenticated
-    if publisher_id is not None:
-        from sqlalchemy import select
-        slot_res = await session.execute(select(AdSlot).where(AdSlot.slot_id == ad_request.slot_id))
-        slot = slot_res.scalar_one_or_none()
-        if slot and slot.publisher_id != publisher_id:
-            raise HTTPException(status_code=403, detail="Not authorized for this slot")
+    # Slot authorization and restrictions
+    from sqlalchemy import select
+    slot_res = await session.execute(select(AdSlot).where(AdSlot.slot_id == ad_request.slot_id))
+    slot = slot_res.scalar_one_or_none()
+
+    if slot:
+        if slot.status != Status.ACTIVE:
+            raise HTTPException(status_code=400, detail="Ad slot is not active")
+        if caller.is_authenticated:
+            if publisher_id is not None and slot.publisher_id != publisher_id:
+                raise HTTPException(status_code=403, detail="Not authorized for this slot")
+        else:
+            # Anonymous callers are prohibited from private / chat surface slots
+            if slot.is_chat_surface:
+                raise HTTPException(status_code=401, detail="Authentication required for chat surface slots")
+    elif caller.is_authenticated:
+        # Authenticated caller requesting a non-existent slot
+        raise HTTPException(status_code=404, detail="Ad slot not found")
 
     # Serve ads
     candidates = await ad_service.serve_ads(
@@ -249,6 +349,8 @@ async def request_ads(
             creative_id=candidate.creative_id,
             creative=creative,
             tracking=tracking,
+            sponsored=True,
+            disclosure_label="Sponsored",
             metadata={
                 "ecpm": round(candidate.ecpm, 4),
                 "pctr": round(candidate.pctr, 6),
@@ -259,6 +361,12 @@ async def request_ads(
         ads.append(ad)
 
     logger.info("Ad request completed", num_returned=len(ads))
+
+    if caller.is_authenticated and caller.auth_type == "api_key" and caller.api_key:
+        db_key = caller.api_key
+        key_id = db_key.get("id") if isinstance(db_key, dict) else getattr(db_key, "id", None)
+        if len(ads) > 0 and key_id:
+            await RateLimitService.record_usage_metric(key_id, "served_ads", len(ads))
 
     return AdListResponse(
         request_id=request_id,

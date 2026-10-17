@@ -11,11 +11,17 @@ from liteads.common.config import get_settings
 
 @pytest.fixture(autouse=True)
 async def clear_redis():
-    if redis_client.connected:
-        await redis_client.client.flushdb()
+    try:
+        if redis_client.connected:
+            await redis_client.client.flushdb()
+    except Exception:
+        pass
     yield
-    if redis_client.connected:
-        await redis_client.client.flushdb()
+    try:
+        if redis_client.connected:
+            await redis_client.client.flushdb()
+    except Exception:
+        pass
 
 @pytest.fixture
 async def setup_test_user(test_db: AsyncSession):

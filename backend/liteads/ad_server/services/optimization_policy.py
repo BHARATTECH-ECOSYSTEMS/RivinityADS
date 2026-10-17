@@ -9,8 +9,16 @@ from typing import Any
 from decimal import Decimal
 
 from liteads.models.ad import Campaign
+from liteads.models.base import ModerationStatus
 from liteads.ad_server.services.optimization_prep import OptimizationPrepResult
 from liteads.ad_server.services.laya_client import LayaDecisionResult
+from liteads.ad_server.services.placement_analyzer import (
+    PlacementAnalysisResult,
+    VERDICT_GREAT,
+    VERDICT_HEALTHY,
+    VERDICT_LOW_VISIBILITY,
+    VERDICT_INSUFFICIENT_DATA,
+)
 
 
 @dataclass
@@ -167,3 +175,114 @@ class OptimizationPolicyService:
             autopilot=autopilot,
             operation_type="ADD"
         )
+
+    def select_preferred_shift_destination(
+        self,
+        campaign: Campaign,
+        candidate_destinations: list[str | dict[str, Any]],
+        placements: list[PlacementAnalysisResult] | list[dict[str, Any]] | None = None,
+        advertiser_balance: Decimal | None = None,
+        verified_domain: bool | None = None,
+    ) -> str | dict[str, Any] | None:
+        """
+        Advisory destination selection for optimizer shift actions preferring great placements.
+        
+        Strict Guardrails:
+        - Campaign must be active (is_active == True).
+        - Campaign must have >= 500 impressions.
+        - Advertiser balance must be > 0 (if provided).
+        - Creative moderation must be satisfied (no rejected creatives live).
+        - Verified-domain enforcement must not be violated (if checked).
+        - If candidate_destinations is empty, returns None (never invents a destination).
+        - Placements with verdict == 'great' are prioritized.
+        - Non-great placements ('healthy', 'low_visibility', 'insufficient_data') do NOT receive 'great' preference and never displace a 'great' placement.
+        - Legacy NULL-slot rows never receive preference.
+        - If no analysis is available or candidates have equal verdict, preserves deterministic ordering.
+        """
+        # 1. Guardrail: Campaign active
+        if not campaign.is_active:
+            return None
+
+        # 2. Guardrail: Minimum 500 impressions
+        if campaign.impressions < 500:
+            return None
+
+        # 3. Guardrail: Advertiser balance
+        if advertiser_balance is not None and advertiser_balance <= Decimal("0"):
+            return None
+
+        # 4. Guardrail: Verified domain enforcement
+        if verified_domain is False:
+            return None
+
+        # 5. Guardrail: Moderation status (creative cannot be rejected)
+        creatives = campaign.__dict__.get("creatives") or []
+        if any(getattr(c, "moderation_status", None) == ModerationStatus.REJECTED for c in creatives):
+            return None
+
+        # 6. Guardrail: Never invent a destination if no eligible destination exists
+        if not candidate_destinations:
+            return None
+
+        # If placement analyses are absent or empty, preserve existing deterministic behavior
+        if not placements:
+            return candidate_destinations[0]
+
+        # Build lookup of placement results by slot_id
+        # Exclude legacy NULL-slot rows
+        analysis_by_slot: dict[str, dict[str, Any]] = {}
+        for p in placements:
+            if isinstance(p, dict):
+                slot_id = p.get("slot_id")
+                verdict = p.get("verdict")
+                ctr = float(p.get("ctr", 0.0))
+            else:
+                slot_id = p.slot_id
+                verdict = p.verdict
+                ctr = float(p.ctr)
+
+            if slot_id:
+                analysis_by_slot[slot_id] = {
+                    "verdict": verdict,
+                    "ctr": ctr,
+                }
+
+        # Score candidates
+        def candidate_key(candidate: str | dict[str, Any]) -> tuple[int, float, str]:
+            if isinstance(candidate, str):
+                slot_id = candidate
+            elif isinstance(candidate, dict):
+                slot_id = candidate.get("slot_id") or candidate.get("id") or str(candidate)
+            else:
+                slot_id = str(candidate)
+
+            p_data = analysis_by_slot.get(slot_id)
+            if not p_data:
+                return (0, 0.0, slot_id)
+
+            verdict = p_data["verdict"]
+            ctr = p_data["ctr"]
+
+            # Only VERDICT_GREAT receives the great preference
+            if verdict == VERDICT_GREAT:
+                return (1, ctr, slot_id)
+            else:
+                return (0, 0.0, slot_id)
+
+        great_candidates: list[tuple[tuple[int, float, str], str | dict[str, Any]]] = []
+        other_candidates: list[str | dict[str, Any]] = []
+
+        for c in candidate_destinations:
+            key = candidate_key(c)
+            if key[0] == 1:
+                great_candidates.append((key, c))
+            else:
+                other_candidates.append(c)
+
+        if great_candidates:
+            # Sort great candidates: highest CTR first, then deterministic tie-break on slot_id
+            great_candidates.sort(key=lambda item: (-item[0][1], item[0][2]))
+            return great_candidates[0][1]
+
+        # No great candidate: preserve original deterministic order
+        return other_candidates[0]

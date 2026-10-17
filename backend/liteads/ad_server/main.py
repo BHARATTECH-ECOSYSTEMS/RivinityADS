@@ -52,6 +52,9 @@ async def lifespan(app: FastAPI):
     from liteads.ad_server.services.optimization_scheduler import optimization_loop
     optimization_loop.start()
 
+    from liteads.ad_server.services.digest_scheduler import weekly_digest_loop
+    weekly_digest_loop.start()
+
     logger.info("LiteAds server started successfully")
 
     yield
@@ -59,6 +62,9 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down LiteAds server")
     
+    from liteads.ad_server.services.digest_scheduler import weekly_digest_loop
+    await weekly_digest_loop.stop()
+
     from liteads.ad_server.services.optimization_scheduler import optimization_loop
     await optimization_loop.stop()
     
@@ -258,7 +264,7 @@ _PUBLIC_DOCS_HTML = """<!DOCTYPE html>
     <p class="desc" style="margin-top:8px"><strong>AI-platform / S2S callers</strong> additionally sign each request with HMAC-SHA256:</p>
     <code>X-API-Key: rk_live_...
 X-Timestamp: 1700000000          # Unix epoch (integer)
-X-Signature: &lt;hex&gt;               # HMAC-SHA256(api_key, "{key}|{ts}|{body_sha256}")</code>
+X-Signature: &lt;hex&gt;               # HMAC-SHA256(api_key, "POST|/api/v1/ad/request|{ts}|{body_sha256}")</code>
   </div>
 
   <h2>📡 Endpoints</h2>

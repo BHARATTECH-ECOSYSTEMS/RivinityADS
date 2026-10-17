@@ -179,6 +179,7 @@ class PublisherCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     email: str | None = None
     site_url: str | None = None
+    is_sandbox: bool = Field(default=False)
 
 
 class PublisherUpdate(BaseModel):
@@ -186,6 +187,7 @@ class PublisherUpdate(BaseModel):
     email: str | None = None
     site_url: str | None = None
     status: int | None = Field(default=None, ge=0, le=4)
+    is_sandbox: bool | None = None
 
 
 class PublisherResponse(ORMModel):
@@ -194,6 +196,7 @@ class PublisherResponse(ORMModel):
     email: str | None
     site_url: str | None
     status: int
+    is_sandbox: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -231,6 +234,7 @@ class SlotCreate(BaseModel):
     height: int = Field(default=0, ge=0)
     status: int = Field(default=1, ge=0, le=4)
     floor_price: Decimal = Field(default=Decimal("0.0"), ge=0)
+    is_chat_surface: bool = Field(default=False)
 
 
 class SlotUpdate(BaseModel):
@@ -241,6 +245,7 @@ class SlotUpdate(BaseModel):
     height: int | None = Field(default=None, ge=0)
     status: int | None = Field(default=None, ge=0, le=4)
     floor_price: Decimal | None = Field(default=None, ge=0)
+    is_chat_surface: bool | None = None
 
 
 class SlotResponse(ORMModel):
@@ -254,6 +259,7 @@ class SlotResponse(ORMModel):
     height: int
     status: int
     floor_price: Decimal
+    is_chat_surface: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -296,6 +302,9 @@ class AdvertiserReportingResponse(BaseModel):
 
 class ApiKeyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
+    is_sandbox: bool = Field(default=False)
+    rate_limit_per_minute: int = Field(default=60, gt=0)
+    daily_quota: int = Field(default=10000, gt=0)
 
 
 class ApiKeyResponse(ORMModel):
@@ -304,9 +313,43 @@ class ApiKeyResponse(ORMModel):
     name: str
     key_prefix: str
     raw_key: str | None = None
+    is_sandbox: bool = False
+    rate_limit_per_minute: int = 60
+    daily_quota: int = 10000
+    last_used_at: datetime | None = None
     revoked_at: datetime | None = None
     created_at: datetime
     updated_at: datetime | None = None
+
+
+class ApiKeyUsageBreakdown(BaseModel):
+    total_requests: int = 0
+    admitted_requests: int = 0
+    rate_limited_requests: int = 0
+    quota_exceeded_requests: int = 0
+    served_ads: int = 0
+
+
+class ApiKeyUsageResponse(BaseModel):
+    key_id: int
+    publisher_id: int
+    name: str
+    key_prefix: str
+    is_sandbox: bool = False
+    rate_limit_per_minute: int = 60
+    daily_quota: int = 10000
+    current_minute_usage: int = 0
+    rate_limit_remaining: int = 60
+    rate_limit_reset_seconds: int = 60
+    today_usage: int = 0
+    daily_quota_remaining: int = 10000
+    daily_reset_time_utc: str
+    daily_reset_seconds: int
+    breakdown: ApiKeyUsageBreakdown = Field(default_factory=ApiKeyUsageBreakdown)
+    last_used_at: datetime | None = None
+    status: int = 1
+    revoked_at: datetime | None = None
+    created_at: datetime
 
 
 # ── Publisher API Key schemas (Phase 4.2 compatibility) ─────────────────────────
@@ -319,6 +362,9 @@ class PublisherApiKeyCreate(BaseModel):
         default=None, min_length=1, max_length=128, description="Human-readable label"
     )
     name: str | None = Field(default=None, min_length=1, max_length=255)
+    is_sandbox: bool = Field(default=False)
+    rate_limit_per_minute: int = Field(default=60, gt=0)
+    daily_quota: int = Field(default=10000, gt=0)
 
     def __init__(self, **data):
         if "label" in data and "name" not in data:
@@ -336,6 +382,10 @@ class PublisherApiKeyResponse(ORMModel):
     name: str | None = None
     label: str | None = None
     key_prefix: str
+    is_sandbox: bool = False
+    rate_limit_per_minute: int = 60
+    daily_quota: int = 10000
+    last_used_at: datetime | None = None
     status: int = 1
     revoked_at: datetime | None = None
     created_at: datetime
@@ -357,6 +407,9 @@ class PublisherApiKeyCreateResponse(BaseModel):
     name: str | None = None
     label: str | None = None
     key_prefix: str
+    is_sandbox: bool = False
+    rate_limit_per_minute: int = 60
+    daily_quota: int = 10000
     status: int = 1
     created_at: datetime
     raw_key: str = Field(
@@ -393,3 +446,39 @@ class PublisherAssignmentResponse(BaseModel):
     slot_id: str | None = None
     slot_name: str | None = None
     status: str
+
+
+# ── Phase 6 WU3 — Placement Health schemas ─────────────────────────────────────
+
+class FormatBenchmarkSchema(BaseModel):
+    format: int
+    format_name: str | None = None
+    eligible_slots_count: int
+    median_ctr: float | None = None
+    median_ecpm: float | None = None
+
+
+class PlacementHealthItemSchema(BaseModel):
+    slot_id: str
+    slot_name: str
+    format: int
+    format_name: str
+    impressions: int
+    clicks: int
+    conversions: int
+    earnings: float
+    ctr: float
+    ecpm: float
+    verdict: str
+    recommendation: str
+    benchmark: FormatBenchmarkSchema
+
+
+class PlacementHealthResponse(BaseModel):
+    publisher_id: int
+    window_days: int
+    start_date: str
+    end_date: str
+    total_placements: int
+    placements: list[PlacementHealthItemSchema]
+    benchmarks: dict[str, FormatBenchmarkSchema] = {}

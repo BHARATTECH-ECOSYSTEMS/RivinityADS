@@ -29,6 +29,10 @@ export default function PublisherAdUnits() {
   const [height, setHeight] = useState(250);
   const [floorPrice, setFloorPrice] = useState(0.0);
   const [propertyId, setPropertyId] = useState<number | "">("");
+  const [isChatSurface, setIsChatSurface] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [formSuccess, setFormSuccess] = useState("");
+  const [formError, setFormError] = useState("");
 
   const publisherId = session?.user?.publisher_id;
 
@@ -54,6 +58,9 @@ export default function PublisherAdUnits() {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
+    setCreating(true);
+    setFormError("");
+    setFormSuccess("");
     try {
       await createSlot({
         slot_id: slotId,
@@ -62,15 +69,20 @@ export default function PublisherAdUnits() {
         width,
         height,
         floor_price: floorPrice,
-        property_id: propertyId === "" ? null : propertyId
+        property_id: propertyId === "" ? null : propertyId,
+        is_chat_surface: isChatSurface,
       });
       setName("");
       setSlotId("");
       setFloorPrice(0);
       setPropertyId("");
+      setIsChatSurface(false);
+      setFormSuccess("Ad unit created successfully!");
       await loadData();
     } catch (err: any) {
-      alert(err.message || "Failed to create ad unit");
+      setFormError(err.message || "Failed to create ad unit");
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -80,6 +92,15 @@ export default function PublisherAdUnits() {
           await loadData();
       } catch (err) {
           alert("Failed to update status");
+      }
+  };
+
+  const handleToggleChatSurface = async (id: number, current: boolean) => {
+      try {
+          await updateSlot(id, { is_chat_surface: !current } as any);
+          await loadData();
+      } catch (err) {
+          alert("Failed to update chat surface setting");
       }
   };
 
@@ -121,6 +142,7 @@ export default function PublisherAdUnits() {
                     <tr>
                         <th>Name & ID</th>
                         <th>Property</th>
+                        <th>Surface</th>
                         <th>Size</th>
                         <th>Floor Price</th>
                         <th>Status</th>
@@ -137,12 +159,24 @@ export default function PublisherAdUnits() {
                                     <div className="muted" style={{ fontSize: "12px", fontFamily: "monospace" }}>{slot.slot_id}</div>
                                 </td>
                                 <td>{prop ? prop.name : <span className="muted">None</span>}</td>
+                                <td>
+                                    {slot.is_chat_surface ? (
+                                        <span style={{ background: "#7c3aed", color: "#fff", fontSize: "11px", padding: "2px 8px", borderRadius: "999px", fontWeight: 600 }}>
+                                            💬 Chat Surface
+                                        </span>
+                                    ) : (
+                                        <span className="muted" style={{ fontSize: "12px" }}>Standard</span>
+                                    )}
+                                </td>
                                 <td>{slot.width}x{slot.height}</td>
                                 <td>${Number(slot.floor_price || 0).toFixed(2)}</td>
                                 <td><Badge status={slot.status} /></td>
                                 <td style={{ textAlign: "right" }}>
                                     <div className="flex row gap justify-end">
                                         <button className="btn secondary small" onClick={() => handleGetTag(slot.id)}>Code</button>
+                                        <button className="btn secondary small" onClick={() => handleToggleChatSurface(slot.id, slot.is_chat_surface)} title="Toggle Chat Surface restriction">
+                                            {slot.is_chat_surface ? "Standard" : "Chat"}
+                                        </button>
                                         <button className="btn secondary small" onClick={() => handleToggleStatus(slot.id, slot.status)}>Toggle</button>
                                     </div>
                                 </td>
@@ -156,6 +190,8 @@ export default function PublisherAdUnits() {
 
         <div className="card">
             <h2 style={{ marginBottom: "16px" }}>Create Ad Unit</h2>
+            {formError && <p className="error" style={{ fontSize: "12px", marginBottom: "8px" }}>{formError}</p>}
+            {formSuccess && <p style={{ color: "#16a34a", fontSize: "12px", marginBottom: "8px" }}>{formSuccess}</p>}
             <form onSubmit={handleCreate} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
                 <div>
                     <label style={{ display: "block", marginBottom: "4px" }}>Name</label>
@@ -188,7 +224,22 @@ export default function PublisherAdUnits() {
                     <label style={{ display: "block", marginBottom: "4px" }}>Floor Price ($)</label>
                     <input type="number" step="0.01" required value={floorPrice} onChange={(e) => setFloorPrice(Number(e.target.value))} className="input" style={{ width: "100%" }} />
                 </div>
-                <button type="submit" className="btn primary" style={{ marginTop: "8px" }}>Create Ad Unit</button>
+                <div style={{ padding: "6px 0", borderTop: "1px solid var(--border, #e2e8f0)", borderBottom: "1px solid var(--border, #e2e8f0)" }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer", fontWeight: 500, fontSize: "13px" }}>
+                        <input
+                            type="checkbox"
+                            checked={isChatSurface}
+                            onChange={(e) => setIsChatSurface(e.target.checked)}
+                        />
+                        <span>💬 Chat Surface Placement</span>
+                    </label>
+                    <p className="muted" style={{ fontSize: "11px", margin: "4px 0 0 24px", lineHeight: "1.4" }}>
+                        For conversational AI surfaces. <b>Interstitial ads cannot be served on chat surfaces.</b>
+                    </p>
+                </div>
+                <button type="submit" className="btn primary" disabled={creating} style={{ marginTop: "8px" }}>
+                    {creating ? "Creating..." : "Create Ad Unit"}
+                </button>
             </form>
         </div>
       </div>

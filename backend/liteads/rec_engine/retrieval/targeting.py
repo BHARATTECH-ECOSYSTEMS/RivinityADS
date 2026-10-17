@@ -52,8 +52,8 @@ class TargetingRetrieval(BaseRetrieval):
         5. Return matching candidates
         """
         # Resolve slot dimensions and format for size matching
-        slot_width, slot_height, slot_format, slot_pub_id = await self._get_slot_info(slot_id)
-        logger.debug(f"Resolved slot {slot_id} to pub {slot_pub_id} (w={slot_width} h={slot_height})")
+        slot_width, slot_height, slot_format, slot_pub_id, is_chat_surface = await self._get_slot_info(slot_id)
+        logger.debug(f"Resolved slot {slot_id} to pub {slot_pub_id} (w={slot_width} h={slot_height} chat={is_chat_surface})")
 
         # Get active campaigns (with caching)
         campaigns = await self._get_active_campaigns()
@@ -100,6 +100,8 @@ class TargetingRetrieval(BaseRetrieval):
             for creative_data in campaign_data.get("creatives", []):
                 # Format matching
                 c_format = creative_data.get("creative_type", 1)
+                if is_chat_surface and c_format == 4:
+                    continue  # Interstitial format is forbidden on chat surfaces
                 if slot_format is not None and c_format != slot_format:
                     continue
 
@@ -126,7 +128,11 @@ class TargetingRetrieval(BaseRetrieval):
                     creative_type=creative_data.get("creative_type", 1),
                     width=creative_data.get("width"),
                     height=creative_data.get("height"),
-                    metadata={"sectors": targeted_sectors},
+                    metadata={
+                        "sectors": targeted_sectors,
+                        "freq_cap_daily": campaign_data.get("freq_cap_daily"),
+                        "freq_cap_hourly": campaign_data.get("freq_cap_hourly"),
+                    },
                 )
 
                 if is_explicitly_assigned:
@@ -155,8 +161,8 @@ class TargetingRetrieval(BaseRetrieval):
         logger.debug(f"Retrieved {len(candidates)} candidates from targeting")
         return candidates
 
-    async def _get_slot_info(self, slot_id: str) -> tuple[int, int, int | None, int | None]:
-        """Resolve an ad slot's width, height, format, and publisher_id from the database."""
+    async def _get_slot_info(self, slot_id: str) -> tuple[int, int, int | None, int | None, bool]:
+        """Resolve an ad slot's width, height, format, publisher_id, and chat surface flag from the database."""
         try:
             from liteads.models import AdSlot
             result = await self.session.execute(
@@ -164,10 +170,10 @@ class TargetingRetrieval(BaseRetrieval):
             )
             slot = result.scalar_one_or_none()
             if slot:
-                return (slot.width or 0, slot.height or 0, slot.format, slot.publisher_id)
+                return (slot.width or 0, slot.height or 0, slot.format, slot.publisher_id, bool(slot.is_chat_surface))
         except Exception as e:
             logger.error(f"Could not resolve slot info for {slot_id}: {e}", exc_info=True)
-        return 0, 0, None, None
+        return 0, 0, None, None, False
 
     async def _get_active_campaigns(self) -> list[dict[str, Any]]:
         """Get all active campaigns with creatives and targeting rules."""

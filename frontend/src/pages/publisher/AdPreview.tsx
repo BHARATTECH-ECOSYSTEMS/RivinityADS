@@ -54,7 +54,15 @@ export default function AdPreview() {
     setImpressionFired(false);
     setClickTracked(false);
     try {
-      const res = await requestAds({ slot_id: selectedSlot, device: { os: "web" }, num_ads: 1 });
+      const res = await requestAds({
+        slot_id: selectedSlot,
+        num_ads: 1,
+        user: {
+          id: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          sector_context: ["developer"],
+        },
+        device: { os: "web" },
+      });
       const winner = res.ads[0] ?? null;
       setAd(winner);
       setRequestId(res.request_id);
@@ -269,7 +277,12 @@ export default function AdPreview() {
                         />
                       )}
                       <div className="ad-body">
-                        <div className="sponsored">Sponsored · {ad.creative.creative_type}</div>
+                        <div className="sponsored" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                          <span style={{ background: "#2563eb", color: "#fff", fontSize: "10px", padding: "1px 6px", borderRadius: "3px", fontWeight: "bold" }}>
+                            {ad.disclosure_label || (ad.sponsored ? "Sponsored" : "Ad")}
+                          </span>
+                          <span>· {ad.creative.creative_type}</span>
+                        </div>
                         <div className="ad-title">{ad.creative.title}</div>
                         {ad.creative.description && (
                           <div className="ad-desc">{ad.creative.description}</div>

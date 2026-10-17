@@ -36,6 +36,8 @@ class AdResponse(BaseModel):
     creative_id: int = Field(..., description="Creative identifier")
     creative: CreativeResponse = Field(..., description="Creative content")
     tracking: TrackingUrls = Field(..., description="Tracking URLs")
+    sponsored: bool = Field(True, description="Indicates this is a sponsored ad")
+    disclosure_label: str = Field("Sponsored", description="Mandatory label for ad disclosure")
     metadata: dict[str, Any] | None = Field(None, description="Additional metadata")
 
 
@@ -66,6 +68,8 @@ class AdListResponse(BaseModel):
                             "impression_url": "https://api.liteads.com/track/imp?id=xxx",
                             "click_url": "https://api.liteads.com/track/click?id=xxx",
                         },
+                        "sponsored": True,
+                        "disclosure_label": "Sponsored",
                     }
                 ],
                 "count": 1,

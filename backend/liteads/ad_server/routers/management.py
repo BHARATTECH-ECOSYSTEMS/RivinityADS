@@ -2,7 +2,7 @@
 
 import hashlib
 import secrets
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -10,10 +10,11 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from liteads.common.database import get_session
-from liteads.common.security import current_user, verified_user, require_roles, verified_user
+from liteads.common.security import current_user, verified_user, require_roles
 from liteads.ad_server.services.campaign_activation import activate_campaign_logic, CampaignActivationError
 from liteads.ad_server.services.creative_moderation import CreativeModerationService
 from liteads.ad_server.services.domain_verification import DomainVerificationService
+from liteads.ad_server.services.placement_analyzer import PlacementAnalyzerService
 from liteads.models import (
     AdSlot,
     Advertiser,
@@ -21,6 +22,7 @@ from liteads.models import (
     Campaign,
     CampaignAssignment,
     Creative,
+    CreativeType,
     Publisher,
     PublisherApiKey,
     PublisherDailyStat,
@@ -36,6 +38,7 @@ from liteads.schemas.management import (
     AdvertiserUpdate,
     ApiKeyCreate,
     ApiKeyResponse,
+    ApiKeyUsageResponse,
     CampaignAssignmentCreate,
     CampaignAssignmentResponse,
     CampaignCreate,
@@ -62,9 +65,13 @@ from liteads.schemas.management import (
     PublisherAssignmentResponse,
     SuggestionResponse,
     SuggestionStatusPatch,
+    FormatBenchmarkSchema,
+    PlacementHealthItemSchema,
+    PlacementHealthResponse,
 )
 from liteads.ad_server.services.optimization_executor import OptimizationExecutor
 from liteads.ad_server.services.optimization_policy import OptimizationPolicyResult
+from liteads.ad_server.services.rate_limit_service import RateLimitService
 from liteads.models.ad import Suggestion
 
 router = APIRouter(dependencies=[Depends(verified_user)])
@@ -685,25 +692,31 @@ async def publisher_reporting(
     earnings = Decimal(earnings or 0)
     ecpm = (earnings / Decimal(impressions) * Decimal(1000)) if impressions else Decimal("0")
     
-    # Fetch daily breakdown
+    # Fetch daily breakdown aggregated across all slots per date
     daily_result = await session.execute(
-        select(PublisherDailyStat).where(
+        select(
+            PublisherDailyStat.stat_date,
+            func.coalesce(func.sum(PublisherDailyStat.impressions), 0).label("impressions"),
+            func.coalesce(func.sum(PublisherDailyStat.clicks), 0).label("clicks"),
+            func.coalesce(func.sum(PublisherDailyStat.conversions), 0).label("conversions"),
+            func.coalesce(func.sum(PublisherDailyStat.earnings), Decimal("0")).label("earnings"),
+        ).where(
             PublisherDailyStat.publisher_id == publisher_id,
             PublisherDailyStat.stat_date >= start,
             PublisherDailyStat.stat_date <= end,
-        ).order_by(PublisherDailyStat.stat_date)
+        ).group_by(PublisherDailyStat.stat_date).order_by(PublisherDailyStat.stat_date)
     )
-    daily_stats = daily_result.scalars().all()
+    daily_rows = daily_result.all()
     
     breakdown = [
         DailyStatResponse(
-            stat_date=stat.stat_date,
-            impressions=stat.impressions,
-            clicks=stat.clicks,
-            conversions=stat.conversions,
-            earnings=stat.earnings,
+            stat_date=row.stat_date,
+            impressions=int(row.impressions),
+            clicks=int(row.clicks),
+            conversions=int(row.conversions),
+            earnings=Decimal(row.earnings or 0),
         )
-        for stat in daily_stats
+        for row in daily_rows
     ]
     
     return PublisherReportingResponse(
@@ -716,6 +729,97 @@ async def publisher_reporting(
         earnings=earnings,
         ecpm=ecpm,
         daily_breakdown=breakdown,
+    )
+
+
+@router.get(
+    "/publisher/{publisher_id}/placements/health",
+    response_model=PlacementHealthResponse,
+    dependencies=[Depends(require_roles("admin", "publisher"))],
+    summary="Get placement health analysis and platform benchmarks for publisher",
+)
+async def get_publisher_placement_health(
+    publisher_id: int,
+    window_days: int = Query(default=30, ge=1, le=90),
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> PlacementHealthResponse:
+    _assert_publisher_access(user, publisher_id)
+    if await session.get(Publisher, publisher_id) is None:
+        raise _not_found("Publisher", publisher_id)
+
+    analyzer = PlacementAnalyzerService(session)
+    results = await analyzer.analyze_publisher_placements(
+        publisher_id=publisher_id,
+        window_days=window_days,
+    )
+    raw_benchmarks = await analyzer.calculate_platform_benchmarks(window_days=window_days)
+
+    benchmarks_schema: dict[str, FormatBenchmarkSchema] = {}
+    for fmt_int, bm in raw_benchmarks.items():
+        try:
+            fmt_name = CreativeType(fmt_int).name
+        except Exception:
+            fmt_name = str(fmt_int)
+        benchmarks_schema[fmt_name] = FormatBenchmarkSchema(
+            format=bm.format,
+            format_name=fmt_name,
+            eligible_slots_count=bm.eligible_slots_count,
+            median_ctr=bm.median_ctr,
+            median_ecpm=bm.median_ecpm,
+        )
+
+    items: list[PlacementHealthItemSchema] = []
+    start_date_str = ""
+    end_date_str = ""
+    for r in results:
+        start_date_str = r.start_date
+        end_date_str = r.end_date
+        try:
+            r_fmt_name = CreativeType(r.format).name
+        except Exception:
+            r_fmt_name = str(r.format)
+
+        bm_dict = r.benchmark
+        bm_schema = FormatBenchmarkSchema(
+            format=bm_dict.get("format", r.format),
+            format_name=r_fmt_name,
+            eligible_slots_count=bm_dict.get("eligible_slots_count", 0),
+            median_ctr=bm_dict.get("median_ctr"),
+            median_ecpm=bm_dict.get("median_ecpm"),
+        )
+        items.append(
+            PlacementHealthItemSchema(
+                slot_id=r.slot_id,
+                slot_name=r.slot_name,
+                format=r.format,
+                format_name=r_fmt_name,
+                impressions=r.impressions,
+                clicks=r.clicks,
+                conversions=r.conversions,
+                earnings=r.earnings,
+                ctr=r.ctr,
+                ecpm=r.ecpm,
+                verdict=r.verdict,
+                recommendation=r.recommendation,
+                benchmark=bm_schema,
+            )
+        )
+
+    if not items:
+        today = date.today()
+        start = today - timedelta(days=window_days - 1)
+        start_date_str = start.isoformat()
+        end_date_str = today.isoformat()
+
+    return PlacementHealthResponse(
+        publisher_id=publisher_id,
+        window_days=window_days,
+        start_date=start_date_str,
+        end_date=end_date_str,
+        total_placements=len(items),
+        placements=items,
+        benchmarks=benchmarks_schema,
     )
 
 
@@ -816,6 +920,9 @@ async def create_api_key_for_publisher(
         publisher_id=db_key.publisher_id,
         name=db_key.name,
         key_prefix=db_key.key_prefix,
+        is_sandbox=db_key.is_sandbox,
+        rate_limit_per_minute=db_key.rate_limit_per_minute,
+        daily_quota=db_key.daily_quota,
         raw_key=raw_key,
         revoked_at=db_key.revoked_at,
         created_at=db_key.created_at,
@@ -846,13 +953,25 @@ async def create_publisher_api_key(
         raise _not_found("Publisher", pub_id)
 
     key_name = payload.name or payload.label or "Default Key"
-    db_key, raw_key = await ApiKeyService.create_api_key(session, pub_id, ApiKeyCreate(name=key_name))
+    db_key, raw_key = await ApiKeyService.create_api_key(
+        session,
+        pub_id,
+        ApiKeyCreate(
+            name=key_name,
+            is_sandbox=payload.is_sandbox,
+            rate_limit_per_minute=payload.rate_limit_per_minute,
+            daily_quota=payload.daily_quota,
+        ),
+    )
     return PublisherApiKeyCreateResponse(
         id=db_key.id,
         publisher_id=db_key.publisher_id,
         name=db_key.name,
         label=db_key.name,
         key_prefix=db_key.key_prefix,
+        is_sandbox=db_key.is_sandbox,
+        rate_limit_per_minute=db_key.rate_limit_per_minute,
+        daily_quota=db_key.daily_quota,
         status=db_key.status,
         created_at=db_key.created_at,
         raw_key=raw_key,
@@ -881,6 +1000,10 @@ async def list_publisher_api_keys(
             publisher_id=k.publisher_id,
             name=k.name,
             key_prefix=k.key_prefix,
+            is_sandbox=k.is_sandbox,
+            rate_limit_per_minute=k.rate_limit_per_minute,
+            daily_quota=k.daily_quota,
+            last_used_at=k.last_used_at,
             revoked_at=k.revoked_at,
             created_at=k.created_at,
             updated_at=k.updated_at,
@@ -924,6 +1047,60 @@ async def revoke_publisher_api_key(
     _assert_publisher_access(user, api_key.publisher_id)
     api_key.status = 0  # revoked
     await session.commit()
+
+
+@router.get(
+    "/publisher/{publisher_id}/keys/usage",
+    response_model=list[ApiKeyUsageResponse],
+    dependencies=[Depends(require_roles("admin", "publisher"))],
+    summary="Get real-time and aggregate usage for all publisher API keys",
+)
+async def get_publisher_keys_usage(
+    publisher_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[ApiKeyUsageResponse]:
+    _assert_publisher_access(user, publisher_id)
+    if await session.get(Publisher, publisher_id) is None:
+        raise _not_found("Publisher", publisher_id)
+    return await RateLimitService.get_publisher_keys_usage(session, publisher_id)
+
+
+@router.get(
+    "/publisher/{publisher_id}/keys/{key_id}/usage",
+    response_model=ApiKeyUsageResponse,
+    dependencies=[Depends(require_roles("admin", "publisher"))],
+    summary="Get real-time and aggregate usage for a specific publisher API key",
+)
+async def get_publisher_key_usage(
+    publisher_id: int,
+    key_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiKeyUsageResponse:
+    _assert_publisher_access(user, publisher_id)
+    if await session.get(Publisher, publisher_id) is None:
+        raise _not_found("Publisher", publisher_id)
+    api_key = await session.get(PublisherApiKey, key_id)
+    if not api_key or api_key.publisher_id != publisher_id:
+        raise HTTPException(status_code=404, detail=f"API key {key_id} not found")
+    return await RateLimitService.get_key_usage(session, api_key)
+
+
+@router.get(
+    "/publisher/keys/usage",
+    response_model=list[ApiKeyUsageResponse],
+    dependencies=[Depends(require_roles("admin", "publisher"))],
+    summary="Get usage for current authenticated publisher's API keys",
+)
+async def get_current_publisher_keys_usage(
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[ApiKeyUsageResponse]:
+    if not user.publisher_id:
+        raise HTTPException(status_code=400, detail="User is not associated with a publisher")
+    return await RateLimitService.get_publisher_keys_usage(session, user.publisher_id)
+
 
 
 @router.get("/campaign/{campaign_id}/suggestions", response_model=list[SuggestionResponse], dependencies=[Depends(require_roles("admin", "advertiser"))])

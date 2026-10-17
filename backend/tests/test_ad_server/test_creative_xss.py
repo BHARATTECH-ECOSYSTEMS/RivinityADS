@@ -6,6 +6,7 @@ import html
 
 @pytest.fixture
 async def setup_ad_data(test_db: AsyncSession):
+    from liteads.models.domain import AdvertiserDomain
     # Create publisher and slot
     pub = Publisher(id=10, name="Pub XSS")
     slot = AdSlot(slot_id="slot_xss", publisher_id=10, name="Slot XSS")
@@ -13,8 +14,9 @@ async def setup_ad_data(test_db: AsyncSession):
     # Create advertiser and campaign
     adv = Advertiser(id=10, name="Adv XSS", balance=100.0)
     camp = Campaign(id=10, advertiser_id=10, name="Camp XSS", bid_type=1, bid_amount=1.0)
+    domain = AdvertiserDomain(advertiser_id=10, domain="example.com", status="VERIFIED", verification_token="tok")
     
-    test_db.add_all([pub, slot, adv, camp])
+    test_db.add_all([pub, slot, adv, camp, domain])
     await test_db.commit()
     return camp.id
 
@@ -34,6 +36,7 @@ async def test_xss_in_serve_endpoint(client: AsyncClient, test_db: AsyncSession,
         landing_url=malicious_landing,
         creative_type=1,
         status=1,
+        moderation_status=2,
     )
     test_db.add(creative)
     await test_db.commit()
@@ -63,6 +66,7 @@ async def test_xss_native_fallback(client: AsyncClient, test_db: AsyncSession, s
         landing_url="https://example.com",
         creative_type=1,  # Keep 1 so it matches ad request, but omit image_url to trigger native fallback
         status=1,
+        moderation_status=2,
     )
     test_db.add(creative)
     await test_db.commit()
@@ -79,6 +83,7 @@ async def test_xss_native_fallback(client: AsyncClient, test_db: AsyncSession, s
 
 @pytest.mark.asyncio
 async def test_url_validation_api(client: AsyncClient, test_db: AsyncSession):
+    from liteads.models.domain import AdvertiserDomain
     # Create advertiser session
     res = await client.post("/api/v1/auth/register", json={
         "name": "Adv URL Test", "email": "url@test.com", "password": "password1234", "role": "advertiser"
@@ -86,6 +91,11 @@ async def test_url_validation_api(client: AsyncClient, test_db: AsyncSession):
     token = res.json()["access_token"]
     adv_id = res.json()["user"]["advertiser_id"]
     client.headers = {"Authorization": f"Bearer {token}"}
+    
+    # Verify domain for advertiser
+    domain = AdvertiserDomain(advertiser_id=adv_id, domain="example.com", status="VERIFIED", verification_token="tok")
+    test_db.add(domain)
+    await test_db.commit()
     
     # Make a campaign for this advertiser
     camp_res = await client.post("/api/v1/campaign", json={
@@ -137,6 +147,7 @@ async def test_legitimate_creative(client: AsyncClient, test_db: AsyncSession, s
         landing_url="https://example.com/product",
         creative_type=1,
         status=1,
+        moderation_status=2,
     )
     test_db.add(creative)
     await test_db.commit()

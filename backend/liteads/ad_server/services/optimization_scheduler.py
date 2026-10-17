@@ -101,7 +101,13 @@ class OptimizationLoopTask:
             return
             
         prep_service = OptimizationPreparationService()
-        context = prep_service.prepare_context(campaign)
+        try:
+            placements = await prep_service.get_campaign_eligible_placements(session, campaign)
+        except Exception as e:
+            logger.warning("Failed to retrieve placement health for campaign", campaign_id=campaign.id, error=str(e))
+            placements = None
+
+        context = prep_service.prepare_context(campaign, placements=placements)
         
         if not context.eligible:
             logger.info("Campaign ineligible for optimization (<500 impressions)", campaign_id=campaign.id)
@@ -113,7 +119,7 @@ class OptimizationLoopTask:
             logger.warning("Laya decision failed", campaign_id=campaign.id, error=str(e))
             return
             
-        policy_result = policy_service.evaluate(campaign, decision)
+        policy_result = policy_service.evaluate(campaign, context, decision)
         if not policy_result.accepted:
             logger.info("Laya decision rejected by policy", campaign_id=campaign.id, reason=policy_result.reason)
             return
@@ -121,7 +127,8 @@ class OptimizationLoopTask:
         logger.info("Executing approved Laya decision", campaign_id=campaign.id, action=policy_result.action)
         executor = OptimizationExecutor(session)
         try:
-            await executor.execute(campaign, policy_result, decision.target_payload)
+            target_payload = getattr(decision, "target_payload", None)
+            await executor.execute(campaign, policy_result, target_payload)
             if campaign.autopilot:
                 logger.info("Autopilot action applied", campaign_id=campaign.id, action=policy_result.action)
             else:

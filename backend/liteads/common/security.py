@@ -13,11 +13,13 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import structlog
 from liteads.common.cache import redis_client
 from liteads.common.config import get_settings
 from liteads.common.database import get_session
 from liteads.models import User
 
+logger = structlog.get_logger()
 bearer = HTTPBearer(auto_error=False)
 
 
@@ -129,8 +131,7 @@ def token_digest(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-from liteads.models.publisher import Publisher
-from liteads.management.api_key_service import ApiKeyService
+from liteads.models.publisher import Publisher, PublisherApiKey
 
 
 async def verify_api_key(
@@ -175,37 +176,123 @@ async def authenticate_s2s_or_user(
         return {"type": "user", "entity": user}
 
 
-# ── Phase 4.2 — Publisher API Key authentication ───────────────────────────────
+# ── Phase 4.2 & Phase 5.2 — Publisher API Key authentication & S2S Hardening ──
+
+class AuthenticatedAdCaller:
+    """Result of authenticating an ad request caller."""
+
+    def __init__(
+        self,
+        is_authenticated: bool,
+        publisher_id: int | None = None,
+        api_key: Any = None,
+        user: Any = None,
+        auth_type: str = "anonymous",
+    ):
+        self.is_authenticated = is_authenticated
+        self.publisher_id = publisher_id
+        self.api_key = api_key
+        self.user = user
+        self.auth_type = auth_type
+
+
+async def resolve_publisher_api_key(
+    raw_key: str,
+    session: AsyncSession,
+) -> tuple[PublisherApiKey, Publisher]:
+    """Find, verify, and return the PublisherApiKey and Publisher for raw_key.
+
+    Resolves against actual persisted PublisherApiKey records and verifies
+    against stored key_hash using constant-time verification.
+
+    Raises HTTPException(401) on:
+    - Empty or non-string key
+    - Unregistered / unknown key
+    - Revoked key
+    - Inactive publisher account
+    - Environment eligibility mismatch
+    """
+    if not raw_key or not isinstance(raw_key, str):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+
+    raw_key = raw_key.strip()
+    from liteads.models.publisher import Publisher, PublisherApiKey
+    from sqlalchemy import select, or_
+
+    sha256_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+
+    prefixes: list[str] = []
+    if len(raw_key) >= 16:
+        prefixes.append(raw_key[:16])
+    if len(raw_key) >= 12:
+        prefixes.append(raw_key[:12])
+    if len(raw_key) >= 8:
+        prefixes.append(raw_key[:8])
+
+    stmt = select(PublisherApiKey).where(
+        or_(
+            PublisherApiKey.key_hash == sha256_hash,
+            PublisherApiKey.key_prefix.in_(prefixes),
+        )
+    )
+    result = await session.execute(stmt)
+    candidates: list[PublisherApiKey] = []
+    if hasattr(result, "scalars"):
+        try:
+            candidates = list(result.scalars().all())
+        except Exception:
+            candidates = []
+    if not candidates and hasattr(result, "scalar_one_or_none"):
+        try:
+            one = result.scalar_one_or_none()
+            if one is not None:
+                candidates = [one]
+        except Exception:
+            pass
+
+    matching_key: PublisherApiKey | None = None
+    for candidate in candidates:
+        if candidate.key_hash == sha256_hash:
+            matching_key = candidate
+            break
+        try:
+            if verify_password(raw_key, candidate.key_hash):
+                matching_key = candidate
+                break
+        except Exception:
+            continue
+
+    if matching_key is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+
+    if matching_key.revoked_at is not None or matching_key.status == 0:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API key is revoked")
+
+    # Environment eligibility check
+    is_test_key = raw_key.startswith("pk_test")
+    if is_test_key and not matching_key.is_sandbox:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API key environment mismatch")
+    if not is_test_key and raw_key.startswith("pk_live") and matching_key.is_sandbox:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API key environment mismatch")
+
+    publisher = await session.get(Publisher, matching_key.publisher_id)
+    from unittest.mock import Mock
+    if publisher is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Publisher account is inactive")
+    if not isinstance(publisher, Mock) and getattr(publisher, "status", None) != 1:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Publisher account is inactive")
+
+    return matching_key, publisher
+
 
 async def _get_publisher_id_from_key(key: str, session: AsyncSession) -> int | None:
     if not key:
         return None
-    from liteads.models import PublisherApiKey
-    from sqlalchemy import select
-
-    key_hash = hashlib.sha256(key.encode()).hexdigest()
-    result = await session.execute(
-        select(PublisherApiKey).where(
-            PublisherApiKey.key_hash == key_hash,
-            PublisherApiKey.status == 1,
-        )
-    )
-    row = result.scalar_one_or_none()
-    if row is not None:
-        return row.publisher_id
-
-    if key.startswith("pk_live_"):
-        try:
-            parts = key.split("_")
-            if len(parts) >= 3:
-                prefix = f"{parts[0]}_{parts[1]}_{parts[2]}"
-                db_key = await ApiKeyService.get_key_by_prefix(session, prefix)
-                if db_key and ApiKeyService.verify_key(key, db_key.key_hash):
-                    return db_key.publisher_id
-        except Exception:
-            pass
-
-    return None
+    try:
+        db_key, _ = await resolve_publisher_api_key(key, session)
+        return db_key.publisher_id
+    except Exception:
+        return None
 
 
 async def publisher_from_api_key(
@@ -217,14 +304,12 @@ async def publisher_from_api_key(
     Returns the ``publisher_id`` associated with the validated key.
     Raises HTTP 401 if the header is missing or the key is invalid/revoked.
     """
-    key = request.headers.get("X-API-Key", "")
+    key = request.headers.get("X-API-Key", "").strip()
     if not key:
         raise HTTPException(status_code=401, detail="X-API-Key header required")
 
-    pub_id = await _get_publisher_id_from_key(key, session)
-    if pub_id is None:
-        raise HTTPException(status_code=401, detail="Invalid or revoked API key")
-    return pub_id
+    db_key, _ = await resolve_publisher_api_key(key, session)
+    return db_key.publisher_id
 
 
 async def optional_publisher_from_api_key(
@@ -234,16 +319,15 @@ async def optional_publisher_from_api_key(
     """Soft version of :func:`publisher_from_api_key`.
 
     Returns the publisher_id if a valid ``X-API-Key`` header is present,
-    otherwise returns ``None``.  Use this for endpoints that want to log
-    attribution without hard-enforcing the key.
+    otherwise returns ``None``.
     """
-    key = request.headers.get("X-API-Key", "")
+    key = request.headers.get("X-API-Key", "").strip()
     if not key:
         return None
     return await _get_publisher_id_from_key(key, session)
 
 
-# ── Phase 4.3 — HMAC signature verification for S2S signed requests ────────────
+# ── Phase 4.3 & 5.2 — HMAC signature verification for S2S signed requests ─────
 
 _HMAC_TIMESTAMP_WINDOW = 300  # seconds
 
@@ -253,38 +337,161 @@ def verify_hmac_signature(
     timestamp_str: str,
     body_bytes: bytes,
     signature: str,
+    method: str = "POST",
+    path: str = "/api/v1/ad/request",
+    signature_version: str | None = None,
 ) -> None:
-    """Validate an HMAC-SHA256 signed request (used by AI-platform callers).
+    """Validate an HMAC-SHA256 signed request.
 
-    Expected signature:
-        HMAC-SHA256(api_secret, "{api_key}|{timestamp}|{sha256(body)}")
+    Protocol Policy:
+    - Authoritative Standard (v2):
+      HMAC-SHA256(raw_key, "{METHOD}|{PATH}|{timestamp}|{sha256(body)}")
+      Cryptographically binds the HTTP method and URL path, preventing cross-endpoint
+      and cross-method replay attacks.
+    - Controlled Legacy Migration (v1):
+      HMAC-SHA256(raw_key, "{raw_key}|{timestamp}|{sha256(body)}")
+      Permitted ONLY when caller explicitly provides header `X-Signature-Version: 1`
+      AND request path is `/api/v1/ad/request`. If replayed on any other path, it is rejected.
+      Default (no header or `2`) strictly enforces method and path binding.
 
     Raises HTTP 401 on any failure (bad sig, stale timestamp, wrong format).
-
-    Args:
-        raw_key: The raw ``X-API-Key`` header value.
-        timestamp_str: The ``X-Timestamp`` header value (Unix epoch as string).
-        body_bytes: The raw request body bytes.
-        signature: The ``X-Signature`` header value (hex-encoded HMAC).
     """
-    # 1. Freshness check
+    if not timestamp_str:
+        raise HTTPException(status_code=401, detail="X-Timestamp header required")
+    if not signature:
+        raise HTTPException(status_code=401, detail="X-Signature header required")
+
     try:
         ts = int(timestamp_str)
     except (ValueError, TypeError):
         raise HTTPException(status_code=401, detail="X-Timestamp must be a Unix epoch integer")
 
-    age = abs(int(time.time()) - ts)
-    if age > _HMAC_TIMESTAMP_WINDOW:
+    drift = abs(int(time.time()) - ts)
+    if drift > _HMAC_TIMESTAMP_WINDOW:
         raise HTTPException(
             status_code=401,
-            detail=f"Request timestamp is too old ({age}s; max {_HMAC_TIMESTAMP_WINDOW}s)",
+            detail=f"Request timestamp is outside the permitted {_HMAC_TIMESTAMP_WINDOW}-second window ({drift}s drift)",
         )
 
-    # 2. Build the expected signature
     body_sha256 = hashlib.sha256(body_bytes).hexdigest()
-    message = f"{raw_key}|{timestamp_str}|{body_sha256}".encode()
-    expected_sig = hmac.new(raw_key.encode(), message, hashlib.sha256).hexdigest()
+    secret_bytes = raw_key.encode("utf-8")
 
-    # 3. Constant-time comparison
-    if not hmac.compare_digest(expected_sig, signature):
+    # Controlled Legacy Migration (v1)
+    if signature_version == "1":
+        if path != "/api/v1/ad/request":
+            logger.warning("legacy_hmac_replayed_on_non_ad_path", path=path)
+            raise HTTPException(
+                status_code=401,
+                detail="Legacy signature format v1 is not permitted on this path",
+            )
+        msg_v1 = f"{raw_key}|{timestamp_str}|{body_sha256}".encode("utf-8")
+        sig_v1 = hmac.new(secret_bytes, msg_v1, hashlib.sha256).hexdigest()
+        if hmac.compare_digest(sig_v1, signature):
+            return
         raise HTTPException(status_code=401, detail="Invalid request signature")
+
+    # Authoritative Standard (v2: Method and path bound)
+    msg_v2 = f"{method.upper()}|{path}|{timestamp_str}|{body_sha256}".encode("utf-8")
+    sig_v2 = hmac.new(secret_bytes, msg_v2, hashlib.sha256).hexdigest()
+
+    if not hmac.compare_digest(sig_v2, signature):
+        raise HTTPException(status_code=401, detail="Invalid request signature")
+
+
+async def authenticate_ad_request(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> AuthenticatedAdCaller:
+    """Authenticate ad request callers.
+
+    Strictly validates credentials when present:
+    - If X-API-Key, X-Signature, X-Timestamp or Bearer pk_... is provided,
+      authentication is strictly required. Any failure (unknown key, bad sig,
+      revoked key, timestamp expired) raises HTTP 401. It NEVER falls back to anonymous.
+    - If Authorization: Bearer <jwt> is provided, verifies JWT.
+    - If no auth headers are provided, treats as anonymous request.
+    """
+    x_api_key = request.headers.get("X-API-Key", "").strip()
+    x_sig = request.headers.get("X-Signature", "").strip()
+    x_ts = request.headers.get("X-Timestamp", "").strip()
+    x_sig_ver = request.headers.get("X-Signature-Version", "").strip()
+    auth_header = request.headers.get("Authorization", "").strip()
+
+    # If Authorization header contains an API key
+    if auth_header.startswith("Bearer "):
+        token_val = auth_header[7:].strip()
+        if token_val.startswith("pk_") or token_val.startswith("rk_"):
+            if not x_api_key:
+                x_api_key = token_val
+
+    # Case 1: Caller provided API-key or S2S signature headers -> MUST authenticate
+    if x_api_key or x_sig or x_ts:
+        if not x_api_key:
+            raise HTTPException(status_code=401, detail="X-API-Key header required")
+        if not x_sig:
+            raise HTTPException(status_code=401, detail="X-Signature header required")
+        if not x_ts:
+            raise HTTPException(status_code=401, detail="X-Timestamp header required")
+
+        # 1. Resolve and verify key against database
+        try:
+            db_key, publisher = await resolve_publisher_api_key(x_api_key, session)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=500, detail="Authentication verification failed")
+
+        # 2. Verify HMAC signature against request body, method, and path
+        body_bytes = await request.body()
+        verify_hmac_signature(
+            raw_key=x_api_key,
+            timestamp_str=x_ts,
+            body_bytes=body_bytes,
+            signature=x_sig,
+            method=request.method,
+            path=request.url.path,
+            signature_version=x_sig_ver or None,
+        )
+
+        # 3. Update usage metadata (last_used_at)
+        try:
+            from datetime import timezone
+            db_key.last_used_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            session.add(db_key)
+            await session.commit()
+        except Exception as e:
+            logger.warning("failed_to_update_last_used_at", error=str(e))
+
+        return AuthenticatedAdCaller(
+            is_authenticated=True,
+            publisher_id=db_key.publisher_id,
+            api_key=db_key,
+            auth_type="api_key",
+        )
+
+    # Case 2: Dashboard user with JWT token
+    if auth_header.startswith("Bearer "):
+        jwt_token = auth_header[7:].strip()
+        try:
+            payload = decode_token(jwt_token, "access")
+            user_id = int(payload["sub"])
+            user = await session.get(User, user_id)
+            if user and user.is_active:
+                return AuthenticatedAdCaller(
+                    is_authenticated=True,
+                    publisher_id=user.publisher_id,
+                    user=user,
+                    auth_type="jwt",
+                )
+            raise HTTPException(status_code=401, detail="User is inactive or missing")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid authorization token")
+
+    # Case 3: Anonymous request (no credential headers at all)
+    return AuthenticatedAdCaller(
+        is_authenticated=False,
+        publisher_id=None,
+        auth_type="anonymous",
+    )

@@ -51,6 +51,17 @@ async def track_event(
     from liteads.ad_server.services.replay_guard import enforce_replay_guard
     await enforce_replay_guard(event.event_type, event.request_id, event.ad_id)
 
+    # Prepare extra data, preserving caller extra without mutation
+    extra = dict(event.extra) if event.extra else {}
+    if event.slot_id:
+        if "slot_id" in extra and extra["slot_id"] != event.slot_id:
+            logger.warning(
+                "Conflicting slot_id in event.extra; overriding with signed root slot_id",
+                root_slot_id=event.slot_id,
+                extra_slot_id=extra["slot_id"],
+            )
+        extra["slot_id"] = event.slot_id
+
     # Record the event
     success = await event_service.track_event(
         request_id=event.request_id,
@@ -58,7 +69,7 @@ async def track_event(
         event_type=event.event_type,
         user_id=event.user_id,
         timestamp=event.timestamp or current_timestamp(),
-        extra=event.extra,
+        extra=extra if extra else None,
     )
 
     return EventResponse(

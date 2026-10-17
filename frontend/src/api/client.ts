@@ -1,4 +1,5 @@
-import type { AdListResponse, AdRequestPayload, Advertiser, Campaign, Creative, HealthResponse, Publisher, Session, Suggestion, ChatSessionResponse, ChatResponse } from "../types";
+import type { AdListResponse, AdRequestPayload, UserContextPayload, Advertiser, Campaign, Creative, HealthResponse, Publisher, Session, Suggestion, ChatSessionResponse, ChatResponse } from "../types";
+export type { UserContextPayload };
 const BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "";
 let memoryToken: string | null = null;
 export const setMemoryToken = (token: string | null) => { memoryToken = token; };
@@ -95,9 +96,9 @@ export const setCampaignStatus = (id: number, status: number) => updateCampaign(
 export const activateCampaign = (id: number) => apiFetch<Campaign>(`/api/v1/campaign/${id}/activate`, { method: "POST" });
 export const listCreatives = (campaignId: number) => apiFetch<Creative[]>(`/api/v1/creative?campaign_id=${campaignId}`);
 export const createCreative = (payload: CreativeInput) => apiFetch<Creative>("/api/v1/creative", { method: "POST", body: JSON.stringify(payload) });
-export interface SlotData { id: number; publisher_id: number; property_id: number | null; slot_id: string; name: string; format: number; width: number; height: number; status: number; floor_price: number; }
-export interface SlotInput { slot_id: string; name: string; format: number; width: number; height: number; property_id?: number | null; floor_price?: number; }
-export interface PublisherInput { name: string; email?: string; site_url?: string; }
+export interface SlotData { id: number; publisher_id: number; property_id: number | null; slot_id: string; name: string; format: number; width: number; height: number; status: number; floor_price: number; is_chat_surface: boolean; }
+export interface SlotInput { slot_id: string; name: string; format: number; width: number; height: number; property_id?: number | null; floor_price?: number; is_chat_surface?: boolean; }
+export interface PublisherInput { name: string; email?: string; site_url?: string; is_sandbox?: boolean; }
 export const listSlots = (publisherId?: number) => apiFetch<SlotData[]>(`/api/v1/slot${publisherId ? `?publisher_id=${publisherId}` : ""}`);
 export const createSlot = (payload: SlotInput) => apiFetch<SlotData>("/api/v1/slot", { method: "POST", body: JSON.stringify(payload) });
 export const updateSlot = (id: number, payload: Partial<SlotInput>) => apiFetch<SlotData>(`/api/v1/slot/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
@@ -126,6 +127,44 @@ export const getPublisherReporting = (publisherId: number, startDate?: string, e
     const qs = params.toString();
     return apiFetch<PublisherReporting>(`/api/v1/publisher/${publisherId}/reporting${qs ? `?${qs}` : ""}`);
 };
+
+// Publisher Placement Health (Phase 6 WU3)
+export interface FormatBenchmark {
+    format: number;
+    format_name?: string;
+    eligible_slots_count: number;
+    median_ctr: number | null;
+    median_ecpm: number | null;
+}
+
+export interface PlacementHealthItem {
+    slot_id: string;
+    slot_name: string;
+    format: number;
+    format_name: string;
+    impressions: number;
+    clicks: number;
+    conversions: number;
+    earnings: number;
+    ctr: number;
+    ecpm: number;
+    verdict: "great" | "healthy" | "low_visibility" | "insufficient_data" | string;
+    recommendation: string;
+    benchmark: FormatBenchmark;
+}
+
+export interface PlacementHealthResponse {
+    publisher_id: number;
+    window_days: number;
+    start_date: string;
+    end_date: string;
+    total_placements: number;
+    placements: PlacementHealthItem[];
+    benchmarks: Record<string, FormatBenchmark>;
+}
+
+export const getPlacementHealth = (publisherId: number, windowDays: number = 30) =>
+    apiFetch<PlacementHealthResponse>(`/api/v1/publisher/${publisherId}/placements/health?window_days=${windowDays}`);
 
 // Advertiser Reporting
 export interface AdvertiserReporting { advertiser_id: number; campaign_id?: number; start_date: string; end_date: string; impressions: number; clicks: number; conversions: number; spend: number; ctr: number; cvr: number; daily_breakdown: DailyStat[]; }
@@ -167,10 +206,48 @@ export const depositFunds = (advertiserId: number, amount: number, referenceId?:
 export const getPublisherLedger = (publisherId: number) => apiFetch<LedgerResponse>(`/api/v1/finance/publisher/${publisherId}/ledger`);
 export const requestPayout = (publisherId: number, amount: number, referenceId?: string) => apiFetch<TransactionResponse>(`/api/v1/finance/publisher/${publisherId}/payout`, { method: "POST", body: JSON.stringify({ amount, reference_id: referenceId }) });
 // API Keys
-export interface ApiKey { id: number; publisher_id: number; name: string; key_prefix: string; status: number; created_at: string; revoked_at: string | null; }
+export interface ApiKey { id: number; publisher_id: number; name: string; key_prefix: string; is_sandbox: boolean; rate_limit_per_minute: number; daily_quota: number; last_used_at: string | null; status: number; created_at: string; revoked_at: string | null; }
+export interface ApiKeyCreateInput { name: string; is_sandbox?: boolean; rate_limit_per_minute?: number; daily_quota?: number; }
 export interface ApiKeyCreateResponse extends ApiKey { raw_key: string; }
+export interface ApiKeyUsageBreakdown {
+  total_requests: number;
+  admitted_requests: number;
+  rate_limited_requests: number;
+  quota_exceeded_requests: number;
+  served_ads: number;
+}
+
+export interface ApiKeyUsageResponse {
+  key_id: number;
+  publisher_id: number;
+  name: string;
+  key_prefix: string;
+  is_sandbox: boolean;
+  rate_limit_per_minute: number;
+  daily_quota: number;
+  current_minute_usage: number;
+  rate_limit_remaining: number;
+  rate_limit_reset_seconds: number;
+  today_usage: number;
+  daily_quota_remaining: number;
+  daily_reset_time_utc: string;
+  daily_reset_seconds: number;
+  breakdown: ApiKeyUsageBreakdown;
+  last_used_at: string | null;
+  status: number;
+  revoked_at: string | null;
+  created_at: string;
+}
+
 export const listPublisherApiKeys = (publisherId: number) => apiFetch<ApiKey[]>(`/api/v1/publisher/${publisherId}/keys`);
-export const createPublisherApiKey = (publisherId: number, name: string) => apiFetch<ApiKeyCreateResponse>(`/api/v1/publisher/keys`, { method: "POST", body: JSON.stringify({ publisher_id: publisherId, name, label: name }) });
+export const getPublisherKeysUsage = (publisherId: number) => apiFetch<ApiKeyUsageResponse[]>(`/api/v1/publisher/${publisherId}/keys/usage`);
+export const getPublisherKeyUsage = (publisherId: number, keyId: number) => apiFetch<ApiKeyUsageResponse>(`/api/v1/publisher/${publisherId}/keys/${keyId}/usage`);
+export const createPublisherApiKey = (publisherId: number, payload: string | ApiKeyCreateInput) => {
+  const body = typeof payload === "string"
+    ? { publisher_id: publisherId, name: payload, label: payload }
+    : { publisher_id: publisherId, label: payload.name, ...payload };
+  return apiFetch<ApiKeyCreateResponse>(`/api/v1/publisher/keys`, { method: "POST", body: JSON.stringify(body) });
+};
 export const revokePublisherApiKey = (publisherId: number, keyId: number) => apiFetch<void>(`/api/v1/publisher/${publisherId}/keys/${keyId}`, { method: "DELETE" });
 
 // Webhooks

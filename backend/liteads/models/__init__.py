@@ -14,7 +14,7 @@ from liteads.models.ad import (
     CampaignChangeLog,
 )
 from liteads.models.geo import GeoLocation
-from liteads.models.publisher import AdSlot, Publisher, PublisherApiKey, PublisherDailyStat, PublisherProperty
+from liteads.models.publisher import AdSlot, Publisher, PublisherApiKey, PublisherDailyStat, PublisherProperty, ApiKeyDailyStat
 from liteads.models.auth import AuditLog, OneTimeToken, RefreshToken, User
 from liteads.models.finance import Transaction, PlatformSettings, PaymentRequest
 from liteads.models.webhook import Webhook
@@ -54,6 +54,7 @@ __all__ = [
     "PublisherDailyStat",
     "PublisherProperty",
     "PublisherApiKey",
+    "ApiKeyDailyStat",
     "User",
     "RefreshToken",
     "OneTimeToken",

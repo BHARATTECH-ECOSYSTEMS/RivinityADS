@@ -2,9 +2,12 @@
 API request schemas.
 """
 
+import re
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+_HEX_64_REGEX = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 class DeviceInfo(BaseModel):
@@ -25,10 +28,50 @@ class GeoInfo(BaseModel):
     ip: str | None = Field(None, description="IP address")
     country: str | None = Field(None, description="Country code (ISO 3166-1 alpha-2)")
     region: str | None = Field(None, description="Region/Province")
+    state: str | None = Field(None, description="Alias for region/state")
     city: str | None = Field(None, description="City name")
     pincode: str | None = Field(None, description="Postal / ZIP code")
     latitude: float | None = Field(None, description="Latitude")
     longitude: float | None = Field(None, description="Longitude")
+
+    @model_validator(mode="after")
+    def sync_state_region(self) -> "GeoInfo":
+        if self.state and not self.region:
+            self.region = self.state
+        elif self.region and not self.state:
+            self.state = self.region
+        return self
+
+
+class UserContextRequest(BaseModel):
+    """User context for ad requests, adhering to Phase 5 privacy standards."""
+
+    id: str | None = Field(
+        None,
+        description="Privacy-safe SHA-256 hex identifier (64 hex characters)",
+    )
+    sector_context: list[str] | None = Field(
+        None,
+        description="Content/conversation sectors (e.g. ['developer', 'fintech'])",
+    )
+    geo: GeoInfo | None = Field(
+        None,
+        description="Geographic information (optional, falls back to IP resolution)",
+    )
+
+    @field_validator("id")
+    @classmethod
+    def validate_id_sha256(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError("user.id must be a string")
+        v_clean = v.strip().lower()
+        if not _HEX_64_REGEX.match(v_clean):
+            raise ValueError(
+                "user.id must be a 64-character hexadecimal SHA-256 hash"
+            )
+        return v_clean
 
 
 class ContextInfo(BaseModel):
@@ -60,15 +103,21 @@ class AdRequest(BaseModel):
     """Ad request schema.
 
     Supports both classic publisher placements (slot_id) and server-to-server
-    AI-platform requests. For AI-platform callers set format=2 (native) so that
-    ``title``, ``description``, and ``landing_url`` are returned; the client is
-    responsible for rendering them as chat-inline, sidebar, or conversation-starter
-    blocks — those are delivery templates, not separate creative types.
+    AI-platform requests with nested user context (id, sector_context, geo).
+    For AI-platform callers set format=2 (native) so that ``title``,
+    ``description``, and ``landing_url`` are returned.
     """
 
     slot_id: str = Field(..., description="Ad slot identifier")
     user_id: str | None = Field(None, description="User identifier (IMEI/IDFA/custom)")
-    device: DeviceInfo = Field(..., description="Device information")
+    user: UserContextRequest | None = Field(
+        None,
+        description="Privacy-safe user context (Phase 5 contract)",
+    )
+    device: DeviceInfo | None = Field(
+        None,
+        description="Device information (optional for S2S calls)",
+    )
     geo: GeoInfo | None = Field(None, description="Geographic information")
     context: ContextInfo | None = Field(None, description="Context information")
     user_features: UserFeatures | None = Field(None, description="User features for ML")
@@ -85,31 +134,55 @@ class AdRequest(BaseModel):
         ),
     )
 
+    @field_validator("user_id")
+    @classmethod
+    def validate_top_level_user_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v_clean = v.strip()
+        # Direct PII protection: reject raw emails, phone numbers, or multi-word names
+        if "@" in v_clean or v_clean.startswith("+") or " " in v_clean:
+            raise ValueError("user_id must not contain direct personal identifiers (email, phone, name)")
+        # If 64-char hex, normalize to lowercase
+        if _HEX_64_REGEX.match(v_clean):
+            return v_clean.lower()
+        return v_clean
+
+    @model_validator(mode="after")
+    def sync_nested_user_fields(self) -> "AdRequest":
+        if self.user:
+            if self.user.id and not self.user_id:
+                self.user_id = self.user.id
+            if self.user.geo and not self.geo:
+                self.geo = self.user.geo
+            if self.user.sector_context:
+                if not self.context:
+                    self.context = ContextInfo(sectors=list(self.user.sector_context))
+                elif not self.context.sectors:
+                    self.context.sectors = list(self.user.sector_context)
+                else:
+                    for s in self.user.sector_context:
+                        if s not in self.context.sectors:
+                            self.context.sectors.append(s)
+        if not self.device:
+            self.device = DeviceInfo(os="web")
+        return self
+
     model_config = {
         "json_schema_extra": {
             "example": {
-                "slot_id": "banner_home_top",
-                "user_id": "user_123456",
-                "device": {
-                    "os": "android",
-                    "os_version": "13.0",
-                    "model": "Pixel 7",
-                    "brand": "Google",
-                    "screen_width": 1080,
-                    "screen_height": 2400,
-                },
-                "geo": {
-                    "ip": "1.2.3.4",
-                    "country": "CN",
-                    "city": "shanghai",
-                },
-                "context": {
-                    "app_id": "com.example.app",
-                    "app_version": "1.0.0",
-                    "network": "wifi",
-                    "sectors": ["tech", "finance"],
-                },
+                "slot_id": "ai_chat_sidebar",
                 "num_ads": 1,
+                "user": {
+                    "id": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    "sector_context": ["developer"],
+                    "geo": {
+                        "country": "IN",
+                        "state": "Maharashtra",
+                        "city": "Mumbai",
+                        "pincode": "400001",
+                    },
+                },
                 "format": 2,
             }
         }

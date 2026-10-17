@@ -16,6 +16,7 @@ from liteads.schemas.request import (
     DeviceInfo,
     EventRequest,
     GeoInfo,
+    UserContextRequest,
     UserFeatures,
 )
 from liteads.schemas.response import (
@@ -39,6 +40,7 @@ __all__ = [
     "EventRequest",
     "DeviceInfo",
     "GeoInfo",
+    "UserContextRequest",
     "ContextInfo",
     "UserFeatures",
     # Response schemas

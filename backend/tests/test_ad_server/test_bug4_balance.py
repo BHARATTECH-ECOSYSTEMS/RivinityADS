@@ -2,7 +2,8 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from liteads.models import Advertiser, Campaign, Creative, AdSlot, Publisher, AdEvent
+from liteads.models import Advertiser, Campaign, Creative, AdSlot, Publisher, AdEvent, AdvertiserDomain
+from liteads.models.base import ModerationStatus
 from decimal import Decimal
 
 @pytest.fixture
@@ -13,21 +14,27 @@ async def setup_bug4_data(test_db: AsyncSession):
     # Adv 1: Zero balance
     adv1 = Advertiser(id=21, name="Adv Zero", balance=Decimal("0.0"))
     camp1 = Campaign(id=21, advertiser_id=21, name="Camp Zero", bid_type=1, bid_amount=1.0)
-    creative1 = Creative(campaign_id=21, title="Creative Zero", landing_url="https://x.com", status=1)
+    creative1 = Creative(campaign_id=21, title="Creative Zero", landing_url="https://x.com", status=1, moderation_status=ModerationStatus.APPROVED.value)
 
     # Adv 2: Negative balance
     adv2 = Advertiser(id=22, name="Adv Neg", balance=Decimal("-10.0"))
     camp2 = Campaign(id=22, advertiser_id=22, name="Camp Neg", bid_type=1, bid_amount=1.0)
-    creative2 = Creative(campaign_id=22, title="Creative Neg", landing_url="https://x.com", status=1)
+    creative2 = Creative(campaign_id=22, title="Creative Neg", landing_url="https://x.com", status=1, moderation_status=ModerationStatus.APPROVED.value)
 
     # Adv 3: Positive balance
     adv3 = Advertiser(id=23, name="Adv Pos", balance=Decimal("100.0"))
     camp3 = Campaign(id=23, advertiser_id=23, name="Camp Pos", bid_type=1, bid_amount=1.0)
-    creative3 = Creative(campaign_id=23, title="Creative Pos", landing_url="https://x.com", status=1)
+    creative3 = Creative(campaign_id=23, title="Creative Pos", landing_url="https://x.com", status=1, moderation_status=ModerationStatus.APPROVED.value)
 
-    test_db.add_all([pub, slot, adv1, camp1, creative1, adv2, camp2, creative2, adv3, camp3, creative3])
+    domain = AdvertiserDomain(advertiser_id=23, domain="x.com", status="VERIFIED", verification_token="test")
+
+    test_db.add_all([pub, slot, adv1, camp1, creative1, adv2, camp2, creative2, adv3, camp3, creative3, domain])
     await test_db.commit()
     
+    from liteads.common.cache import CacheKeys, redis_client
+    if redis_client.connected:
+        await redis_client.delete(CacheKeys.active_ads())
+
     return {"pub": pub.id, "slot": slot.slot_id, "adv1": adv1.id, "adv2": adv2.id, "adv3": adv3.id}
 
 @pytest.mark.asyncio
@@ -43,6 +50,7 @@ async def test_balance_filtering(client: AsyncClient, test_db: AsyncSession, set
     
     assert res.status_code == 200
     data = res.json()
+    print("DATA RETURNED:", data)
     
     # We should only get ads from campaign 23 (Adv Pos)
     ads = data["ads"]
