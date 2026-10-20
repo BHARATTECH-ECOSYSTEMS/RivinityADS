@@ -31,3 +31,8 @@ build/
 # Documents
 *.docx
 
+# Audit and temporary reports
+RIVINITYADS_*.md
+RivinityAds_*.md
+
+
