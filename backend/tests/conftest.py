@@ -26,8 +26,8 @@ from sqlalchemy import event
 
 @event.listens_for(User, "before_insert")
 def _auto_verify_test_users(mapper, connection, target):
-    """Automatically verify users in existing tests so we don't break them."""
-    if target.email and "test4a" not in target.email.lower():
+    """Automatically verify users in existing legacy tests so we don't break them."""
+    if target.email and not any(marker in target.email.lower() for marker in ("test4a", "verify", "unverified", "resend", "step3")):
         target.email_verified = True
 
 

@@ -106,7 +106,7 @@ async def create_payment_request(
     from liteads.ad_server.services.tools import request_payment, ToolError, ToolValidationError, ToolAuthorizationError
     try:
         # Re-use the existing service function that handles QR creation and persistence
-        return await request_payment(user=user, session=session, amount=request.amount)
+        return await request_payment(user=user, session=session, amount=request.amount, advertiser_id=advertiser_id)
     except ToolValidationError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except ToolAuthorizationError as e:

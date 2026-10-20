@@ -25,6 +25,22 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=128)
 
 
+class RequestPasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+# Convenience alias for password reset request
+ForgotPasswordRequest = RequestPasswordResetRequest
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=256)
+
+
 class RefreshRequest(BaseModel):
     pass
 
@@ -46,3 +62,7 @@ class AuthResponse(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str
+
+
+class VerifyEmailResponse(MessageResponse):
+    email: str | None = None

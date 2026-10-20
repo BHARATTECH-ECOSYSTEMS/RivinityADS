@@ -1,6 +1,12 @@
 export type Role = "admin" | "advertiser" | "publisher";
 export interface User { id: number; name: string; email: string; role: Role; advertiser_id?: number | null; publisher_id?: number | null; email_verified: boolean; }
 export interface Session { user: User; token: string; }
+export interface MessageResponse { message: string; }
+export interface VerifyEmailResponse extends MessageResponse { email?: string | null; }
+export interface VerifyEmailInput { token: string; }
+export interface ResendVerificationInput { email: string; }
+export interface RequestPasswordResetInput { email: string; }
+export interface ResetPasswordInput { token: string; password: string; }
 export const BID_TYPES: Record<number, string> = { 1: "CPM", 2: "CPC", 3: "CPA" };
 export const CREATIVE_TYPES: Record<number, string> = { 1: "banner", 2: "native", 3: "video", 4: "interstitial" };
 export const STATUS: Record<number, string> = { 0: "paused", 1: "active" };

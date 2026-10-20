@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from liteads.ad_server.services.webhook_dispatcher import test_webhook
 from liteads.common.database import get_session
-from liteads.common.security import current_user, require_roles
+from liteads.common.security import current_user, require_roles, verified_user
 from liteads.models import User
 from liteads.models.webhook import Webhook
 from liteads.schemas.webhook import (
@@ -27,7 +27,7 @@ from liteads.schemas.webhook import (
     WebhookUpdate,
 )
 
-router = APIRouter(dependencies=[Depends(current_user)])
+router = APIRouter(dependencies=[Depends(verified_user)])
 
 _VALID_EVENTS = {"impression", "click", "conversion"}
 

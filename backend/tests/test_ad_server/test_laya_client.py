@@ -1,7 +1,9 @@
+import os
 import pytest
 import httpx
 from unittest.mock import patch, MagicMock
 
+from liteads.common.config import get_settings
 from liteads.ad_server.services.laya_client import (
     LayaDecisionClient,
     LayaDecisionResult,
@@ -252,10 +254,26 @@ async def test_configuration():
         assert url == "http://custom-laya:9999/v1/systemone"
 
 
-@pytest.mark.skip(reason="Smoke test - requires real Laya sidecar running")
+@pytest.mark.smoke
 async def test_real_runtime_smoke():
-    """11. Real runtime smoke test."""
+    """11. Real runtime smoke test against live Laya decision engine."""
+    target_url = os.getenv("LAYA_BASE_URL")
+    if not target_url:
+        settings = get_settings()
+        target_url = settings.laya.base_url
+        if "laya:8000" in target_url or "laya" in target_url:
+            target_url = "http://127.0.0.1:8100"
+
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as check_client:
+            resp = await check_client.get(f"{target_url.rstrip('/')}/health")
+            if resp.status_code != 200:
+                pytest.skip(f"Laya health check returned HTTP {resp.status_code} at {target_url}")
+    except Exception as exc:
+        pytest.skip(f"Laya service not reachable at {target_url}: {exc}")
+
     client = LayaDecisionClient()
+    client.base_url = target_url.rstrip("/")
     result = await client.decide("The campaign is performing very well with low CPA.")
     assert isinstance(result, LayaDecisionResult)
     assert result.choice in [
@@ -266,3 +284,6 @@ async def test_real_runtime_smoke():
         "improve_creative",
         "no_change",
     ]
+    assert isinstance(result.confidence, float)
+    assert 0.0 <= result.confidence <= 1.0
+    assert "answers" in result.raw_response

@@ -347,6 +347,12 @@ def main() -> None:
 
     settings = get_settings()
 
+    forwarded_allow_ips = (
+        ",".join(settings.server.trusted_proxies)
+        if isinstance(settings.server.trusted_proxies, list) and settings.server.trusted_proxies
+        else "127.0.0.1"
+    )
+
     uvicorn.run(
         "liteads.ad_server.main:app",
         host=settings.server.host,
@@ -354,6 +360,8 @@ def main() -> None:
         workers=settings.server.workers,
         reload=settings.server.reload,
         log_level="info" if not settings.debug else "debug",
+        proxy_headers=settings.server.proxy_headers,
+        forwarded_allow_ips=forwarded_allow_ips,
     )
 
 

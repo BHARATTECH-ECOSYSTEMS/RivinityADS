@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+import ipaddress
 import secrets
 import time
 from datetime import UTC, datetime, timedelta
@@ -23,20 +24,33 @@ logger = structlog.get_logger()
 bearer = HTTPBearer(auto_error=False)
 
 
+# Precomputed scrypt hash with standard parameters (N=16384, r=8, p=1) used for
+# constant-time dummy verification when user account does not exist (F-03).
+DUMMY_PASSWORD_HASH: str = (
+    "scrypt$16384$8$1$TeC6mYPjRnxhCK-sJiYQEw==$"
+    "VY7TPUC2he3X4IrgseEZ-cnxvn_HbunW5ek-wwAonfU0-OCFx__O-IQiOtyNdaOrZgZLfStw1ZU2FrI6GepZAA=="
+)
+
+
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
     digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
     return "scrypt$16384$8$1$" + base64.urlsafe_b64encode(salt).decode() + "$" + base64.urlsafe_b64encode(digest).decode()
 
 
-def verify_password(password: str, encoded: str) -> bool:
+def verify_password(password: str, encoded: str | None) -> bool:
+    if not password or not encoded or not isinstance(encoded, str):
+        return False
     try:
-        _, n, r, p, salt_text, digest_text = encoded.split("$")
+        parts = encoded.split("$")
+        if len(parts) != 6 or parts[0] != "scrypt":
+            return False
+        _, n, r, p, salt_text, digest_text = parts
         salt = base64.urlsafe_b64decode(salt_text.encode())
         expected = base64.urlsafe_b64decode(digest_text.encode())
         actual = hashlib.scrypt(password.encode(), salt=salt, n=int(n), r=int(r), p=int(p))
         return hmac.compare_digest(actual, expected)
-    except (ValueError, TypeError):
+    except Exception:
         return False
 
 
@@ -64,8 +78,134 @@ def decode_token(token: str, expected_type: str) -> dict[str, Any]:
     return payload
 
 
+def _clean_ip_str(raw: str) -> str:
+    raw = raw.strip()
+    if raw.startswith("[") and "]" in raw:
+        raw = raw[1 : raw.index("]")]
+    elif ":" in raw and raw.count(":") == 1:
+        raw = raw.split(":")[0]
+    return raw.strip()
+
+
+def is_trusted_proxy(ip_str: str | None, trusted_proxies: list[str]) -> bool:
+    """Check if an IP string belongs to the trusted proxies list (supports individual IPs and CIDRs)."""
+    if not ip_str or not trusted_proxies:
+        return False
+    try:
+        ip = ipaddress.ip_address(_clean_ip_str(ip_str))
+    except ValueError:
+        return False
+
+    for trusted in trusted_proxies:
+        trusted_clean = str(trusted).strip()
+        if not trusted_clean:
+            continue
+        try:
+            if "/" in trusted_clean:
+                network = ipaddress.ip_network(trusted_clean, strict=False)
+                if ip in network:
+                    return True
+            else:
+                trusted_ip = ipaddress.ip_address(trusted_clean)
+                if ip == trusted_ip:
+                    return True
+        except ValueError:
+            continue
+    return False
+
+
+def resolve_client_ip(
+    request: Request,
+    trusted_proxies: list[str] | None = None,
+) -> str:
+    """Resolve the authentic client IP address for security rate-limiting and audit logging.
+
+    Enforces trusted reverse proxy verification:
+    - If the direct socket peer (request.client.host) is NOT a configured trusted proxy,
+      forwarding headers (X-Forwarded-For, X-Real-IP) are untrusted and completely ignored.
+    - If the direct peer IS a configured trusted proxy, walks the X-Forwarded-For chain
+      backwards (right-to-left) to find the first untrusted IP address.
+    - If X-Forwarded-For contains only trusted proxies, returns the leftmost valid originator.
+    - If X-Forwarded-For is missing or malformed, falls back to X-Real-IP (if valid) or the peer host.
+    - Returns 'unknown' if request.client is None.
+    """
+    if not request.client or not request.client.host:
+        return "unknown"
+
+    peer_host = _clean_ip_str(request.client.host)
+    if not peer_host:
+        return "unknown"
+
+    try:
+        ipaddress.ip_address(peer_host)
+    except ValueError:
+        return peer_host
+
+    if trusted_proxies is None:
+        try:
+            settings_proxies = get_settings().server.trusted_proxies
+            trusted_proxies = (
+                settings_proxies
+                if isinstance(settings_proxies, list)
+                else ["127.0.0.1", "::1"]
+            )
+        except Exception:
+            trusted_proxies = ["127.0.0.1", "::1"]
+
+    # If the direct connection is NOT from a trusted proxy, never trust forwarded headers.
+    if not is_trusted_proxy(peer_host, trusted_proxies):
+        return peer_host
+
+    # Immediate peer is trusted. Inspect forwarded headers.
+    candidates: list[str] = []
+    if hasattr(request, "headers"):
+        raw_headers: list[str] = []
+        if hasattr(request.headers, "getlist"):
+            raw_headers = request.headers.getlist("x-forwarded-for")
+        else:
+            val = request.headers.get("x-forwarded-for")
+            if val:
+                raw_headers = [val]
+
+        for h in raw_headers:
+            for part in h.split(","):
+                cleaned = _clean_ip_str(part)
+                if cleaned:
+                    candidates.append(cleaned)
+
+    # Walk backwards from right (closest proxy to backend) to left (client originator)
+    for cand in reversed(candidates):
+        try:
+            ipaddress.ip_address(cand)
+        except ValueError:
+            continue
+        if not is_trusted_proxy(cand, trusted_proxies):
+            return cand
+
+    # If all valid candidates in X-Forwarded-For are trusted proxies, take the leftmost valid one
+    for cand in candidates:
+        try:
+            ipaddress.ip_address(cand)
+            return cand
+        except ValueError:
+            continue
+
+    # Fallback to X-Real-IP if present and valid
+    if hasattr(request, "headers"):
+        x_real_ip = request.headers.get("x-real-ip")
+        if x_real_ip:
+            cleaned_real = _clean_ip_str(x_real_ip)
+            try:
+                ipaddress.ip_address(cleaned_real)
+                return cleaned_real
+            except ValueError:
+                pass
+
+    return peer_host
+
+
 async def check_login_rate_limit(request: Request, email: str) -> None:
-    ip = request.client.host if request.client else "unknown"
+    ip = resolve_client_ip(request)
     normalized_email = email.strip().lower()
     
     ip_key = f"rate_limit:login:ip:{ip}"
@@ -97,6 +237,100 @@ async def check_login_rate_limit(request: Request, email: str) -> None:
         raise HTTPException(status_code=503, detail="Service unavailable")
 
 
+async def check_password_reset_request_rate_limit(request: Request, email: str) -> None:
+    ip = resolve_client_ip(request)
+    normalized_email = email.strip().lower()
+
+    ip_key = f"rate_limit:password_reset_req:ip:{ip}"
+    account_key = f"rate_limit:password_reset_req:account:{normalized_email}"
+    window = get_settings().auth.login_window_seconds
+    max_attempts = get_settings().auth.max_login_attempts
+
+    try:
+        pipeline = redis_client.pipeline()
+        pipeline.incr(ip_key)
+        pipeline.incr(account_key)
+        results = await pipeline.execute()
+
+        ip_attempts, account_attempts = results
+
+        expire_pipe = redis_client.pipeline()
+        if ip_attempts == 1:
+            expire_pipe.expire(ip_key, window)
+        if account_attempts == 1:
+            expire_pipe.expire(account_key, window)
+        if len(expire_pipe.command_stack) > 0:
+            await expire_pipe.execute()
+
+        if ip_attempts > max_attempts or account_attempts > max_attempts:
+            raise HTTPException(status_code=429, detail="Too many password reset requests")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=503, detail="Service unavailable")
+
+
+async def check_password_reset_completion_rate_limit(request: Request) -> None:
+    ip = resolve_client_ip(request)
+
+    ip_key = f"rate_limit:password_reset_comp:ip:{ip}"
+    window = get_settings().auth.login_window_seconds
+    max_attempts = get_settings().auth.max_login_attempts
+
+    try:
+        pipeline = redis_client.pipeline()
+        pipeline.incr(ip_key)
+        results = await pipeline.execute()
+
+        ip_attempts = results[0]
+
+        expire_pipe = redis_client.pipeline()
+        if ip_attempts == 1:
+            expire_pipe.expire(ip_key, window)
+        if len(expire_pipe.command_stack) > 0:
+            await expire_pipe.execute()
+
+        if ip_attempts > max_attempts:
+            raise HTTPException(status_code=429, detail="Too many password reset attempts")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=503, detail="Service unavailable")
+
+
+async def check_resend_verification_rate_limit(request: Request, email: str) -> None:
+    ip = resolve_client_ip(request)
+    normalized_email = email.strip().lower()
+
+    ip_key = f"rate_limit:resend_verif:ip:{ip}"
+    account_key = f"rate_limit:resend_verif:account:{normalized_email}"
+    window = get_settings().auth.login_window_seconds
+    max_attempts = get_settings().auth.max_login_attempts
+
+    try:
+        pipeline = redis_client.pipeline()
+        pipeline.incr(ip_key)
+        pipeline.incr(account_key)
+        results = await pipeline.execute()
+
+        ip_attempts, account_attempts = results
+
+        expire_pipe = redis_client.pipeline()
+        if ip_attempts == 1:
+            expire_pipe.expire(ip_key, window)
+        if account_attempts == 1:
+            expire_pipe.expire(account_key, window)
+        if len(expire_pipe.command_stack) > 0:
+            await expire_pipe.execute()
+
+        if ip_attempts > max_attempts or account_attempts > max_attempts:
+            raise HTTPException(status_code=429, detail="Too many verification resend requests")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=503, detail="Service unavailable")
+
+
 async def current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
     session: AsyncSession = Depends(get_session),
@@ -113,8 +347,11 @@ async def current_user(
 async def verified_user(
     user: User = Depends(current_user),
 ) -> User:
-    """Compatibility dependency that now only requires authentication."""
-
+    """Ensure the authenticated user is active and has verified their email address."""
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User is inactive or missing")
+    if not user.email_verified:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email verification required")
     return user
 
 

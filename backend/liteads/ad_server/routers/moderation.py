@@ -5,13 +5,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from liteads.common.database import get_session
-from liteads.common.security import current_user, require_roles
+from liteads.common.security import current_user, require_roles, verified_user
 from liteads.models import User, Creative
 from liteads.models.base import ModerationStatus, Status
 from liteads.schemas.management import CreativeResponse
 
 
-router = APIRouter(prefix="/moderation/creatives", tags=["Moderation"])
+router = APIRouter(prefix="/moderation/creatives", tags=["Moderation"], dependencies=[Depends(verified_user)])
 
 
 class ModerationRejectPayload(BaseModel):

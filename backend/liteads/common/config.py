@@ -6,7 +6,7 @@ Supports loading from environment variables and YAML files.
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from dotenv import load_dotenv
@@ -62,11 +62,42 @@ class RedisSettings(BaseSettings):
 class ServerSettings(BaseSettings):
     """Server configuration."""
 
+    model_config = SettingsConfigDict(
+        env_prefix="LITEADS_SERVER__",
+        extra="ignore",
+    )
+
     host: str = "0.0.0.0"
     port: int = 8000
     workers: int = 4
     reload: bool = False
     frontend_url: str = "http://localhost:5173"
+    proxy_headers: bool = True
+    trusted_proxies: list[str] | str = Field(
+        default_factory=lambda: ["127.0.0.1", "::1"],
+        description="List or comma-separated string of trusted proxy IP addresses or CIDR blocks",
+    )
+
+    @field_validator("trusted_proxies", mode="after")
+    @classmethod
+    def normalize_trusted_proxies(cls, v: Any) -> list[str]:
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return []
+            if v.startswith("[") and v.endswith("]"):
+                import json
+
+                try:
+                    parsed = json.loads(v)
+                    if isinstance(parsed, list):
+                        return [str(x).strip() for x in parsed if str(x).strip()]
+                except Exception:
+                    pass
+            return [x.strip() for x in v.split(",") if x.strip()]
+        elif isinstance(v, (list, tuple, set)):
+            return [str(x).strip() for x in v if str(x).strip()]
+        return ["127.0.0.1", "::1"]
 
 
 class AdServingSettings(BaseSettings):

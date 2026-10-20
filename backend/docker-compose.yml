@@ -29,6 +29,9 @@ services:
       - LITEADS_EMAIL__USER=
       - LITEADS_EMAIL__PASSWORD=
       - LITEADS_EMAIL__USE_TLS=false
+      - RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID:-}
+      - RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET:-}
+      - RAZORPAY_WEBHOOK_SECRET=${RAZORPAY_WEBHOOK_SECRET:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -126,9 +129,13 @@ services:
     build: https://github.com/NandhaKishorM/laya.git
     command: ["laya-serve"]
     environment:
+      - HF_HUB_OFFLINE=1
+      - TRANSFORMERS_OFFLINE=1
       - LAYA_HOST=0.0.0.0
       - LAYA_PORT=8000
       - LAYA_PRELOAD=0
+    ports:
+      - "127.0.0.1:8100:8000"
     networks:
       - liteads-network
     restart: unless-stopped

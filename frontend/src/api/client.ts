@@ -1,9 +1,44 @@
-import type { AdListResponse, AdRequestPayload, UserContextPayload, Advertiser, Campaign, Creative, HealthResponse, Publisher, Session, Suggestion, ChatSessionResponse, ChatResponse } from "../types";
-export type { UserContextPayload };
-const BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "";
+import type {
+  AdListResponse,
+  AdRequestPayload,
+  UserContextPayload,
+  Advertiser,
+  Campaign,
+  Creative,
+  HealthResponse,
+  Publisher,
+  Session,
+  Suggestion,
+  ChatSessionResponse,
+  ChatResponse,
+  MessageResponse,
+  VerifyEmailResponse,
+  VerifyEmailInput,
+  ResendVerificationInput,
+  RequestPasswordResetInput,
+  ResetPasswordInput,
+} from "../types";
+export type {
+  UserContextPayload,
+  MessageResponse,
+  VerifyEmailResponse,
+  VerifyEmailInput,
+  ResendVerificationInput,
+  RequestPasswordResetInput,
+  ResetPasswordInput,
+};
+const BASE_URL = (import.meta.env?.VITE_API_BASE_URL as string | undefined) ?? "";
 let memoryToken: string | null = null;
 export const setMemoryToken = (token: string | null) => { memoryToken = token; };
-export class ApiError extends Error { constructor(message: string, public status: number) { super(message); this.name = "ApiError"; } }
+export const getMemoryToken = () => memoryToken;
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
   let authorization: Record<string, string> = {};
   if (memoryToken) authorization = { Authorization: `Bearer ${memoryToken}` };
@@ -33,6 +68,36 @@ export const login = async (email: string, password: string): Promise<Session> =
 export const register = async (name: string, email: string, password: string, role: "advertiser" | "publisher"): Promise<Session> => {
   const response = await apiFetch<{ user: Session["user"]; access_token: string }>("/api/v1/auth/register", { method: "POST", body: JSON.stringify({ name, email, password, role }) });
   return { user: response.user, token: response.access_token };
+};
+export const verifyEmail = (payload: string | VerifyEmailInput): Promise<VerifyEmailResponse> => {
+  const token = typeof payload === "string" ? payload : payload.token;
+  return apiFetch<VerifyEmailResponse>("/api/v1/auth/verify-email", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
+};
+export const resendVerification = (payload: string | ResendVerificationInput): Promise<MessageResponse> => {
+  const email = typeof payload === "string" ? payload : payload.email;
+  return apiFetch<MessageResponse>("/api/v1/auth/resend-verification", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+};
+export const requestPasswordReset = (payload: string | RequestPasswordResetInput): Promise<MessageResponse> => {
+  const email = typeof payload === "string" ? payload : payload.email;
+  return apiFetch<MessageResponse>("/api/v1/auth/request-password-reset", {
+    method: "POST",
+    body: JSON.stringify({ email }),
+  });
+};
+export const resetPassword = (payload: ResetPasswordInput): Promise<MessageResponse> => {
+  return apiFetch<MessageResponse>("/api/v1/auth/reset-password", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+};
+export const getCurrentUser = (): Promise<Session["user"]> => {
+  return apiFetch<Session["user"]>("/api/v1/auth/me", { method: "POST" });
 };
 export interface AdvertiserDomain {
   id: number;
@@ -201,8 +266,10 @@ export const getReferencePincodes = (country: string, state: string, city: strin
 // Finance APIs
 export interface TransactionResponse { id: number; type: number; amount: number; currency: string; advertiser_id?: number | null; publisher_id?: number | null; campaign_id?: number | null; reference_id?: string | null; description?: string | null; created_at: string; }
 export interface LedgerResponse { balance: number; transactions: TransactionResponse[]; }
+export interface PaymentOrderResponse { order_id: string; amount: number; currency: string; qr_image_url: string | null; }
 export const getAdvertiserLedger = (advertiserId: number) => apiFetch<LedgerResponse>(`/api/v1/finance/advertiser/${advertiserId}/ledger`);
 export const depositFunds = (advertiserId: number, amount: number, referenceId?: string) => apiFetch<TransactionResponse>(`/api/v1/finance/advertiser/${advertiserId}/deposit`, { method: "POST", body: JSON.stringify({ amount, reference_id: referenceId }) });
+export const createAdvertiserPaymentRequest = (advertiserId: number, amount: number) => apiFetch<PaymentOrderResponse>(`/api/v1/finance/advertiser/${advertiserId}/payment-request`, { method: "POST", body: JSON.stringify({ amount }) });
 export const getPublisherLedger = (publisherId: number) => apiFetch<LedgerResponse>(`/api/v1/finance/publisher/${publisherId}/ledger`);
 export const requestPayout = (publisherId: number, amount: number, referenceId?: string) => apiFetch<TransactionResponse>(`/api/v1/finance/publisher/${publisherId}/payout`, { method: "POST", body: JSON.stringify({ amount, reference_id: referenceId }) });
 // API Keys

@@ -305,21 +305,24 @@ async def request_payment(
     user: User,
     session: AsyncSession,
     amount: Decimal,
+    advertiser_id: int | None = None,
 ) -> PaymentOrderResponse:
     """
     Creates a Razorpay payment order for wallet top-up.
     Does NOT credit the wallet. Wallet credit happens only after webhook verification.
 
     Args:
-        user: The authenticated User. Must have an advertiser_id.
+        user: The authenticated User. Must have an advertiser_id or have advertiser_id passed.
         amount: The payment amount in INR. Minimum ₹100.
+        advertiser_id: Optional advertiser ID to override/fallback for authorized callers.
         
     Raises:
-        ToolAuthorizationError: If the user lacks an advertiser account.
+        ToolAuthorizationError: If no associated advertiser account can be found.
         ToolValidationError: If the amount is less than ₹100.
         ToolError: If the Razorpay API fails.
     """
-    if not user.advertiser_id:
+    target_adv_id = advertiser_id if advertiser_id is not None else user.advertiser_id
+    if not target_adv_id:
         raise ToolAuthorizationError("User does not have an associated advertiser account")
     if amount < Decimal("100"):
         raise ToolValidationError("Amount to top up must be at least ₹100")
@@ -327,7 +330,7 @@ async def request_payment(
     import uuid
     from liteads.models.finance import PaymentRequest
     
-    internal_reference = f"adv_{user.advertiser_id}_qr_{uuid.uuid4().hex[:12]}"
+    internal_reference = f"adv_{target_adv_id}_qr_{uuid.uuid4().hex[:12]}"
     
     razorpay_client = get_razorpay_client()
     try:
@@ -335,14 +338,14 @@ async def request_payment(
         qr = razorpay_client.create_qr_code(
             amount=amount,
             receipt=internal_reference,
-            advertiser_id=user.advertiser_id
+            advertiser_id=target_adv_id
         )
         qr_id = qr["id"]
         qr_image_url = qr.get("image_url")
 
         # Persist the request
         payment_request = PaymentRequest(
-            advertiser_id=user.advertiser_id,
+            advertiser_id=target_adv_id,
             amount=amount,
             currency="INR",
             provider_order_id=qr_id,

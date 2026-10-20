@@ -170,8 +170,11 @@ export default function CampaignBuilder() {
                 } else {
                     setError("Payment configuration error: Invalid payload from server.");
                 }
-            } else if (res.intent === "CREATE_CAMPAIGN" && res.payload && typeof res.payload.campaign_id === "string" && res.payload.campaign_id.trim() !== "") {
-                setCampaignId(res.payload.campaign_id.trim());
+            } else if (res.intent === "CREATE_CAMPAIGN" && res.payload && res.payload.campaign_id != null) {
+                const cid = String(res.payload.campaign_id).trim();
+                if (cid !== "") {
+                    setCampaignId(cid);
+                }
             } else if (campaignId) {
 
                 if (res.intent === "SET_BUDGET" && isToolSuccess(res.tool_status)) {
