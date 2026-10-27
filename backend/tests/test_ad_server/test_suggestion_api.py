@@ -2,7 +2,9 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 
-from liteads.models.ad import Suggestion, CampaignChangeLog, TargetingRule
+from decimal import Decimal
+from liteads.models.ad import Suggestion, CampaignChangeLog, TargetingRule, Advertiser, Campaign
+from liteads.models.base import Status
 
 
 @pytest.fixture
@@ -23,6 +25,12 @@ async def auth_setup(client: AsyncClient, test_db):
     }, headers=headers)
     camp = res.json()
     
+    adv = await test_db.get(Advertiser, adv_id)
+    adv.balance = Decimal("1000.00")
+    camp_obj = await test_db.get(Campaign, camp["id"])
+    camp_obj.status = Status.ACTIVE
+    await test_db.commit()
+
     return {"headers": headers, "campaign": camp}
 
 

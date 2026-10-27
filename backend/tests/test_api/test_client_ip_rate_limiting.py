@@ -397,3 +397,70 @@ def test_main_startup_uvicorn_parameters():
         assert kwargs["proxy_headers"] is True
         assert "forwarded_allow_ips" in kwargs
         assert "127.0.0.1" in kwargs["forwarded_allow_ips"]
+
+
+def test_docker_bridge_trusted_proxy_forwarded_client_ip():
+    """Verify Docker bridge network (172.16.0.0/12) is trusted and untrusted peers cannot spoof."""
+    docker_trusted = ["127.0.0.1", "::1", "172.16.0.0/12"]
+
+    # 1. Nginx container on Docker bridge network (172.18.0.5) forwards real client IP
+    req_nginx = _create_mock_request(
+        client_host="172.18.0.5",
+        headers={"X-Forwarded-For": "203.0.113.195"},
+    )
+    assert resolve_client_ip(req_nginx, trusted_proxies=docker_trusted) == "203.0.113.195"
+
+    # 2. Client prepends spoofed IP; Nginx appends authentic client IP
+    req_spoof_via_nginx = _create_mock_request(
+        client_host="172.18.0.5",
+        headers={"X-Forwarded-For": "198.51.100.99, 203.0.113.195"},
+    )
+    assert resolve_client_ip(req_spoof_via_nginx, trusted_proxies=docker_trusted) == "203.0.113.195"
+
+    # 3. Direct connection from an untrusted peer (e.g. 10.0.0.5, since 10.0.0.0/8 is NOT in Docker config)
+    req_untrusted_private = _create_mock_request(
+        client_host="10.0.0.5",
+        headers={"X-Forwarded-For": "8.8.8.8", "X-Real-IP": "8.8.8.8"},
+    )
+    assert resolve_client_ip(req_untrusted_private, trusted_proxies=docker_trusted) == "10.0.0.5"
+
+    # 4. Direct untrusted public client trying to claim it is Nginx
+    req_direct_public = _create_mock_request(
+        client_host="203.0.113.50",
+        headers={"X-Forwarded-For": "172.18.0.5", "X-Real-IP": "172.18.0.5"},
+    )
+    assert resolve_client_ip(req_direct_public, trusted_proxies=docker_trusted) == "203.0.113.50"
+
+
+def test_env_var_trusted_proxies_docker_compose_configuration():
+    """Verify LITEADS_SERVER__TRUSTED_PROXIES env var format used in docker-compose.yml parses correctly."""
+    import os
+    from liteads.ad_server.main import main
+
+    env_val = "127.0.0.1,::1,172.16.0.0/12"
+    with patch.dict(os.environ, {"LITEADS_SERVER__TRUSTED_PROXIES": env_val}):
+        s = ServerSettings()
+        assert s.trusted_proxies == ["127.0.0.1", "::1", "172.16.0.0/12"]
+
+        with patch("uvicorn.run") as mock_run:
+            with patch("liteads.ad_server.main.get_settings") as mock_get_settings:
+                mock_get_settings.return_value.server = s
+                mock_get_settings.return_value.debug = False
+                main()
+                assert mock_run.called
+                kwargs = mock_run.call_args[1]
+                assert kwargs["forwarded_allow_ips"] == "127.0.0.1,::1,172.16.0.0/12"
+
+
+@pytest.mark.asyncio
+async def test_referrer_policy_header_present_on_fastapi_responses():
+    """Verify Referrer-Policy: no-referrer is present on both success and error responses."""
+    app = create_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp_ok = await client.get("/ping")
+        assert resp_ok.status_code == 200
+        assert resp_ok.headers.get("referrer-policy") == "no-referrer"
+
+        resp_err = await client.get("/nonexistent-path-for-testing-404")
+        assert resp_err.status_code == 404
+        assert resp_err.headers.get("referrer-policy") == "no-referrer"

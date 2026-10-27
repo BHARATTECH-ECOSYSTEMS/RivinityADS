@@ -13,6 +13,19 @@ from liteads.ad_server.services.optimization_policy import OptimizationPolicyRes
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture(autouse=True)
+def mock_redis_for_scheduler():
+    with patch("liteads.ad_server.services.optimization_scheduler.redis_client") as mock_redis:
+        mock_redis.connected = True
+        mock_redis.set = AsyncMock(return_value=True)
+        mock_redis.get = AsyncMock(return_value="1")
+        mock_redis.incr = AsyncMock(return_value=2)
+        mock_redis.acquire_lock = AsyncMock(return_value=True)
+        mock_redis.release_lock = AsyncMock(return_value=True)
+        mock_redis.renew_lock = AsyncMock(return_value=True)
+        yield mock_redis
+
+
 @pytest.fixture
 async def advertiser(test_db):
     adv = Advertiser(
@@ -150,7 +163,7 @@ async def test_scheduler_laya_success(mock_exec_cls, mock_policy_cls, mock_laya_
         await loop._process_cycle()
     
     mock_laya.decide.assert_awaited_once_with(mock_context.state)
-    mock_policy.evaluate.assert_called_once()
+    assert mock_policy.evaluate.call_count == 2  # Evaluated once outside lock, revalidated under canonical row lock
     mock_executor.execute.assert_awaited_once()
 
 

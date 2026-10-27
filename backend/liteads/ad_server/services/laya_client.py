@@ -4,6 +4,7 @@ Laya Decision Client.
 Communicates with the Laya sidecar to retrieve optimization decisions.
 """
 
+import math
 from typing import Any, Literal
 from dataclasses import dataclass
 
@@ -113,19 +114,21 @@ class LayaDecisionClient:
             logger.error("Laya response is not valid JSON", text=response.text)
             raise LayaMalformedResponseError("Invalid JSON from Laya") from e
 
-        # Extract choice and confidence safely
+        # Extract choice, confidence, and target_payload safely
         try:
             answers = data.get("answers", {})
             opt_decision = answers.get("opt_decision", {})
             choice = opt_decision.get("choice")
-            confidence = opt_decision.get("confidence")
+            confidence_raw = opt_decision.get("confidence")
 
             if choice is None:
                 raise ValueError("Missing 'choice' in opt_decision")
-            if confidence is None:
+            if confidence_raw is None:
                 raise ValueError("Missing 'confidence' in opt_decision")
                 
-            confidence = float(confidence)
+            confidence = float(confidence_raw)
+            if not math.isfinite(confidence) or confidence < 0.0 or confidence > 1.0:
+                raise ValueError(f"Confidence {confidence} must be a finite float between 0.0 and 1.0")
             
             valid_choices = [
                 "increase_budget_20",
@@ -138,6 +141,14 @@ class LayaDecisionClient:
             if choice not in valid_choices:
                 raise ValueError(f"Invalid choice '{choice}' returned by Laya")
                 
+            # Extract target_payload if provided
+            raw_target = opt_decision.get("target_payload")
+            target_payload: dict[str, Any] | None = None
+            if raw_target is not None:
+                if not isinstance(raw_target, dict):
+                    raise ValueError("target_payload must be a JSON object/dictionary")
+                target_payload = raw_target
+                
         except (ValueError, TypeError, AttributeError) as e:
             logger.error("Laya response malformed", error=str(e), data=data)
             raise LayaMalformedResponseError(f"Malformed Laya response: {e}") from e
@@ -145,5 +156,6 @@ class LayaDecisionClient:
         return LayaDecisionResult(
             choice=choice, # type: ignore
             confidence=confidence,
-            raw_response=data
+            raw_response=data,
+            target_payload=target_payload,
         )

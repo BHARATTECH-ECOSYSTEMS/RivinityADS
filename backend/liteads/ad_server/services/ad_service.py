@@ -150,6 +150,10 @@ class AdService:
             ctx.pincode = request.geo.pincode or ""
             ctx.latitude = request.geo.latitude
             ctx.longitude = request.geo.longitude
+            if request.geo.latitude is not None and request.geo.longitude is not None:
+                ctx.location_source = request.geo.location_source or "device_gps"
+                ctx.location_accuracy_meters = request.geo.accuracy_meters
+                ctx.location_consent = bool(request.geo.consent)
 
         # Context info
         if request.context:
@@ -179,12 +183,15 @@ class AdService:
                     ctx.city = request.user.geo.city
                 if not ctx.pincode and request.user.geo.pincode:
                     ctx.pincode = request.user.geo.pincode
-                if ctx.latitude is None and request.user.geo.latitude is not None:
+                if request.user.geo.latitude is not None and request.user.geo.longitude is not None:
                     ctx.latitude = request.user.geo.latitude
-                if ctx.longitude is None and request.user.geo.longitude is not None:
                     ctx.longitude = request.user.geo.longitude
+                    ctx.location_source = request.user.geo.location_source or "device_gps"
+                    ctx.location_accuracy_meters = request.user.geo.accuracy_meters
+                    ctx.location_consent = bool(request.user.geo.consent)
 
-        # Server-side IP -> Geo resolution (overrides request values if found)
+        # Server-side IP -> Geo resolution (overrides administrative values if found)
+        # Note: IP coordinates represent coarse city/metro centroids (accuracy ~10-50km), NEVER precise GPS.
         if ctx.ip:
             from liteads.ad_server.services.geo_resolver import resolve_ip
             geo_data = await resolve_ip(ctx.ip)
@@ -196,9 +203,13 @@ class AdService:
                 ctx.city = geo_data["city"]
             if geo_data.get("pincode"):
                 ctx.pincode = geo_data["pincode"]
-            if geo_data.get("lat") is not None:
+            # Only populate latitude/longitude from IP if coordinates were not already provided by device
+            if ctx.latitude is None and geo_data.get("lat") is not None:
                 ctx.latitude = geo_data["lat"]
-            if geo_data.get("lon") is not None:
+                ctx.location_source = "ip"
+                ctx.location_accuracy_meters = 10000.0
+                ctx.location_consent = False
+            if ctx.longitude is None and geo_data.get("lon") is not None:
                 ctx.longitude = geo_data["lon"]
 
         # User features

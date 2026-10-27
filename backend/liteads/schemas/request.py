@@ -33,6 +33,9 @@ class GeoInfo(BaseModel):
     pincode: str | None = Field(None, description="Postal / ZIP code")
     latitude: float | None = Field(None, description="Latitude")
     longitude: float | None = Field(None, description="Longitude")
+    location_source: str | None = Field(None, description="Signal provenance (e.g. 'device_gps', 'coarse_network', 'ip')")
+    accuracy_meters: float | None = Field(None, ge=0, description="Estimated accuracy radius in meters")
+    consent: bool = Field(False, description="Explicit user consent indicator for geolocation processing")
 
     @model_validator(mode="after")
     def sync_state_region(self) -> "GeoInfo":

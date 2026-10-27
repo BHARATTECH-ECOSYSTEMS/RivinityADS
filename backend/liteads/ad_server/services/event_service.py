@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -17,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from liteads.common.cache import CacheKeys, redis_client
 from liteads.common.logger import get_logger
 from liteads.common.utils import current_date, current_hour
-from liteads.models import AdEvent, AdSlot, Campaign, Creative, EventType, PublisherDailyStat
+from liteads.models import AdEvent, AdSet, AdSlot, Campaign, Creative, EventType, PublisherDailyStat, Advertiser
 from liteads.ad_server.services.billing import BillingService
 
 logger = get_logger(__name__)
@@ -37,6 +38,8 @@ class EventService:
         user_id: str | None = None,
         timestamp: int | None = None,
         extra: dict[str, Any] | None = None,
+        seq: int = 1,
+        raise_on_duplicate: bool = False,
     ) -> bool:
         """
         Track an ad event.
@@ -56,8 +59,11 @@ class EventService:
                 logger.warning(f"Unknown event type: {event_type}")
                 return False
 
-            # Create event record
+            # Create event record with canonical row lock order: Advertiser -> Campaign
             if campaign_id:
+                camp_peek = await self.session.get(Campaign, campaign_id)
+                if camp_peek and camp_peek.advertiser_id:
+                    await self.session.get(Advertiser, camp_peek.advertiser_id, with_for_update=True)
                 result = await self.session.execute(
                     select(Campaign).where(Campaign.id == campaign_id).with_for_update()
                 )
@@ -65,7 +71,17 @@ class EventService:
             else:
                 campaign = None
 
-            cost = self._calculate_cost(event_type_enum, campaign)
+            # Derive ad_set_id server-side from creative
+            ad_set = None
+            ad_set_id = None
+            if creative_id:
+                creative_obj = await self.session.get(Creative, creative_id)
+                if creative_obj and creative_obj.ad_set_id:
+                    ad_set = await self.session.get(AdSet, creative_obj.ad_set_id)
+                    if ad_set:
+                        ad_set_id = ad_set.id
+
+            cost = self._calculate_cost(event_type_enum, campaign, ad_set)
             
             slot_id = extra.get("slot_id") if extra else None
             publisher_id = None
@@ -75,6 +91,8 @@ class EventService:
                 if slot:
                     publisher_id = slot.publisher_id
             
+            logical_event_key = f"{request_id}:{creative_id or 0}:{event_type_enum}:{seq}"
+
             if campaign and campaign.advertiser_id and publisher_id and cost > 0:
                 success_bill = await BillingService.process_impression_charge(
                     self.session,
@@ -82,14 +100,13 @@ class EventService:
                     campaign_id=campaign.id,
                     publisher_id=publisher_id,
                     cost=cost,
-                    reference_id=request_id
+                    reference_id=logical_event_key,
                 )
                 if not success_bill:
                     logger.warning(f"Billing failed for event {request_id}")
                     return False
             elif campaign and campaign.updated_at.date() < datetime.now(timezone.utc).date():
                 campaign.spent_today = 0
-
 
             event = AdEvent(
                 request_id=request_id,
@@ -101,6 +118,7 @@ class EventService:
                 else datetime.utcnow(),
                 user_id=user_id,
                 cost=cost,
+                idempotency_key=logical_event_key,
             )
 
             self.session.add(event)
@@ -110,12 +128,22 @@ class EventService:
             await self._update_publisher_stats(event_type_enum, cost, extra)
             await self._update_user_profile(user_id, campaign_id, event_type_enum)
 
+            # Update AdSet daily budget in Redis if applicable
+            if ad_set_id and cost > 0:
+                today = current_date()
+                as_key = f"adset_budget:{ad_set_id}:{today}"
+                try:
+                    await redis_client.hincrbyfloat(as_key, "spent_today", float(cost))
+                    await redis_client.expire(as_key, 86400 * 2)
+                except Exception as e:
+                    logger.error(f"Failed to update ad set spent for ad_set {ad_set_id}: {e}")
+
             # Update real-time stats in Redis
-            await self._update_stats(campaign_id, event_type_enum)
+            await self._update_stats(campaign_id, event_type_enum, ad_set_id=ad_set_id)
 
             # Update frequency counter for impressions
             if event_type_enum == EventType.IMPRESSION and user_id:
-                await self._update_frequency(user_id, campaign_id)
+                await self._update_frequency(user_id, campaign_id, slot_id=slot_id, ad_set_id=ad_set_id)
 
             # ── Webhook dispatch (fire-and-forget background tasks) ──────
             await self._dispatch_webhooks(
@@ -139,9 +167,29 @@ class EventService:
 
             return True
 
+        except IntegrityError as ie:
+            await self.session.rollback()
+            err_msg = str(ie).lower()
+            if (
+                "idempotency_key" in err_msg
+                or "uq_ad_events" in err_msg
+                or "reference_id" in err_msg
+                or "uq_transactions" in err_msg
+            ):
+                logger.info(f"Duplicate event rejected by database: {ie}")
+                if raise_on_duplicate:
+                    raise HTTPException(status_code=429, detail="Duplicate event rejected")
+                return False
+            logger.error(f"IntegrityError tracking event: {ie}")
+            return False
+        except HTTPException:
+            await self.session.rollback()
+            raise
         except Exception as e:
+            await self.session.rollback()
             logger.error(f"Failed to track event: {e}")
             return False
+
 
     def _parse_ad_id(self, ad_id: str) -> tuple[int | None, int | None]:
         """Parse ad ID to extract campaign and creative IDs."""
@@ -170,16 +218,22 @@ class EventService:
         }
         return mapping.get(event_type.lower())
 
-    def _calculate_cost(self, event_type: int, campaign: Campaign | None) -> Decimal:
-        """Calculate cost for the event."""
+    def _calculate_cost(self, event_type: int, campaign: Campaign | None, ad_set: AdSet | None = None) -> Decimal:
+        """Calculate cost for the event, respecting ad_set bid if specified."""
         if campaign is None:
             return Decimal("0.000000")
-        if campaign.bid_type == 1 and event_type == EventType.IMPRESSION:
-            return Decimal(campaign.bid_amount) / Decimal("1000")
-        if campaign.bid_type == 2 and event_type == EventType.CLICK:
-            return Decimal(campaign.bid_amount)
-        if campaign.bid_type == 3 and event_type == EventType.CONVERSION:
-            return Decimal(campaign.bid_amount)
+        bid_type = campaign.bid_type
+        bid_amount = campaign.bid_amount
+        if ad_set and ad_set.bid_amount and Decimal(ad_set.bid_amount) > 0:
+            bid_type = ad_set.bid_type
+            bid_amount = ad_set.bid_amount
+
+        if bid_type == 1 and event_type == EventType.IMPRESSION:
+            return Decimal(bid_amount) / Decimal("1000")
+        if bid_type == 2 and event_type == EventType.CLICK:
+            return Decimal(bid_amount)
+        if bid_type == 3 and event_type == EventType.CONVERSION:
+            return Decimal(bid_amount)
         return Decimal("0.000000")
 
     async def _update_campaign_stats(
@@ -302,7 +356,7 @@ class EventService:
             stat.conversions += delta_conversions
             stat.earnings += delta_earnings
 
-    async def _update_stats(self, campaign_id: int | None, event_type: int) -> None:
+    async def _update_stats(self, campaign_id: int | None, event_type: int, ad_set_id: int | None = None) -> None:
         """Update real-time statistics in Redis."""
         if campaign_id is None:
             return
@@ -321,7 +375,24 @@ class EventService:
         # Set TTL (48 hours)
         await redis_client.expire(key, 48 * 3600)
 
-    async def _update_frequency(self, user_id: str, campaign_id: int | None, slot_id: str | None = None) -> None:
+        # Increment counter for ad set
+        if ad_set_id is not None:
+            as_stat_key = f"stat:adset:{ad_set_id}:{hour}"
+            if event_type == EventType.IMPRESSION:
+                await redis_client.hincrby(as_stat_key, "impressions", 1)
+            elif event_type == EventType.CLICK:
+                await redis_client.hincrby(as_stat_key, "clicks", 1)
+            elif event_type == EventType.CONVERSION:
+                await redis_client.hincrby(as_stat_key, "conversions", 1)
+            await redis_client.expire(as_stat_key, 48 * 3600)
+
+    async def _update_frequency(
+        self,
+        user_id: str,
+        campaign_id: int | None,
+        slot_id: str | None = None,
+        ad_set_id: int | None = None,
+    ) -> None:
         """Update frequency counter atomically with bounded TTL."""
         if campaign_id is None or not user_id:
             return
@@ -349,6 +420,11 @@ class EventService:
                 """
                 await client.eval(_LUA, 1, daily_key, 86400)
                 await client.eval(_LUA, 1, hourly_key, 3600)
+                if ad_set_id is not None:
+                    as_daily_key = f"freq:adset:{user_id}:{ad_set_id}:{today}"
+                    as_hourly_key = f"freq:adset:{user_id}:{ad_set_id}:{hour}"
+                    await client.eval(_LUA, 1, as_daily_key, 86400)
+                    await client.eval(_LUA, 1, as_hourly_key, 3600)
         except Exception as e:
             logger.error("failed_to_update_frequency", campaign_id=campaign_id, error=str(e))
 

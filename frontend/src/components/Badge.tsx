@@ -1,2 +1,22 @@
 import { STATUS } from "../types";
-export default function Badge({ status }: { status: number }) { const label = STATUS[status] ?? "unknown"; return <span className={`badge ${label}`}>{label}</span>; }
+import StatusBadge from "./ui/StatusBadge";
+
+export interface BadgeProps {
+  status: number | string;
+  label?: string;
+  className?: string;
+}
+
+export default function Badge({ status, label: customLabel, className = "" }: BadgeProps) {
+  const numericStatus = typeof status === "number" ? status : parseInt(status, 10);
+  const statusLabel = customLabel || (STATUS[numericStatus] ?? String(status));
+
+  // Render backward-compatible badge class while leveraging StatusBadge semantic structure
+  return (
+    <StatusBadge
+      status={status}
+      label={statusLabel}
+      className={`badge ${statusLabel} ${className}`}
+    />
+  );
+}

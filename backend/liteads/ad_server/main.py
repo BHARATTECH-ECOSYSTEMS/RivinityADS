@@ -15,7 +15,21 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from liteads.ad_server.middleware.metrics import MetricsMiddleware, metrics_endpoint
-from liteads.ad_server.routers import ad, auth, event, health, management, targeting, reference, finance, webhooks, chat, domain, moderation
+from liteads.ad_server.routers import (
+    ad,
+    auth,
+    chat,
+    domain,
+    event,
+    finance,
+    health,
+    management,
+    moderation,
+    notifications,
+    reference,
+    targeting,
+    webhooks,
+)
 from liteads.common.cache import redis_client
 from liteads.common.config import get_settings
 from liteads.common.database import close_db, create_tables, init_db
@@ -49,11 +63,24 @@ async def lifespan(app: FastAPI):
     # Initialize Redis
     await redis_client.connect()
 
-    from liteads.ad_server.services.optimization_scheduler import optimization_loop
-    optimization_loop.start()
+    if settings.enable_optimization_worker and settings.optimization.enabled:
+        from liteads.ad_server.services.optimization_scheduler import optimization_loop
+        optimization_loop.start()
+        logger.info(
+            "In-process optimization loop scheduler started (monolith mode). "
+            "Set LITEADS_ENABLE_OPTIMIZATION_WORKER=false if running dedicated worker containers (--profile worker)."
+        )
 
     from liteads.ad_server.services.digest_scheduler import weekly_digest_loop
     weekly_digest_loop.start()
+
+    if settings.enable_webhook_worker:
+        from liteads.ad_server.services.webhook_worker import webhook_worker_task
+        webhook_worker_task.start()
+
+    if settings.enable_notification_worker:
+        from liteads.ad_server.services.notification_worker import notification_worker_task
+        notification_worker_task.start()
 
     logger.info("LiteAds server started successfully")
 
@@ -61,12 +88,21 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down LiteAds server")
-    
+
+    if settings.enable_notification_worker:
+        from liteads.ad_server.services.notification_worker import notification_worker_task
+        await notification_worker_task.stop()
+
+    if settings.enable_webhook_worker:
+        from liteads.ad_server.services.webhook_worker import webhook_worker_task
+        await webhook_worker_task.stop()
+
     from liteads.ad_server.services.digest_scheduler import weekly_digest_loop
     await weekly_digest_loop.stop()
 
-    from liteads.ad_server.services.optimization_scheduler import optimization_loop
-    await optimization_loop.stop()
+    if settings.enable_optimization_worker and settings.optimization.enabled:
+        from liteads.ad_server.services.optimization_scheduler import optimization_loop
+        await optimization_loop.stop()
     
     await redis_client.close()
     await close_db()
@@ -94,7 +130,16 @@ def create_app() -> FastAPI:
 
     cors_env = os.getenv("LITEADS_CORS_ORIGINS")
     if cors_env:
-        allowed = [o.strip() for o in cors_env.split(",")]
+        allowed = [o.strip() for o in cors_env.split(",") if o.strip()]
+        allow_credentials = True
+    elif settings.debug or settings.env == "dev":
+        allowed = [
+            settings.server.frontend_url,
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:3000",
+        ]
+        allowed = list(dict.fromkeys([o for o in allowed if o]))
         allow_credentials = True
     else:
         allowed = ["*"]
@@ -139,6 +184,7 @@ def create_app() -> FastAPI:
         # Add headers
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Response-Time"] = f"{duration_ms:.2f}ms"
+        response.headers["Referrer-Policy"] = "no-referrer"
 
         clear_log_context()
 
@@ -200,6 +246,7 @@ def create_app() -> FastAPI:
     app.include_router(chat.router, prefix="/api/v1", tags=["chat"])
     app.include_router(domain.router, prefix="/api/v1", tags=["domain"])
     app.include_router(moderation.router, prefix="/api/v1", tags=["moderation"])
+    app.include_router(notifications.router, prefix="/api/v1", tags=["notifications"])
 
     # Mount JS SDK & static assets so rivinity.js and liteads.js are served at /static/
     static_dir = _STATIC_DIR if _STATIC_DIR.exists() else Path(os.path.join(os.path.dirname(__file__), "..", "static"))

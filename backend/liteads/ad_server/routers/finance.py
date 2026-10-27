@@ -288,3 +288,51 @@ async def request_payout(
     except ValueError as e:
         await session.rollback()
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/dev/simulate-payment/{order_id}")
+async def dev_simulate_payment(
+    order_id: str,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(verified_user),
+) -> dict:
+    """
+    Development-only endpoint to simulate payment completion for local testing.
+    Allowed only when env == 'dev' and the caller owns the payment request (or is admin).
+    """
+    settings = get_settings()
+    if settings.env != "dev":
+        raise HTTPException(status_code=403, detail="Simulate payment is only available in dev environment")
+
+    stmt = select(PaymentRequest).where(PaymentRequest.provider_order_id == order_id)
+    result = await session.execute(stmt)
+    pr = result.scalar_one_or_none()
+    if not pr:
+        raise HTTPException(status_code=404, detail="Payment request not found")
+
+    adv = await session.get(Advertiser, pr.advertiser_id)
+    if not adv:
+        raise HTTPException(status_code=404, detail="Advertiser not found")
+
+    if user.role != "admin" and adv.owner_user_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to simulate payment for this advertiser")
+
+    # Check if already processed
+    tx_stmt = select(Transaction).where(Transaction.reference_id == order_id)
+    tx_result = await session.execute(tx_stmt)
+    if tx_result.scalar_one_or_none():
+        return {"status": "already_processed", "message": "Payment has already been credited"}
+
+    success = await BillingService.record_deposit(
+        session=session,
+        advertiser_id=pr.advertiser_id,
+        amount=pr.amount,
+        reference_id=order_id,
+    )
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to credit wallet")
+
+    pr.status = "paid"
+    await session.commit()
+    return {"status": "success", "message": f"Dev payment confirmed. Credited ₹{pr.amount} to advertiser {pr.advertiser_id}."}
+

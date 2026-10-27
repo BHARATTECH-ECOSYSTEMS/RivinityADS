@@ -16,6 +16,7 @@ from liteads.ad_server.services.creative_moderation import CreativeModerationSer
 from liteads.ad_server.services.domain_verification import DomainVerificationService
 from liteads.ad_server.services.placement_analyzer import PlacementAnalyzerService
 from liteads.models import (
+    AdSet,
     AdSlot,
     Advertiser,
     AdEvent,
@@ -33,6 +34,11 @@ from liteads.models import (
 )
 from liteads.management.api_key_service import ApiKeyService
 from liteads.schemas.management import (
+    AdSetCreate,
+    AdSetReportingItem,
+    AdSetReportingResponse,
+    AdSetResponse,
+    AdSetUpdate,
     AdvertiserCreate,
     AdvertiserResponse,
     AdvertiserUpdate,
@@ -101,6 +107,15 @@ async def _assert_campaign_access(user: User, campaign_id: int, session: AsyncSe
     if user.role == "publisher":
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     return campaign
+
+
+async def _assert_ad_set_access(user: User, ad_set_id: int, session: AsyncSession) -> tuple[AdSet, Campaign]:
+    """Verify that user has access to the ad set via its parent campaign."""
+    ad_set = await session.get(AdSet, ad_set_id)
+    if ad_set is None:
+        raise _not_found("AdSet", ad_set_id)
+    campaign = await _assert_campaign_access(user, ad_set.campaign_id, session)
+    return ad_set, campaign
 
 
 @router.get("/advertiser", response_model=list[AdvertiserResponse], dependencies=[Depends(require_roles("admin"))])
@@ -281,14 +296,132 @@ async def delete_campaign_assignment(
     await session.commit()
 
 
+# ── Phase 7B: AdSet Endpoints ───────────────────────────────────────────────
+
+@router.post("/campaign/{campaign_id}/ad-sets", response_model=AdSetResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin", "advertiser"))])
+async def create_ad_set(
+    campaign_id: int,
+    payload: AdSetCreate,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> AdSet:
+    campaign = await _assert_campaign_access(user, campaign_id, session)
+    if payload.daily_budget is not None and campaign.budget_daily is not None and campaign.budget_daily > 0:
+        if payload.daily_budget > campaign.budget_daily:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Ad set daily budget cannot exceed campaign daily budget",
+            )
+    data = payload.model_dump()
+    ad_set = AdSet(campaign_id=campaign_id, **data)
+    session.add(ad_set)
+    await session.commit()
+    await session.refresh(ad_set)
+    return ad_set
+
+
+@router.get("/campaign/{campaign_id}/ad-sets", response_model=list[AdSetResponse], dependencies=[Depends(require_roles("admin", "advertiser"))])
+async def list_ad_sets(
+    campaign_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[AdSet]:
+    await _assert_campaign_access(user, campaign_id, session)
+    query = select(AdSet).where(AdSet.campaign_id == campaign_id).order_by(AdSet.id)
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
+@router.get("/ad-set/{ad_set_id}", response_model=AdSetResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
+async def get_ad_set(
+    ad_set_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> AdSet:
+    ad_set, _ = await _assert_ad_set_access(user, ad_set_id, session)
+    return ad_set
+
+
+@router.patch("/ad-set/{ad_set_id}", response_model=AdSetResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
+async def update_ad_set(
+    ad_set_id: int,
+    payload: AdSetUpdate,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> AdSet:
+    ad_set, campaign = await _assert_ad_set_access(user, ad_set_id, session)
+    updates = payload.model_dump(exclude_unset=True)
+    if "daily_budget" in updates and updates["daily_budget"] is not None:
+        if campaign.budget_daily is not None and campaign.budget_daily > 0 and updates["daily_budget"] > campaign.budget_daily:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Ad set daily budget cannot exceed campaign daily budget",
+            )
+    for key, value in updates.items():
+        setattr(ad_set, key, value)
+    await session.commit()
+    await session.refresh(ad_set)
+    return ad_set
+
+
+@router.put("/ad-set/{ad_set_id}", response_model=AdSetResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
+async def replace_ad_set(
+    ad_set_id: int,
+    payload: AdSetUpdate,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> AdSet:
+    return await update_ad_set(ad_set_id, payload, user, session)
+
+
+@router.patch("/ad-set/{ad_set_id}/pause", response_model=AdSetResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
+async def pause_ad_set(
+    ad_set_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> AdSet:
+    ad_set, _ = await _assert_ad_set_access(user, ad_set_id, session)
+    ad_set.status = Status.PAUSED
+    await session.commit()
+    await session.refresh(ad_set)
+    return ad_set
+
+
+@router.patch("/ad-set/{ad_set_id}/resume", response_model=AdSetResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
+async def resume_ad_set(
+    ad_set_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> AdSet:
+    ad_set, _ = await _assert_ad_set_access(user, ad_set_id, session)
+    ad_set.status = Status.ACTIVE
+    await session.commit()
+    await session.refresh(ad_set)
+    return ad_set
+
+
+@router.delete("/ad-set/{ad_set_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_roles("admin", "advertiser"))])
+async def delete_ad_set(
+    ad_set_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    ad_set, _ = await _assert_ad_set_access(user, ad_set_id, session)
+    ad_set.status = Status.DELETED
+    await session.commit()
+
+
 @router.get("/creative", response_model=list[CreativeResponse], dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def list_creatives(
     campaign_id: int,
+    ad_set_id: int | None = Query(default=None),
     user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[Creative]:
     await _assert_campaign_access(user, campaign_id, session)
     query = select(Creative).order_by(Creative.id).where(Creative.campaign_id == campaign_id)
+    if ad_set_id is not None:
+        query = query.where(Creative.ad_set_id == ad_set_id)
     result = await session.execute(query)
     return list(result.scalars().all())
 
@@ -299,7 +432,33 @@ async def create_creative(
     user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session)
 ) -> Creative:
-    await _assert_campaign_access(user, payload.campaign_id, session)
+    campaign = await _assert_campaign_access(user, payload.campaign_id, session)
+
+    data = payload.model_dump()
+    if payload.ad_set_id is not None:
+        ad_set = await session.get(AdSet, payload.ad_set_id)
+        if ad_set is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="AdSet not found")
+        if ad_set.campaign_id != payload.campaign_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="AdSet does not belong to specified campaign")
+    else:
+        # Default / legacy fallback: assign campaign's default ad set
+        res = await session.execute(
+            select(AdSet).where(AdSet.campaign_id == payload.campaign_id).order_by(AdSet.id.asc())
+        )
+        default_ad_set = res.scalars().first()
+        if default_ad_set is None:
+            default_ad_set = AdSet(
+                campaign_id=payload.campaign_id,
+                name="Default Ad Set",
+                status=Status.ACTIVE,
+                daily_budget=campaign.budget_daily,
+                bid_type=campaign.bid_type,
+                bid_amount=campaign.bid_amount,
+            )
+            session.add(default_ad_set)
+            await session.flush()
+        data["ad_set_id"] = default_ad_set.id
     
     if payload.landing_url and user.role == "advertiser":
         domain_service = DomainVerificationService(session)
@@ -315,7 +474,6 @@ async def create_creative(
         landing_url=payload.landing_url
     )
     
-    data = payload.model_dump()
     data["moderation_status"] = decision.status
     data["moderation_reason"] = decision.reason
     
@@ -350,18 +508,26 @@ async def update_creative(
     if creative is None:
         raise _not_found("Creative", creative_id)
     await _assert_campaign_access(user, creative.campaign_id, session)
-    for key, value in payload.model_dump(exclude_unset=True).items():
+
+    updates = payload.model_dump(exclude_unset=True)
+    if "ad_set_id" in updates and updates["ad_set_id"] is not None:
+        ad_set = await session.get(AdSet, updates["ad_set_id"])
+        if ad_set is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="AdSet not found")
+        if ad_set.campaign_id != creative.campaign_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="AdSet does not belong to creative campaign")
+
+    for key, value in updates.items():
         setattr(creative, key, value)
         
-    if "landing_url" in payload.model_dump(exclude_unset=True) and user.role == "advertiser":
+    if "landing_url" in updates and user.role == "advertiser":
         domain_service = DomainVerificationService(session)
         is_verified = await domain_service.is_url_verified_for_advertiser(user.advertiser_id, creative.landing_url)
         if not is_verified:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Landing URL domain is not verified")
         
     # If sensitive fields changed, re-evaluate moderation
-    updated_fields = payload.model_dump(exclude_unset=True)
-    if any(k in updated_fields for k in ("title", "description", "image_url", "video_url", "landing_url")):
+    if any(k in updates for k in ("title", "description", "image_url", "video_url", "landing_url")):
         decision = await CreativeModerationService.moderate_creative(
             title=creative.title,
             description=creative.description,
@@ -579,6 +745,7 @@ async def advertiser_reporting(
     advertiser_id: int,
     user: User = Depends(verified_user),
     campaign_id: int | None = Query(default=None),
+    ad_set_id: int | None = Query(default=None),
     start_date: date | None = Query(default=None),
     end_date: date | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
@@ -587,6 +754,16 @@ async def advertiser_reporting(
         raise HTTPException(status_code=403, detail="Not authorized to access this advertiser")
     if await session.get(Advertiser, advertiser_id) is None:
         raise _not_found("Advertiser", advertiser_id)
+
+    if ad_set_id:
+        ad_set = await session.get(AdSet, ad_set_id)
+        if ad_set is None:
+            raise _not_found("AdSet", ad_set_id)
+        ad_set_camp = await session.get(Campaign, ad_set.campaign_id)
+        if user.role == "advertiser" and (not ad_set_camp or ad_set_camp.advertiser_id != user.advertiser_id):
+            raise HTTPException(status_code=403, detail="AdSet belongs to another advertiser")
+        if campaign_id and ad_set.campaign_id != campaign_id:
+            raise HTTPException(status_code=400, detail="AdSet does not belong to specified campaign")
     
     today = date.today()
     start = start_date or today
@@ -610,6 +787,8 @@ async def advertiser_reporting(
     )
     if campaign_id:
         query = query.where(AdEvent.campaign_id == campaign_id)
+    if ad_set_id:
+        query = query.join(Creative, Creative.id == AdEvent.creative_id).where(Creative.ad_set_id == ad_set_id)
         
     query = query.group_by(func.date(AdEvent.event_time)).order_by(func.date(AdEvent.event_time))
     result = await session.execute(query)
@@ -648,6 +827,7 @@ async def advertiser_reporting(
     return AdvertiserReportingResponse(
         advertiser_id=advertiser_id,
         campaign_id=campaign_id,
+        ad_set_id=ad_set_id,
         start_date=start,
         end_date=end,
         impressions=total_impressions,
@@ -657,6 +837,95 @@ async def advertiser_reporting(
         ctr=ctr_val,
         cvr=cvr_val,
         daily_breakdown=breakdown,
+    )
+
+
+@router.get("/campaign/{campaign_id}/ad-set-reporting", response_model=AdSetReportingResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
+async def campaign_ad_set_reporting(
+    campaign_id: int,
+    user: User = Depends(verified_user),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> AdSetReportingResponse:
+    campaign = await _assert_campaign_access(user, campaign_id, session)
+    today = date.today()
+    start = start_date or today
+    end = end_date or today
+    if end < start:
+        raise HTTPException(status_code=422, detail="end_date must be on or after start_date")
+
+    start_dt = datetime.combine(start, datetime.min.time())
+    end_dt = datetime.combine(end, datetime.max.time())
+
+    ad_sets_result = await session.execute(
+        select(AdSet).where(AdSet.campaign_id == campaign_id).order_by(AdSet.id)
+    )
+    ad_sets = list(ad_sets_result.scalars().all())
+
+    events_query = (
+        select(
+            Creative.ad_set_id,
+            func.count().filter(AdEvent.event_type == 1).label('impressions'),
+            func.count().filter(AdEvent.event_type == 2).label('clicks'),
+            func.count().filter(AdEvent.event_type == 3).label('conversions'),
+            func.sum(AdEvent.cost).label('spend'),
+        )
+        .join(Creative, Creative.id == AdEvent.creative_id)
+        .where(
+            AdEvent.campaign_id == campaign_id,
+            AdEvent.event_time >= start_dt,
+            AdEvent.event_time <= end_dt,
+            Creative.ad_set_id.isnot(None),
+        )
+        .group_by(Creative.ad_set_id)
+    )
+    events_result = await session.execute(events_query)
+    ad_set_stats_map = {row.ad_set_id: row for row in events_result.all()}
+
+    ad_set_items: list[AdSetReportingItem] = []
+    total_impressions = 0
+    total_clicks = 0
+    total_conversions = 0
+    total_spend = Decimal("0")
+
+    for ad_set in ad_sets:
+        row = ad_set_stats_map.get(ad_set.id)
+        impr = int(row.impressions or 0) if row else 0
+        clk = int(row.clicks or 0) if row else 0
+        conv = int(row.conversions or 0) if row else 0
+        sp = Decimal(row.spend or 0) if row else Decimal("0")
+
+        ctr = (Decimal(clk) / Decimal(impr) * Decimal(100)) if impr else Decimal("0")
+        cvr = (Decimal(conv) / Decimal(clk) * Decimal(100)) if clk else Decimal("0")
+
+        ad_set_items.append(
+            AdSetReportingItem(
+                ad_set_id=ad_set.id,
+                ad_set_name=ad_set.name,
+                status=ad_set.status,
+                impressions=impr,
+                clicks=clk,
+                conversions=conv,
+                spend=sp,
+                ctr=ctr,
+                cvr=cvr,
+            )
+        )
+        total_impressions += impr
+        total_clicks += clk
+        total_conversions += conv
+        total_spend += sp
+
+    return AdSetReportingResponse(
+        campaign_id=campaign_id,
+        start_date=start,
+        end_date=end,
+        ad_sets=ad_set_items,
+        total_impressions=total_impressions,
+        total_clicks=total_clicks,
+        total_conversions=total_conversions,
+        total_spend=total_spend,
     )
 
 
@@ -1129,33 +1398,58 @@ async def update_suggestion_status(
     if payload.status not in ("APPLIED", "REJECTED"):
         raise HTTPException(status_code=400, detail="Invalid status transition")
         
-    result = await session.execute(
-        select(Suggestion).where(Suggestion.id == suggestion_id).with_for_update()
+    # 1. Peek suggestion and campaign without lock to determine advertiser ownership
+    result_peek = await session.execute(
+        select(Suggestion).where(Suggestion.id == suggestion_id)
     )
-    suggestion = result.scalar_one_or_none()
-    
-    if suggestion is None:
+    suggestion_peek = result_peek.scalar_one_or_none()
+    if suggestion_peek is None:
         raise _not_found("Suggestion", suggestion_id)
         
-    campaign = await session.get(Campaign, suggestion.campaign_id, with_for_update=True)
-    if campaign is None:
-        raise _not_found("Campaign", suggestion.campaign_id)
+    camp_peek = await session.get(Campaign, suggestion_peek.campaign_id)
+    if camp_peek is None:
+        raise _not_found("Campaign", suggestion_peek.campaign_id)
         
-    _assert_advertiser_access(user, campaign.advertiser_id)
+    _assert_advertiser_access(user, camp_peek.advertiser_id)
+
+    # 2. Acquire canonical row locks: Advertiser -> Campaign -> Suggestion
+    advertiser = await session.get(Advertiser, camp_peek.advertiser_id, with_for_update=True, populate_existing=True)
+    if advertiser is None:
+        raise _not_found("Advertiser", camp_peek.advertiser_id)
+
+    campaign = await session.get(Campaign, suggestion_peek.campaign_id, with_for_update=True, populate_existing=True)
+    if campaign is None or campaign.advertiser_id != advertiser.id:
+        raise _not_found("Campaign", suggestion_peek.campaign_id)
+
+    result = await session.execute(
+        select(Suggestion).where(Suggestion.id == suggestion_id).with_for_update().execution_options(populate_existing=True)
+    )
+    suggestion = result.scalar_one_or_none()
+    if suggestion is None:
+        raise _not_found("Suggestion", suggestion_id)
     
     if suggestion.status != "PENDING":
         raise HTTPException(status_code=400, detail="Suggestion is no longer PENDING")
         
     if payload.status == "REJECTED":
         suggestion.status = "REJECTED"
+        suggestion.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
         await session.commit()
         await session.refresh(suggestion)
         return suggestion
-        
+
+    action_name = suggestion.action.get("action")
+    if action_name == "improve_creative":
+        suggestion.status = "APPLIED"
+        suggestion.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        await session.commit()
+        await session.refresh(suggestion)
+        return suggestion
+
     policy_result = OptimizationPolicyResult(
         accepted=True,
         reason="Manual approval",
-        action=suggestion.action.get("action"),
+        action=action_name,
         confidence=suggestion.action.get("confidence", 1.0),
         autopilot=campaign.autopilot,
         proposed_budget_delta=suggestion.action.get("proposed_budget_delta"),
@@ -1168,13 +1462,16 @@ async def update_suggestion_status(
             campaign=campaign,
             policy_result=policy_result,
             action_payload=suggestion.action,
-            target_payload=suggestion.action.get("target_payload")
+            target_payload=suggestion.action.get("target_payload"),
+            actor=f"user:{user.id}",
+            enforce_cooldown=False,
+            auto_commit=False,
+            suggestion=suggestion,
         )
+        await session.commit()
     except Exception as e:
         await session.rollback()
         raise HTTPException(status_code=400, detail=str(e))
         
-    suggestion.status = "APPLIED"
-    await session.commit()
     await session.refresh(suggestion)
     return suggestion

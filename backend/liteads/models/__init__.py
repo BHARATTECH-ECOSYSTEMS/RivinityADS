@@ -5,6 +5,7 @@ Database models for LiteAds.
 from liteads.models.ad import (
     Advertiser,
     AdEvent,
+    AdSet,
     Campaign,
     CampaignAssignment,
     Creative,
@@ -12,13 +13,23 @@ from liteads.models.ad import (
     TargetingRule,
     Suggestion,
     CampaignChangeLog,
+    OptimizationDecision,
 )
 from liteads.models.geo import GeoLocation
 from liteads.models.publisher import AdSlot, Publisher, PublisherApiKey, PublisherDailyStat, PublisherProperty, ApiKeyDailyStat
 from liteads.models.auth import AuditLog, OneTimeToken, RefreshToken, User
 from liteads.models.finance import Transaction, PlatformSettings, PaymentRequest
-from liteads.models.webhook import Webhook
+from liteads.models.webhook import Webhook, WebhookDelivery
 from liteads.models.domain import AdvertiserDomain, VerificationStatus, VerificationMethod
+from liteads.models.notification import (
+    Notification,
+    NotificationPreference,
+    NotificationDelivery,
+    NotificationChannel,
+    NotificationSeverity,
+    NotificationCategory,
+    NotificationType,
+)
 from liteads.models.base import (
     Base,
     BidType,
@@ -44,6 +55,7 @@ __all__ = [
     # Models
     "Advertiser",
     "AdEvent",
+    "AdSet",
     "Campaign",
     "CampaignAssignment",
     "Creative",
@@ -64,9 +76,18 @@ __all__ = [
     "PlatformSettings",
     "PaymentRequest",
     "Webhook",
+    "WebhookDelivery",
     "Suggestion",
     "CampaignChangeLog",
+    "OptimizationDecision",
     "AdvertiserDomain",
     "VerificationStatus",
     "VerificationMethod",
+    "Notification",
+    "NotificationPreference",
+    "NotificationDelivery",
+    "NotificationChannel",
+    "NotificationSeverity",
+    "NotificationCategory",
+    "NotificationType",
 ]

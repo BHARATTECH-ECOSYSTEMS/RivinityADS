@@ -3,39 +3,55 @@ import {
   type GeoEntry,
   type TargetingSet,
   getCampaignTargeting,
-  getReferenceCities,
-  getReferenceCountries,
-  getReferencePincodes,
-  getReferenceSectors,
-  getReferenceStates,
   updateCampaignTargeting,
+  getAdSetTargeting,
+  updateAdSetTargeting,
+  getReferenceSectors,
+  formatGeoEntry,
 } from "../../api/client";
+import type { AdSet } from "../../types";
+import { Card, Button, Select, Alert, LoadingSkeleton } from "../../components/ui";
+import { TargetingGeoPanel } from "../../components/targeting/TargetingGeoPanel";
 
-export default function CampaignTargeting({ campaignId }: { campaignId: number }) {
+interface CampaignTargetingProps {
+  campaignId: number;
+  adSets?: AdSet[];
+}
+
+export default function CampaignTargeting({ campaignId, adSets = [] }: CampaignTargetingProps) {
+  const [selectedTargetScope, setSelectedTargetScope] = useState<"campaign" | number>(
+    adSets.length > 0 ? adSets[0].id : "campaign"
+  );
+
   const [targeting, setTargeting] = useState<TargetingSet | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
 
-  // Reference Data State
+  // Sector Reference Data State
   const [sectors, setSectors] = useState<string[]>([]);
-  const [countries, setCountries] = useState<string[]>([]);
-  const [states, setStates] = useState<{ code: string; name: string }[]>([]);
-  const [cities, setCities] = useState<string[]>([]);
-  const [pincodes, setPincodes] = useState<string[]>([]);
-
-  // Selection State
   const [selSector, setSelSector] = useState("");
-  const [selCountry, setSelCountry] = useState("");
-  const [selState, setSelState] = useState("");
-  const [selCity, setSelCity] = useState("");
-  const [selPincode, setSelPincode] = useState("");
 
   const loadTargeting = async () => {
+    setLoading(true);
+    setError(null);
+    setSuccessMessage(null);
     try {
-      const data = await getCampaignTargeting(campaignId);
-      setTargeting(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load targeting");
+      if (typeof selectedTargetScope === "number") {
+        const data = await getAdSetTargeting(selectedTargetScope);
+        setTargeting({
+          geo_include: data.geo_include || [],
+          geo_exclude: data.geo_exclude || [],
+          sector_include: data.sector_include || [],
+          sector_exclude: data.sector_exclude || [],
+        });
+      } else {
+        const data = await getCampaignTargeting(campaignId);
+        setTargeting(data);
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load targeting configuration");
     } finally {
       setLoading(false);
     }
@@ -43,48 +59,20 @@ export default function CampaignTargeting({ campaignId }: { campaignId: number }
 
   const loadReferences = async () => {
     try {
-      const [sData, cData] = await Promise.all([getReferenceSectors(), getReferenceCountries()]);
+      const sData = await getReferenceSectors();
       setSectors(sData);
-      setCountries(cData);
-    } catch (err) {
-      console.error(err);
+    } catch {
+      // Non-critical reference load failure
     }
   };
 
   useEffect(() => {
     void loadTargeting();
+  }, [campaignId, selectedTargetScope]);
+
+  useEffect(() => {
     void loadReferences();
-  }, [campaignId]);
-
-  useEffect(() => {
-    setSelState("");
-    setSelCity("");
-    setSelPincode("");
-    if (selCountry) {
-      void getReferenceStates(selCountry).then(setStates);
-    } else {
-      setStates([]);
-    }
-  }, [selCountry]);
-
-  useEffect(() => {
-    setSelCity("");
-    setSelPincode("");
-    if (selCountry && selState) {
-      void getReferenceCities(selCountry, selState).then(setCities);
-    } else {
-      setCities([]);
-    }
-  }, [selState]);
-
-  useEffect(() => {
-    setSelPincode("");
-    if (selCountry && selState && selCity) {
-      void getReferencePincodes(selCountry, selState, selCity).then(setPincodes);
-    } else {
-      setPincodes([]);
-    }
-  }, [selCity]);
+  }, []);
 
   const addSector = (type: "include" | "exclude") => {
     if (!selSector || !targeting) return;
@@ -101,139 +89,157 @@ export default function CampaignTargeting({ campaignId }: { campaignId: number }
     setTargeting({ ...targeting, [key]: targeting[key].filter((s) => s !== sector) });
   };
 
-  const addGeo = (type: "include" | "exclude") => {
-    if (!selCountry || !targeting) return;
-    const entry: GeoEntry = { country: selCountry };
-    if (selState) entry.state = selState;
-    if (selCity) entry.city = selCity;
-    if (selPincode) entry.pincode = selPincode;
-    
-    // Check if duplicate entry exists (rough stringification comparison)
-    const key = type === "include" ? "geo_include" : "geo_exclude";
-    const exists = targeting[key].some(e => JSON.stringify(e) === JSON.stringify(entry));
-    if (!exists) {
-       setTargeting({ ...targeting, [key]: [...targeting[key], entry] });
-    }
-    setSelCountry("");
-  };
-
-  const removeGeo = (type: "include" | "exclude", index: number) => {
-    if (!targeting) return;
-    const key = type === "include" ? "geo_include" : "geo_exclude";
-    const newArr = [...targeting[key]];
-    newArr.splice(index, 1);
-    setTargeting({ ...targeting, [key]: newArr });
-  };
-
-  const save = async (e: FormEvent) => {
+  const handleSave = async (e: FormEvent) => {
     e.preventDefault();
-    if (!targeting) return;
+    if (!targeting || saving) return;
+    setSaving(true);
+    setError(null);
+    setSuccessMessage(null);
     try {
-      setLoading(true);
-      await updateCampaignTargeting(campaignId, targeting);
-      setError(null);
-      alert("Targeting saved successfully!");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save targeting");
+      if (typeof selectedTargetScope === "number") {
+        await updateAdSetTargeting(selectedTargetScope, targeting);
+        setSuccessMessage("Ad Set targeting updated successfully!");
+      } else {
+        await updateCampaignTargeting(campaignId, targeting);
+        setSuccessMessage("Campaign targeting updated successfully!");
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to save targeting settings");
     } finally {
-      setLoading(false);
+      setSaving(false);
     }
   };
-
-  if (loading && !targeting) return <p className="muted">Loading targeting...</p>;
 
   return (
-    <div className="card">
-      <h2>Targeting</h2>
-      {error && <p className="error">{error}</p>}
-      
-      <div className="form-grid">
-        <div className="field">
-          <label>Sector Targeting</label>
-          <div style={{ display: "flex", gap: "10px", marginBottom: "10px" }}>
-            <select value={selSector} onChange={(e) => setSelSector(e.target.value)}>
-              <option value="">-- Select Sector --</option>
-              {sectors.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
-            <button type="button" className="btn small" onClick={() => addSector("include")}>Add to Include</button>
-            <button type="button" className="btn small secondary" onClick={() => addSector("exclude")}>Add to Exclude</button>
-          </div>
-          <div style={{ display: "flex", gap: "20px" }}>
-            <div>
-              <strong>Include:</strong>
-              <ul style={{ paddingLeft: "20px", marginTop: "5px" }}>
-                {targeting?.sector_include.map((s) => (
-                  <li key={s}>{s} <button type="button" onClick={() => removeSector("include", s)} style={{border: 'none', background: 'none', color: 'red', cursor: 'pointer'}}>x</button></li>
-                ))}
-              </ul>
-            </div>
-            <div>
-              <strong>Exclude:</strong>
-              <ul style={{ paddingLeft: "20px", marginTop: "5px" }}>
-                {targeting?.sector_exclude.map((s) => (
-                  <li key={s}>{s} <button type="button" onClick={() => removeSector("exclude", s)} style={{border: 'none', background: 'none', color: 'red', cursor: 'pointer'}}>x</button></li>
-                ))}
-              </ul>
-            </div>
-          </div>
+    <Card style={{ marginBottom: "var(--space-6)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "var(--space-4)" }}>
+        <div>
+          <h3 style={{ fontSize: "var(--font-size-base)", fontWeight: "var(--font-weight-semibold)", margin: "0 0 var(--space-1) 0" }}>
+            Audience & Delivery Targeting
+          </h3>
+          <p className="text-muted" style={{ fontSize: "var(--font-size-xs)", margin: 0 }}>
+            Configure granular geographic (administrative & hyperlocal radius) and contextual sector inclusions and exclusions.
+          </p>
         </div>
-      </div>
-      
-      <hr style={{ margin: "20px 0" }} />
 
-      <div className="form-grid">
-        <div className="field">
-          <label>Geo Targeting (Country &rarr; State &rarr; City &rarr; Pincode)</label>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "10px", marginBottom: "10px" }}>
-            <select value={selCountry} onChange={(e) => setSelCountry(e.target.value)}>
-              <option value="">-- Country --</option>
-              {countries.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-            <select value={selState} onChange={(e) => setSelState(e.target.value)} disabled={!selCountry || states.length === 0}>
-              <option value="">-- State --</option>
-              {states.map((s) => <option key={s.code} value={s.code}>{s.name} ({s.code})</option>)}
-            </select>
-            <select value={selCity} onChange={(e) => setSelCity(e.target.value)} disabled={!selState || cities.length === 0}>
-              <option value="">-- City --</option>
-              {cities.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-            <select value={selPincode} onChange={(e) => setSelPincode(e.target.value)} disabled={!selCity || pincodes.length === 0}>
-              <option value="">-- Pincode --</option>
-              {pincodes.map((p) => <option key={p} value={p}>{p}</option>)}
-            </select>
+        {adSets.length > 0 && (
+          <div style={{ minWidth: "220px" }}>
+            <Select
+              label="Targeting Scope"
+              value={String(selectedTargetScope)}
+              onChange={(e) => {
+                const val = e.target.value;
+                setSelectedTargetScope(val === "campaign" ? "campaign" : Number(val));
+              }}
+              options={[
+                ...adSets.map((a) => ({ value: String(a.id), label: `Ad Set: ${a.name}` })),
+                { value: "campaign", label: "Campaign Level (Legacy)" },
+              ]}
+            />
           </div>
-          <div style={{ display: "flex", gap: "10px", marginBottom: "15px" }}>
-            <button type="button" className="btn small" onClick={() => addGeo("include")}>Add to Include</button>
-            <button type="button" className="btn small secondary" onClick={() => addGeo("exclude")}>Add to Exclude</button>
-          </div>
-          <div style={{ display: "flex", gap: "20px", flexWrap: "wrap" }}>
-            <div style={{ flex: 1 }}>
-              <strong>Include:</strong>
-              <ul style={{ paddingLeft: "20px", marginTop: "5px" }}>
-                {targeting?.geo_include.map((g, idx) => (
-                  <li key={idx}>
-                    {g.country}{g.state ? `, ${g.state}` : ""}{g.city ? `, ${g.city}` : ""}{g.pincode ? ` (${g.pincode})` : ""}
-                    <button type="button" onClick={() => removeGeo("include", idx)} style={{border: 'none', background: 'none', color: 'red', cursor: 'pointer', marginLeft: "5px"}}>x</button>
-                  </li>
-                ))}
-              </ul>
-            </div>
-            <div style={{ flex: 1 }}>
-              <strong>Exclude:</strong>
-              <ul style={{ paddingLeft: "20px", marginTop: "5px" }}>
-                {targeting?.geo_exclude.map((g, idx) => (
-                  <li key={idx}>
-                    {g.country}{g.state ? `, ${g.state}` : ""}{g.city ? `, ${g.city}` : ""}{g.pincode ? ` (${g.pincode})` : ""}
-                    <button type="button" onClick={() => removeGeo("exclude", idx)} style={{border: 'none', background: 'none', color: 'red', cursor: 'pointer', marginLeft: "5px"}}>x</button>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        </div>
+        )}
       </div>
-      
-      <button className="btn" onClick={save} disabled={loading}>Save Targeting</button>
-    </div>
+
+      {error && (
+        <Alert variant="error" style={{ marginBottom: "var(--space-4)" }}>
+          {error}
+        </Alert>
+      )}
+
+      {successMessage && (
+        <Alert variant="success" style={{ marginBottom: "var(--space-4)" }}>
+          {successMessage}
+        </Alert>
+      )}
+
+      {loading && !targeting ? (
+        <LoadingSkeleton variant="rect" height={220} />
+      ) : targeting ? (
+        <form onSubmit={handleSave}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-6)", marginBottom: "var(--space-4)" }}>
+            {/* Geographic Targeting Panel (Administrative & Hyperlocal Radius) */}
+            <TargetingGeoPanel
+              geoInclude={targeting.geo_include}
+              geoExclude={targeting.geo_exclude}
+              onChange={(geo_include, geo_exclude) =>
+                setTargeting({ ...targeting, geo_include, geo_exclude })
+              }
+              disabled={saving}
+            />
+
+            {/* Sector / Contextual Targeting Panel */}
+            <div style={{ border: "1px solid var(--color-border)", borderRadius: "var(--radius-lg)", padding: "var(--space-4)" }}>
+              <h4 style={{ fontSize: "var(--font-size-sm)", fontWeight: "var(--font-weight-bold)", margin: "0 0 var(--space-3) 0" }}>
+                🎯 Sector & Contextual Matching
+              </h4>
+
+              <div style={{ marginBottom: "var(--space-3)" }}>
+                <Select
+                  label="Available Industry Sectors"
+                  value={selSector}
+                  onChange={(e) => setSelSector(e.target.value)}
+                  options={[{ value: "", label: "-- Choose a Sector --" }, ...sectors.map((s) => ({ value: s, label: s }))]}
+                />
+              </div>
+
+              <div style={{ display: "flex", gap: "var(--space-2)", marginBottom: "var(--space-3)" }}>
+                <Button variant="outline" size="sm" type="button" disabled={!selSector} onClick={() => addSector("include")}>
+                  + Include Sector
+                </Button>
+                <Button variant="outline" size="sm" type="button" disabled={!selSector} onClick={() => addSector("exclude")}>
+                  - Exclude Sector
+                </Button>
+              </div>
+
+              <div style={{ marginBottom: "var(--space-3)" }}>
+                <div style={{ fontSize: "var(--font-size-xs)", fontWeight: "var(--font-weight-medium)", color: "var(--color-success-text)" }}>
+                  Included Sectors ({targeting.sector_include.length})
+                </div>
+                <div className="chips-wrap">
+                  {targeting.sector_include.length === 0 && (
+                    <span className="text-muted" style={{ fontSize: "var(--font-size-xs)" }}>
+                      Unrestricted (All publisher contexts)
+                    </span>
+                  )}
+                  {targeting.sector_include.map((sec) => (
+                    <span key={sec} className="chip chip-include">
+                      {sec}
+                      <button type="button" className="chip-remove" onClick={() => removeSector("include", sec)}>
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <div style={{ fontSize: "var(--font-size-xs)", fontWeight: "var(--font-weight-medium)", color: "var(--color-error-text)" }}>
+                  Excluded Sectors ({targeting.sector_exclude.length})
+                </div>
+                <div className="chips-wrap">
+                  {targeting.sector_exclude.length === 0 && (
+                    <span className="text-muted" style={{ fontSize: "var(--font-size-xs)" }}>None</span>
+                  )}
+                  {targeting.sector_exclude.map((sec) => (
+                    <span key={sec} className="chip chip-exclude">
+                      {sec}
+                      <button type="button" className="chip-remove" onClick={() => removeSector("exclude", sec)}>
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <Button type="submit" variant="primary" isLoading={saving} disabled={saving}>
+              Save Targeting Configuration
+            </Button>
+          </div>
+        </form>
+      ) : null}
+    </Card>
   );
 }

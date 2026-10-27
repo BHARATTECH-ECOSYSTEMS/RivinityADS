@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from liteads.common.security import hash_password, token_digest
 from liteads.models.auth import AuditLog, OneTimeToken, RefreshToken, User
+from liteads.models.notification import Notification, NotificationDelivery, NotificationPreference
 
 
 class MockRedisPipeline:
@@ -311,12 +312,11 @@ async def test_reset_password_success_workflow(client: AsyncClient, test_db: Asy
             json={"email": "full_flow@example.com", "password": "OldPassword123!"},
         )
         assert login_res.status_code == 200
+        old_access_token = login_res.json()["access_token"]
         refresh_cookie = login_res.cookies.get("refresh_token")
 
     # Complete password reset
-    with patch("liteads.ad_server.routers.auth.send_email", new_callable=AsyncMock) as mock_security_send, \
-         patch("liteads.ad_server.routers.auth.check_password_reset_completion_rate_limit"):
-
+    with patch("liteads.ad_server.routers.auth.check_password_reset_completion_rate_limit"):
         reset_res = await client.post(
             "/api/v1/auth/reset-password",
             json={
@@ -327,11 +327,6 @@ async def test_reset_password_success_workflow(client: AsyncClient, test_db: Asy
         assert reset_res.status_code == 200
         assert reset_res.json()["message"] == "Password reset"
 
-        # Security notification email was sent
-        assert mock_security_send.call_count == 1
-        assert "Security Alert" in mock_security_send.call_args[1]["subject"]
-        assert mock_security_send.call_args[1]["to_address"] == "full_flow@example.com"
-
     # Verify token is now marked used
     user = await test_db.scalar(select(User).where(User.email == "full_flow@example.com"))
     token_record = await test_db.scalar(
@@ -340,6 +335,43 @@ async def test_reset_password_success_workflow(client: AsyncClient, test_db: Asy
         )
     )
     assert token_record.used_at is not None
+
+    # Verify durable in-app security notification and outbox delivery were created
+    notif = await test_db.scalar(
+        select(Notification).where(
+            Notification.user_id == user.id,
+            Notification.category == "security",
+        )
+    )
+    assert notif is not None
+    assert notif.type == "password_reset_confirmation"
+    assert notif.severity == "warning"
+    assert notif.is_read is False
+    assert notif.link == "/login"
+    assert notif.title == "Password Changed"
+    assert notif.dedupe_key == f"pwd_reset:{user.id}:{token_record.id}"
+
+    delivery = await test_db.scalar(
+        select(NotificationDelivery).where(
+            NotificationDelivery.notification_id == notif.id,
+        )
+    )
+    assert delivery is not None
+    assert delivery.user_id == user.id
+    assert delivery.recipient_email == "full_flow@example.com"
+    assert delivery.channel == "email"
+    assert "Security Alert" in delivery.subject
+    assert delivery.status == "pending"
+
+    # SEC-03: Verify password_changed_at is recorded
+    assert user.password_changed_at is not None
+
+    # SEC-03: Verify access token issued before reset is immediately rejected (HTTP 401)
+    old_access_res = await client.post(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {old_access_token}"},
+    )
+    assert old_access_res.status_code == 401
 
     # Verify refresh tokens are revoked
     refresh_tokens = (
@@ -369,6 +401,15 @@ async def test_reset_password_success_workflow(client: AsyncClient, test_db: Asy
             json={"email": "full_flow@example.com", "password": "BrandNewPassword123!"},
         )
         assert new_login_res.status_code == 200
+        new_access_token = new_login_res.json()["access_token"]
+
+    # SEC-03: Verify newly issued access token is accepted (HTTP 200)
+    new_access_res = await client.post(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {new_access_token}"},
+    )
+    assert new_access_res.status_code == 200
+    assert new_access_res.json()["email"] == "full_flow@example.com"
 
     # Verify AuditLog was recorded
     audit_log = await test_db.scalar(
@@ -583,3 +624,264 @@ async def test_reset_password_password_length_validation(client: AsyncClient):
         json={"token": "some_token", "password": "short"},
     )
     assert res.status_code == 422
+
+
+# ── 3. WU6.7 Password-Reset Notification & Outbox Tests ───────────────────────
+
+@pytest.mark.asyncio
+async def test_reset_password_mandatory_security_delivery_ignores_disabled_preference(client: AsyncClient, test_db: AsyncSession):
+    """Mandatory security notifications cannot be suppressed by user opt-out preferences."""
+    # 1. Register user
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "name": "Security Pref User",
+            "email": "sec_pref@example.com",
+            "password": "InitialPassword123!",
+            "role": "advertiser",
+        },
+    )
+    user = await test_db.scalar(select(User).where(User.email == "sec_pref@example.com"))
+
+    # 2. Add an explicit disabled preference for security emails
+    pref = NotificationPreference(
+        user_id=user.id,
+        channel="email",
+        category="security",
+        is_enabled=False,
+    )
+    test_db.add(pref)
+    await test_db.commit()
+
+    # 3. Request password reset
+    captured_token = None
+    with patch("liteads.ad_server.routers.auth.send_email") as mock_send, \
+         patch("liteads.ad_server.routers.auth.check_password_reset_request_rate_limit"):
+        await client.post(
+            "/api/v1/auth/request-password-reset",
+            json={"email": "sec_pref@example.com"},
+        )
+        email_body = mock_send.call_args[1]["text_content"]
+        import re
+        match = re.search(r"token=([a-zA-Z0-9_\-]+)", email_body)
+        captured_token = match.group(1)
+
+    # 4. Complete reset
+    with patch("liteads.ad_server.routers.auth.check_password_reset_completion_rate_limit"):
+        res = await client.post(
+            "/api/v1/auth/reset-password",
+            json={
+                "token": captured_token,
+                "password": "UpdatedPassword123!",
+            },
+        )
+        assert res.status_code == 200
+
+    # 5. Verify in-app notification was created
+    notif = await test_db.scalar(
+        select(Notification).where(
+            Notification.user_id == user.id,
+            Notification.category == "security",
+        )
+    )
+    assert notif is not None
+    assert notif.type == "password_reset_confirmation"
+
+    # 6. Verify email outbox job was queued despite the disabled preference (mandatory rule)
+    delivery = await test_db.scalar(
+        select(NotificationDelivery).where(
+            NotificationDelivery.notification_id == notif.id,
+        )
+    )
+    assert delivery is not None
+    assert delivery.user_id == user.id
+    assert delivery.recipient_email == "sec_pref@example.com"
+    assert delivery.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_reset_password_failed_attempts_create_no_notifications(client: AsyncClient, test_db: AsyncSession):
+    """Failed reset attempts (invalid token, expired token, wrong purpose) create no notifications or outbox jobs."""
+    # 1. Invalid token attempt
+    with patch("liteads.ad_server.routers.auth.check_password_reset_completion_rate_limit"):
+        res = await client.post(
+            "/api/v1/auth/reset-password",
+            json={"token": "totally_invalid_token", "password": "ValidPassword123!"},
+        )
+        assert res.status_code == 400
+
+    # Setup user
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "name": "Fail Test User",
+            "email": "fail_test@example.com",
+            "password": "Password1234!",
+            "role": "advertiser",
+        },
+    )
+    user = await test_db.scalar(select(User).where(User.email == "fail_test@example.com"))
+
+    # 2. Expired token attempt
+    now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+    expired_token = "expired_raw_token_xyz"
+    test_db.add(
+        OneTimeToken(
+            user_id=user.id,
+            token_hash=token_digest(expired_token),
+            purpose="password_reset",
+            expires_at=now_naive - timedelta(hours=1),
+        )
+    )
+    # 3. Wrong purpose token attempt
+    wrong_purpose_token = "wrong_purpose_raw_token_xyz"
+    test_db.add(
+        OneTimeToken(
+            user_id=user.id,
+            token_hash=token_digest(wrong_purpose_token),
+            purpose="email_verification",
+            expires_at=now_naive + timedelta(hours=24),
+        )
+    )
+    await test_db.commit()
+
+    with patch("liteads.ad_server.routers.auth.check_password_reset_completion_rate_limit"):
+        res_expired = await client.post(
+            "/api/v1/auth/reset-password",
+            json={"token": expired_token, "password": "ValidPassword123!"},
+        )
+        assert res_expired.status_code == 400
+
+        res_wrong = await client.post(
+            "/api/v1/auth/reset-password",
+            json={"token": wrong_purpose_token, "password": "ValidPassword123!"},
+        )
+        assert res_wrong.status_code == 400
+
+    # Assert ZERO notifications and ZERO outbox jobs were created for the user
+    user_notifs = (await test_db.scalars(select(Notification).where(Notification.user_id == user.id))).all()
+    assert len(user_notifs) == 0
+
+    user_deliveries = (await test_db.scalars(select(NotificationDelivery).where(NotificationDelivery.user_id == user.id))).all()
+    assert len(user_deliveries) == 0
+
+
+@pytest.mark.asyncio
+async def test_reset_password_token_reuse_prevents_duplicate_notification(client: AsyncClient, test_db: AsyncSession):
+    """Reusing a consumed token fails and produces no duplicate notification."""
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "name": "Reuse Test User",
+            "email": "reuse_test@example.com",
+            "password": "OriginalPassword123!",
+            "role": "advertiser",
+        },
+    )
+    user = await test_db.scalar(select(User).where(User.email == "reuse_test@example.com"))
+
+    # Request reset token
+    captured_token = None
+    with patch("liteads.ad_server.routers.auth.send_email") as mock_send, \
+         patch("liteads.ad_server.routers.auth.check_password_reset_request_rate_limit"):
+        await client.post(
+            "/api/v1/auth/request-password-reset",
+            json={"email": "reuse_test@example.com"},
+        )
+        email_body = mock_send.call_args[1]["text_content"]
+        import re
+        match = re.search(r"token=([a-zA-Z0-9_\-]+)", email_body)
+        captured_token = match.group(1)
+
+    # First consumption succeeds
+    with patch("liteads.ad_server.routers.auth.check_password_reset_completion_rate_limit"):
+        res1 = await client.post(
+            "/api/v1/auth/reset-password",
+            json={"token": captured_token, "password": "FirstNewPassword123!"},
+        )
+        assert res1.status_code == 200
+
+    # Exactly 1 notification and 1 delivery exist
+    notifs1 = (await test_db.scalars(select(Notification).where(Notification.user_id == user.id))).all()
+    deliveries1 = (await test_db.scalars(select(NotificationDelivery).where(NotificationDelivery.user_id == user.id))).all()
+    assert len(notifs1) == 1
+    assert len(deliveries1) == 1
+
+    # Second consumption attempt with the same token must fail
+    with patch("liteads.ad_server.routers.auth.check_password_reset_completion_rate_limit"):
+        res2 = await client.post(
+            "/api/v1/auth/reset-password",
+            json={"token": captured_token, "password": "SecondNewPassword123!"},
+        )
+        assert res2.status_code == 400
+        assert res2.json()["detail"] == "Reset token is invalid"
+
+    # Count remains exactly 1 (no duplicate notification created)
+    notifs2 = (await test_db.scalars(select(Notification).where(Notification.user_id == user.id))).all()
+    deliveries2 = (await test_db.scalars(select(NotificationDelivery).where(NotificationDelivery.user_id == user.id))).all()
+    assert len(notifs2) == 1
+    assert len(deliveries2) == 1
+
+
+@pytest.mark.asyncio
+async def test_reset_password_atomic_rollback_on_notification_failure(client: AsyncClient, test_db: AsyncSession):
+    """If notification creation fails, the entire transaction rolls back consistently."""
+    await client.post(
+        "/api/v1/auth/register",
+        json={
+            "name": "Rollback Test User",
+            "email": "rollback_test@example.com",
+            "password": "InitialPassword123!",
+            "role": "advertiser",
+        },
+    )
+    user = await test_db.scalar(select(User).where(User.email == "rollback_test@example.com"))
+    target_user_id = user.id
+
+    # Request reset token
+    captured_token = None
+    with patch("liteads.ad_server.routers.auth.send_email") as mock_send, \
+         patch("liteads.ad_server.routers.auth.check_password_reset_request_rate_limit"):
+        await client.post(
+            "/api/v1/auth/request-password-reset",
+            json={"email": "rollback_test@example.com"},
+        )
+        email_body = mock_send.call_args[1]["text_content"]
+        import re
+        match = re.search(r"token=([a-zA-Z0-9_\-]+)", email_body)
+        captured_token = match.group(1)
+
+    # Patch NotificationService.create_notification to raise an exception
+    with patch("liteads.ad_server.routers.auth.check_password_reset_completion_rate_limit"), \
+         patch("liteads.ad_server.services.notification_service.NotificationService.create_notification", side_effect=RuntimeError("Simulated database failure during notification dispatch")):
+        res = await client.post(
+            "/api/v1/auth/reset-password",
+            json={"token": captured_token, "password": "ShouldRollbackPassword123!"},
+        )
+        assert res.status_code == 500
+        assert "An error occurred while finalizing password reset" in res.json()["detail"]
+
+    # Verify rollback: token is NOT marked as used
+    token_record = await test_db.scalar(
+        select(OneTimeToken).where(
+            OneTimeToken.token_hash == token_digest(captured_token),
+        )
+    )
+    assert token_record.used_at is None
+
+    # Verify rollback: password_changed_at is still None
+    refreshed_user = await test_db.scalar(select(User).where(User.id == target_user_id))
+    assert refreshed_user.password_changed_at is None
+
+    # Verify rollback: user can still log in with the OLD password
+    with patch("liteads.ad_server.routers.auth.check_login_rate_limit"):
+        login_res = await client.post(
+            "/api/v1/auth/login",
+            json={"email": "rollback_test@example.com", "password": "InitialPassword123!"},
+        )
+        assert login_res.status_code == 200
+
+    # Verify rollback: no notifications or deliveries exist
+    notifs = (await test_db.scalars(select(Notification).where(Notification.user_id == target_user_id))).all()
+    assert len(notifs) == 0
+

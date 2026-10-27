@@ -16,12 +16,20 @@ export interface UserContextPayload { id?: string; sector_context?: string[]; ge
 export interface AdRequestPayload { slot_id: string; user_id?: string; user?: UserContextPayload; device?: DeviceInfo; geo?: GeoInfo; num_ads?: number; format?: number; }
 export interface CreativeResponse { title?: string; description?: string; image_url?: string; video_url?: string; landing_url: string; width?: number; height?: number; creative_type: string; }
 export interface TrackingUrls { impression_url: string; click_url: string; conversion_url?: string; }
-export interface AdResponse { ad_id: string; campaign_id: number; creative_id: number; creative: CreativeResponse; tracking: TrackingUrls; sponsored: boolean; disclosure_label: string; metadata?: { ecpm?: number; pctr?: number } | null; }
+export interface AdResponse { ad_id: string; campaign_id: number; creative_id: number; ad_set_id?: number | null; creative: CreativeResponse; tracking: TrackingUrls; sponsored: boolean; disclosure_label: string; metadata?: { ecpm?: number; pctr?: number } | null; }
 export interface AdListResponse { request_id: string; ads: AdResponse[]; count: number; }
 export interface HealthResponse { status: string; version: string; database: boolean; redis: boolean; }
 export interface Advertiser { id: number; name: string; company?: string; contact_email?: string; balance: number; daily_budget: number; status: number; }
 export interface Campaign { id: number; advertiser_id: number; name: string; description?: string; budget_daily: number; budget_total: number; spent_today: number; spent_total: number; bid_type: number; bid_amount: number; freq_cap_daily: number; freq_cap_hourly: number; start_time?: string; end_time?: string; status: number; autopilot: boolean; impressions: number; clicks: number; conversions: number; }
-export interface Creative { id: number; campaign_id: number; title: string; description?: string; image_url?: string; video_url?: string; landing_url: string; creative_type: number; width: number; height: number; status: number; quality_score: number; }
+export interface AdSet { id: number; campaign_id: number; name: string; status: number; daily_budget?: number | null; bid_type: number; bid_amount: number; start_time?: string | null; end_time?: string | null; freq_cap_daily?: number | null; freq_cap_hourly?: number | null; delivery_mode: string; targeting_summary?: Record<string, any> | null; created_at: string; updated_at: string; }
+export interface AdSetCreateInput { name: string; status?: number; daily_budget?: number | null; bid_type?: number; bid_amount?: number; start_time?: string | null; end_time?: string | null; freq_cap_daily?: number | null; freq_cap_hourly?: number | null; delivery_mode?: string; targeting_summary?: Record<string, any> | null; }
+export interface AdSetUpdateInput { name?: string; status?: number; daily_budget?: number | null; bid_type?: number; bid_amount?: number; start_time?: string | null; end_time?: string | null; freq_cap_daily?: number | null; freq_cap_hourly?: number | null; delivery_mode?: string; targeting_summary?: Record<string, any> | null; }
+import type { GeoEntry } from "./api/client";
+
+export interface AdSetTargetingResponse { ad_set_id: number; campaign_id: number; geo_include?: GeoEntry[]; geo_exclude?: GeoEntry[]; sector_include?: string[]; sector_exclude?: string[]; }
+export interface AdSetReportingItem { ad_set_id: number; ad_set_name: string; status: number; impressions: number; clicks: number; conversions: number; spend: number; ctr: number; cvr: number; }
+export interface AdSetReportingResponse { campaign_id: number; start_date: string; end_date: string; ad_sets: AdSetReportingItem[]; total_impressions: number; total_clicks: number; total_conversions: number; total_spend: number; }
+export interface Creative { id: number; campaign_id: number; ad_set_id?: number | null; title: string; description?: string; image_url?: string; video_url?: string; landing_url: string; creative_type: number; width: number; height: number; status: number; quality_score: number; moderation_status?: number; moderation_reason?: string | null; }
 export interface Publisher { id: number; name: string; email?: string; site_url?: string; status: number; is_sandbox: boolean; }
 export interface AdSlot { id: number; publisher_id: number; slot_id: string; name: string; format: number; width: number; height: number; status: number; is_chat_surface: boolean; ecpm_today?: number; }
 export interface SuggestionAction {
@@ -51,7 +59,74 @@ export interface ChatResponse {
   intent: string;
   tool_status: string | null;
   payload: Record<string, unknown> | null;
+  current_campaign_id?: number | null;
+  current_ad_set_id?: number | null;
+  current_step?: string | null;
 }
+
+// Notification Types (Phase 6)
+export type NotificationChannel = "in_app" | "email";
+export type NotificationSeverity = "info" | "warning" | "error" | "success";
+export type NotificationCategory =
+  | "billing"
+  | "campaign"
+  | "creative"
+  | "optimization"
+  | "domain"
+  | "security"
+  | "publisher"
+  | "system"
+  | "webhook";
+
+export interface NotificationItem {
+  id: number;
+  category: NotificationCategory | string;
+  type: string;
+  channel: string;
+  severity: NotificationSeverity | string;
+  title: string;
+  message: string;
+  link: string | null;
+  resource_type: string | null;
+  resource_id: string | null;
+  is_read: boolean;
+  read_at: string | null;
+  created_at: string;
+}
+
+export interface NotificationListResponse {
+  items: NotificationItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  unread_count: number;
+}
+
+export interface UnreadCountResponse {
+  unread_count: number;
+}
+
+export interface MarkAllReadResponse {
+  updated_count: number;
+}
+
+export interface NotificationPreferenceItem {
+  channel: NotificationChannel | string;
+  category: NotificationCategory | string;
+  is_enabled: boolean;
+}
+
+export type NotificationResponse = NotificationItem;
+
+export interface NotificationPreferenceUpdateRequest {
+  preferences: NotificationPreferenceItem[];
+}
+
+export interface NotificationPreferenceListResponse {
+  preferences: NotificationPreferenceItem[];
+}
+
 
 declare global {
   interface Window {

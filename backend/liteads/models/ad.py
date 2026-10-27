@@ -1,7 +1,7 @@
 """
 Ad-related database models.
 
-Defines: Advertiser, Campaign, Creative, TargetingRule, HourlyStat
+Defines: Advertiser, Campaign, AdSet, Creative, TargetingRule, HourlyStat
 """
 
 from datetime import datetime
@@ -10,16 +10,19 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     func,
+    text,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from liteads.models.base import (
     Base,
@@ -91,6 +94,9 @@ class Campaign(Base, TimestampMixin):
     autopilot: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, server_default="false"
     )
+    optimization_fencing_token: Mapped[int] = mapped_column(
+        BigInteger, default=0, nullable=False, server_default="0"
+    )
 
     # Stats (cached)
     impressions: Mapped[int] = mapped_column(Integer, default=0)
@@ -110,10 +116,72 @@ class Campaign(Base, TimestampMixin):
     assignments: Mapped[list["CampaignAssignment"]] = relationship(
         "CampaignAssignment", back_populates="campaign", lazy="selectin", cascade="all, delete-orphan"
     )
+    ad_sets: Mapped[list["AdSet"]] = relationship(
+        "AdSet", back_populates="campaign", lazy="selectin", cascade="all, delete-orphan"
+    )
 
     @property
     def is_active(self) -> bool:
         """Return whether the campaign is currently eligible to serve."""
+        reference_time = self.start_time or self.end_time
+        now = datetime.now(reference_time.tzinfo) if reference_time else datetime.now()
+        return (
+            self.status == Status.ACTIVE
+            and (self.start_time is None or self.start_time <= now)
+            and (self.end_time is None or self.end_time >= now)
+        )
+
+
+class AdSet(Base, TimestampMixin):
+    """
+    Ad set belonging to a campaign (Phase 7A).
+
+    Represents the grouping layer between Campaign and Ads (Creatives),
+    controlling sub-budgets, bidding, schedules, frequency caps, and targeting.
+    """
+
+    __tablename__ = "ad_sets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    campaign_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[int] = mapped_column(Integer, default=Status.ACTIVE, nullable=False)
+
+    # Sub-budget (sub-limit of campaign.budget_daily)
+    daily_budget: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
+
+    # Bidding
+    bid_type: Mapped[int] = mapped_column(Integer, default=BidType.CPM, nullable=False)
+    bid_amount: Mapped[Decimal] = mapped_column(Numeric(12, 4), default=Decimal("0"), nullable=False)
+
+    # Schedule
+    start_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    end_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # Frequency cap
+    freq_cap_daily: Mapped[int | None] = mapped_column(Integer, default=10, nullable=True)
+    freq_cap_hourly: Mapped[int | None] = mapped_column(Integer, default=3, nullable=True)
+
+    # Delivery & configuration
+    delivery_mode: Mapped[str] = mapped_column(
+        String(32), default="standard", server_default="standard", nullable=False
+    )
+    targeting_summary: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    # Relationships
+    campaign: Mapped["Campaign"] = relationship("Campaign", back_populates="ad_sets")
+    creatives: Mapped[list["Creative"]] = relationship(
+        "Creative", back_populates="ad_set", lazy="selectin"
+    )
+    targeting_rules: Mapped[list["TargetingRule"]] = relationship(
+        "TargetingRule", back_populates="ad_set", lazy="selectin", cascade="all, delete-orphan"
+    )
+
+    @property
+    def is_active(self) -> bool:
+        """Return whether the ad set is currently eligible to serve."""
         reference_time = self.start_time or self.end_time
         now = datetime.now(reference_time.tzinfo) if reference_time else datetime.now()
         return (
@@ -131,6 +199,9 @@ class Creative(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     campaign_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("campaigns.id"), nullable=False
+    )
+    ad_set_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("ad_sets.id", ondelete="SET NULL"), nullable=True, index=True
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -160,6 +231,18 @@ class Creative(Base, TimestampMixin):
 
     # Relationships
     campaign: Mapped["Campaign"] = relationship("Campaign", back_populates="creatives")
+    ad_set: Mapped["AdSet | None"] = relationship("AdSet", back_populates="creatives")
+
+    @validates("ad_set")
+    def validate_ad_set(self, key: str, ad_set: Any) -> Any:
+        if ad_set is not None:
+            if self.campaign_id is not None and ad_set.campaign_id is not None:
+                if self.campaign_id != ad_set.campaign_id:
+                    raise ValueError(
+                        f"Creative campaign_id ({self.campaign_id}) does not match "
+                        f"AdSet campaign_id ({ad_set.campaign_id})"
+                    )
+        return ad_set
 
 
 class TargetingRule(Base, TimestampMixin):
@@ -170,6 +253,9 @@ class TargetingRule(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     campaign_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("campaigns.id"), nullable=False
+    )
+    ad_set_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("ad_sets.id", ondelete="CASCADE"), nullable=True, index=True
     )
 
     # Rule type: geo, device, age, gender, interest, app_category, time, etc.
@@ -190,6 +276,18 @@ class TargetingRule(Base, TimestampMixin):
     campaign: Mapped["Campaign"] = relationship(
         "Campaign", back_populates="targeting_rules"
     )
+    ad_set: Mapped["AdSet | None"] = relationship("AdSet", back_populates="targeting_rules")
+
+    @validates("ad_set")
+    def validate_ad_set(self, key: str, ad_set: Any) -> Any:
+        if ad_set is not None:
+            if self.campaign_id is not None and ad_set.campaign_id is not None:
+                if self.campaign_id != ad_set.campaign_id:
+                    raise ValueError(
+                        f"TargetingRule campaign_id ({self.campaign_id}) does not match "
+                        f"AdSet campaign_id ({ad_set.campaign_id})"
+                    )
+        return ad_set
 
 
 class HourlyStat(Base):
@@ -233,6 +331,9 @@ class AdEvent(Base, TimestampMixin):
     cost: Mapped[Decimal] = mapped_column(
         Numeric(10, 6), default=Decimal("0"), nullable=False
     )
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(128), unique=True, index=True, nullable=True
+    )
 
 
 class CampaignAssignment(Base, TimestampMixin):
@@ -260,6 +361,16 @@ class Suggestion(Base, TimestampMixin):
     """Autonomous optimization suggestion generated by Laya."""
 
     __tablename__ = "suggestions"
+    __table_args__ = (
+        Index(
+            "uq_suggestions_pending_dedup",
+            "campaign_id",
+            "dedup_key",
+            unique=True,
+            postgresql_where=text("status = 'PENDING'"),
+            sqlite_where=text("status = 'PENDING'"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     campaign_id: Mapped[int] = mapped_column(
@@ -267,6 +378,7 @@ class Suggestion(Base, TimestampMixin):
     )
     action: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False, server_default="PENDING", default="PENDING")
+    dedup_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
 
 
 class CampaignChangeLog(Base, TimestampMixin):
@@ -279,3 +391,27 @@ class CampaignChangeLog(Base, TimestampMixin):
         Integer, ForeignKey("campaigns.id"), nullable=False
     )
     action: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
+class OptimizationDecision(Base, TimestampMixin):
+    """Audit log of campaign optimization decisions and actions (Phase 5)."""
+
+    __tablename__ = "optimization_decisions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    decision_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    campaign_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    action: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(5, 4), nullable=True)
+    policy_version: Mapped[str] = mapped_column(String(32), nullable=False, default="v1.0")
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)  # applied, suggested, shadow_logged, rejected, failed
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    change_applied: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    actor: Mapped[str] = mapped_column(String(64), nullable=False, default="system_optimizer")
+    execution_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    fencing_token: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

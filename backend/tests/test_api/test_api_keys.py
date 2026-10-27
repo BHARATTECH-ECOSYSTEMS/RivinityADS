@@ -9,7 +9,7 @@ from liteads.ad_server.main import app
 async def auth_override(test_db):
     from liteads.common.security import current_user
     async def mock_user():
-        return User(id=1, role="admin", email="admin@test.com")
+        return User(id=1, role="admin", email="admin@test.com", is_active=True, email_verified=True)
     app.dependency_overrides[current_user] = mock_user
     
     publisher = Publisher(id=1, name="test_pub", status=1)

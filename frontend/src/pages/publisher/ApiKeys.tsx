@@ -8,21 +8,38 @@ import {
 } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import { dateString } from "../../lib/format";
+import {
+  PageContainer,
+  PageHeader,
+  Card,
+  Button,
+  StatusBadge,
+  Alert,
+  LoadingSkeleton,
+  EmptyState,
+  ConfirmDialog
+} from "../../components/ui";
 
 export default function PublisherApiKeys() {
   const { session } = useAuth();
   const [keysUsage, setKeysUsage] = useState<ApiKeyUsageResponse[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<string | null>(null);
   
   // Creation form state
   const [name, setName] = useState("");
   const [isSandbox, setIsSandbox] = useState(false);
   const [rateLimit, setRateLimit] = useState(60);
   const [dailyQuota, setDailyQuota] = useState(10000);
+  const [creating, setCreating] = useState(false);
   const [newKeyData, setNewKeyData] = useState<ApiKeyCreateResponse | null>(null);
   const [selectedKey, setSelectedKey] = useState<ApiKeyUsageResponse | null>(null);
+
+  // Revoke confirmation state
+  const [keyToRevoke, setKeyToRevoke] = useState<ApiKeyUsageResponse | null>(null);
+  const [revoking, setRevoking] = useState(false);
+  const [copiedKey, setCopiedKey] = useState(false);
 
   const publisherId = session?.user?.publisher_id;
 
@@ -33,7 +50,7 @@ export default function PublisherApiKeys() {
       else setLoading(true);
       const data = await getPublisherKeysUsage(publisherId);
       setKeysUsage(data);
-      setError("");
+      setError(null);
     } catch (err: any) {
       setError(err.message || "Failed to load API keys and usage");
     } finally {
@@ -42,14 +59,18 @@ export default function PublisherApiKeys() {
     }
   };
 
-  useEffect(() => { void loadData(); }, [publisherId]);
+  useEffect(() => { 
+    void loadData(); 
+  }, [publisherId]);
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!publisherId) return;
+    setCreating(true);
+    setError(null);
     try {
       const res = await createPublisherApiKey(publisherId, {
-        name: name.trim() || "Default Key",
+        name: name.trim() || "Production API Key",
         is_sandbox: isSandbox,
         rate_limit_per_minute: Number(rateLimit) || 60,
         daily_quota: Number(dailyQuota) || 10000,
@@ -61,275 +82,217 @@ export default function PublisherApiKeys() {
       setDailyQuota(10000);
       await loadData();
     } catch (err: any) {
-      alert(err.message || "Failed to create API key");
+      setError(err.message || "Failed to create API key");
+    } finally {
+      setCreating(false);
     }
   };
 
-  const handleRevoke = async (keyId: number) => {
-    if (!publisherId) return;
-    if (!confirm("Are you sure you want to revoke this key? Any server integrations using it will immediately fail.")) return;
+  const confirmRevoke = async () => {
+    if (!publisherId || !keyToRevoke) return;
+    setRevoking(true);
     try {
-      await revokePublisherApiKey(publisherId, keyId);
-      await loadData();
-      if (selectedKey && selectedKey.key_id === keyId) {
+      await revokePublisherApiKey(publisherId, keyToRevoke.key_id);
+      setKeyToRevoke(null);
+      if (selectedKey && selectedKey.key_id === keyToRevoke.key_id) {
         setSelectedKey(null);
       }
+      await loadData();
     } catch (err: any) {
-      alert("Failed to revoke API key");
+      setError(err.message || "Failed to revoke API key");
+    } finally {
+      setRevoking(false);
     }
   };
 
-  const copyKey = () => {
+  const copyKey = async () => {
     if (newKeyData) {
-      navigator.clipboard.writeText(newKeyData.raw_key);
-      alert("Copied raw API key to clipboard!");
+      try {
+        await navigator.clipboard.writeText(newKeyData.raw_key);
+        setCopiedKey(true);
+        setTimeout(() => setCopiedKey(false), 2500);
+      } catch {
+        // Clipboard failed
+      }
     }
   };
-
-  if (loading) return <div><p className="muted">Loading API Keys and Quotas...</p></div>;
 
   return (
-    <div>
-      <div className="flex row space-between align-center" style={{ marginBottom: "24px" }}>
-        <div>
-          <h1>API Keys & Usage Quotas</h1>
-          <p className="muted">
-            Manage cryptographic server-to-server API keys, track real-time rate limits, and monitor daily request quotas.
-          </p>
-        </div>
-        <button 
-          className="btn secondary" 
-          onClick={() => void loadData(true)} 
-          disabled={refreshing}
-          style={{ display: "flex", alignItems: "center", gap: "8px" }}
-        >
-          {refreshing ? "Refreshing..." : "↻ Refresh Usage"}
-        </button>
-      </div>
+    <PageContainer>
+      <PageHeader
+        eyebrow="Security & Credentials"
+        title="API Keys & Quotas"
+        description="Manage server-to-server cryptographic API credentials, track real-time rate limits, and inspect quotas."
+        actions={
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void loadData(true)}
+            isLoading={refreshing}
+          >
+            Refresh Usage
+          </Button>
+        }
+      />
 
       {error && (
-        <div className="card" style={{ marginBottom: "24px", borderColor: "var(--error)" }}>
-          <p className="error" style={{ marginBottom: "8px" }}>{error}</p>
-          <button className="btn secondary small" onClick={() => void loadData()}>Retry</button>
-        </div>
+        <Alert variant="danger" title="API Key Error" onClose={() => setError(null)}>
+          {error}
+        </Alert>
       )}
 
+      {/* One-Time Raw Key Display Banner */}
       {newKeyData && (
-        <div className="card" style={{ marginBottom: "24px", border: "2px solid #10b981", backgroundColor: "rgba(16, 185, 129, 0.05)" }}>
-          <h2 style={{ color: "#10b981", marginBottom: "8px" }}>API Key Generated Successfully</h2>
-          <p className="muted" style={{ marginBottom: "16px" }}>
-            <strong>CRITICAL SECURITY NOTICE:</strong> This raw key is shown <strong>exactly once</strong>. It cannot be recovered later. Store it safely in your environment variables.
+        <div
+          style={{
+            border: "2px solid var(--color-success)",
+            backgroundColor: "rgba(22, 163, 74, 0.06)",
+            padding: "20px",
+            borderRadius: "var(--radius-xl)",
+            marginBottom: "24px",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "8px" }}>
+            <h3 style={{ margin: 0, color: "var(--color-success)", fontSize: "1.125rem", fontWeight: 700 }}>
+              New API Key Generated Successfully
+            </h3>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => setNewKeyData(null)}
+              style={{ padding: "2px 6px" }}
+            >
+              ✕ Done
+            </button>
+          </div>
+          <p style={{ fontSize: "0.875rem", color: "var(--color-text-secondary)", marginBottom: "16px" }}>
+            <strong>CRITICAL SECURITY NOTICE:</strong> This raw cryptographic secret is displayed <strong>exactly once</strong>. It cannot be recovered later. Store it safely in your backend environment variables.
           </p>
-          <div className="flex row gap align-center" style={{ marginBottom: "12px" }}>
+          <div style={{ display: "flex", gap: "10px", alignItems: "center", marginBottom: "12px" }}>
             <input 
               type="text" 
               readOnly 
               value={newKeyData.raw_key} 
               className="input" 
-              style={{ flex: 1, fontFamily: "monospace", backgroundColor: "var(--bg-alt)" }} 
+              style={{ flex: 1, fontFamily: "var(--font-mono)", backgroundColor: "var(--color-bg-surface)", fontWeight: 600 }} 
             />
-            <button className="btn primary" onClick={copyKey}>Copy</button>
-            <button className="btn secondary" onClick={() => setNewKeyData(null)}>Done</button>
+            <Button variant="primary" onClick={copyKey}>
+              {copiedKey ? "Copied Secret!" : "Copy Secret"}
+            </Button>
+            <Button variant="secondary" onClick={() => setNewKeyData(null)}>
+              I Have Saved This Key
+            </Button>
           </div>
-          <div style={{ fontSize: "0.85rem", color: "var(--muted)" }}>
+          <div style={{ fontSize: "0.8125rem", color: "var(--color-text-muted)" }}>
             Environment: <strong>{newKeyData.is_sandbox ? "Sandbox" : "Production Live"}</strong> | Rate Limit: <strong>{newKeyData.rate_limit_per_minute} req/min</strong> | Daily Quota: <strong>{newKeyData.daily_quota.toLocaleString()} req/day</strong>
           </div>
         </div>
       )}
 
-      {/* Usage Detail Modal */}
-      {selectedKey && (
-        <div 
-          style={{
-            position: "fixed",
-            top: 0, left: 0, right: 0, bottom: 0,
-            backgroundColor: "rgba(0,0,0,0.6)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1000,
-            padding: "20px"
-          }}
-          onClick={() => setSelectedKey(null)}
+      <div style={{ display: "grid", gridTemplateColumns: "2.3fr 1.7fr", gap: "24px", alignItems: "start" }}>
+        
+        {/* API Keys Inventory Table */}
+        <Card
+          title="Active Credentials &amp; Quotas"
+          subtitle={`${keysUsage.length} keys registered for server-to-server endpoints.`}
         >
-          <div 
-            className="card" 
-            style={{ maxWidth: "560px", width: "100%", maxHeight: "90vh", overflowY: "auto" }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex row space-between align-center" style={{ marginBottom: "16px" }}>
-              <h2>Usage Detail: {selectedKey.name}</h2>
-              <button className="btn secondary small" onClick={() => setSelectedKey(null)}>✕</button>
+          {loading ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: "12px", padding: "16px 0" }}>
+              <LoadingSkeleton variant="rect" height={50} />
+              <LoadingSkeleton variant="rect" height={50} />
             </div>
-            
-            <div style={{ marginBottom: "16px", display: "flex", gap: "8px" }}>
-              <span className="badge" style={{ backgroundColor: selectedKey.is_sandbox ? "#8b5cf6" : "#059669", color: "white" }}>
-                {selectedKey.is_sandbox ? "Sandbox" : "Live"}
-              </span>
-              <span className="badge" style={{ backgroundColor: selectedKey.status === 1 ? "var(--success)" : "var(--error)", color: "white" }}>
-                {selectedKey.status === 1 ? "Active" : "Revoked"}
-              </span>
-              <span style={{ fontFamily: "monospace", color: "var(--muted)", alignSelf: "center", fontSize: "0.85rem" }}>
-                Prefix: {selectedKey.key_prefix}...
-              </span>
-            </div>
-
-            <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "20px" }}>
-              <div style={{ padding: "12px", border: "1px solid var(--border)", borderRadius: "6px" }}>
-                <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>Per-Minute Rate Limit</div>
-                <div style={{ fontSize: "1.2rem", fontWeight: 700 }}>{selectedKey.current_minute_usage} / {selectedKey.rate_limit_per_minute}</div>
-                <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>Remaining: {selectedKey.rate_limit_remaining} reqs</div>
-              </div>
-              <div style={{ padding: "12px", border: "1px solid var(--border)", borderRadius: "6px" }}>
-                <div style={{ fontSize: "0.8rem", color: "var(--muted)" }}>Daily Quota (UTC)</div>
-                <div style={{ fontSize: "1.2rem", fontWeight: 700 }}>{selectedKey.today_usage.toLocaleString()} / {selectedKey.daily_quota.toLocaleString()}</div>
-                <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>Remaining: {selectedKey.daily_quota_remaining.toLocaleString()} reqs</div>
-              </div>
-            </div>
-
-            <h3 style={{ fontSize: "1rem", marginBottom: "8px" }}>Accounting Breakdown (Today UTC)</h3>
-            <table className="table" style={{ marginBottom: "16px" }}>
-              <tbody>
-                <tr>
-                  <td>Total Inbound Attempts</td>
-                  <td style={{ textAlign: "right", fontWeight: 600 }}>{selectedKey.breakdown.total_requests.toLocaleString()}</td>
-                </tr>
-                <tr>
-                  <td>Admitted Requests</td>
-                  <td style={{ textAlign: "right", fontWeight: 600, color: "var(--success)" }}>{selectedKey.breakdown.admitted_requests.toLocaleString()}</td>
-                </tr>
-                <tr>
-                  <td>Rate Limited (429)</td>
-                  <td style={{ textAlign: "right", fontWeight: 600, color: selectedKey.breakdown.rate_limited_requests > 0 ? "var(--error)" : "inherit" }}>
-                    {selectedKey.breakdown.rate_limited_requests.toLocaleString()}
-                  </td>
-                </tr>
-                <tr>
-                  <td>Daily Quota Exceeded (429)</td>
-                  <td style={{ textAlign: "right", fontWeight: 600, color: selectedKey.breakdown.quota_exceeded_requests > 0 ? "var(--error)" : "inherit" }}>
-                    {selectedKey.breakdown.quota_exceeded_requests.toLocaleString()}
-                  </td>
-                </tr>
-                <tr>
-                  <td>Delivered Ad Responses</td>
-                  <td style={{ textAlign: "right", fontWeight: 600 }}>{selectedKey.breakdown.served_ads.toLocaleString()}</td>
-                </tr>
-              </tbody>
-            </table>
-
-            <div style={{ fontSize: "0.8rem", color: "var(--muted)", borderTop: "1px solid var(--border)", paddingTop: "12px" }}>
-              <div>Quota Window: <strong>UTC Calendar Day (00:00 - 23:59 UTC)</strong></div>
-              <div>Next Daily Reset: <strong>{selectedKey.daily_reset_time_utc}</strong> (in {Math.round(selectedKey.daily_reset_seconds / 3600)}h {Math.round((selectedKey.daily_reset_seconds % 3600) / 60)}m)</div>
-              <div>Last Used: <strong>{selectedKey.last_used_at ? dateString(selectedKey.last_used_at) : "Never"}</strong></div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <div className="grid" style={{ gridTemplateColumns: "3fr 1fr", gap: "24px", alignItems: "start" }}>
-        <div className="card">
-          {keysUsage.length === 0 ? (
-            <div style={{ padding: "48px 24px", textAlign: "center" }}>
-              <p className="muted" style={{ marginBottom: "12px" }}>No API keys found. Generate a key to begin Server-to-Server integration.</p>
-            </div>
+          ) : keysUsage.length === 0 ? (
+            <EmptyState
+              title="No API keys configured"
+              description="Create a server key to integrate with automated bidding or conversational backend pipelines."
+            />
           ) : (
-            <div style={{ overflowX: "auto" }}>
+            <div className="table-container" style={{ overflowX: "auto" }}>
               <table className="table">
                 <thead>
                   <tr>
-                    <th>Key & Type</th>
+                    <th>Key Name &amp; Prefix</th>
                     <th>Rate Limit</th>
-                    <th>Daily Quota (Today)</th>
-                    <th>Reset (UTC)</th>
+                    <th>Daily Quota</th>
                     <th>Status</th>
                     <th style={{ textAlign: "right" }}>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {keysUsage.map(k => {
-                    const quotaPercent = Math.min(100, Math.round((k.today_usage / (k.daily_quota || 1)) * 100));
-                    const isExhausted = k.today_usage >= k.daily_quota;
-                    const isNearLimit = quotaPercent >= 80 && !isExhausted;
+                  {keysUsage.map((k) => {
+                    const isRevoked = k.status === 0 || !!k.revoked_at;
+                    const quotaPercent = k.daily_quota > 0 ? Math.min(100, Math.round((k.today_usage / k.daily_quota) * 100)) : 0;
 
                     return (
                       <tr key={k.key_id}>
                         <td>
                           <div style={{ fontWeight: 600 }}>{k.name}</div>
-                          <div style={{ display: "flex", gap: "6px", alignItems: "center", marginTop: "4px" }}>
-                            <span 
-                              style={{ 
-                                fontSize: "0.7rem", 
-                                padding: "2px 6px", 
-                                borderRadius: "4px",
-                                backgroundColor: k.is_sandbox ? "#8b5cf6" : "#059669",
-                                color: "white" 
-                              }}
-                            >
-                              {k.is_sandbox ? "SANDBOX" : "LIVE"}
-                            </span>
-                            <span style={{ fontFamily: "monospace", fontSize: "0.8rem", color: "var(--muted)" }}>
-                              {k.key_prefix}...
+                          <div style={{ fontSize: "11px", fontFamily: "var(--font-mono)", color: "var(--color-text-muted)" }}>
+                            {k.key_prefix}...
+                          </div>
+                          <div style={{ marginTop: "4px" }}>
+                            <span style={{ fontSize: "10px", padding: "1px 6px", borderRadius: "var(--radius-sm)", background: k.is_sandbox ? "#fef3c7" : "#dbeafe", color: k.is_sandbox ? "#b45309" : "#1e40af", fontWeight: 600 }}>
+                              {k.is_sandbox ? "SANDBOX" : "PRODUCTION"}
                             </span>
                           </div>
                         </td>
                         <td>
-                          <div><b>{k.rate_limit_per_minute}</b> / min</div>
-                          <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
-                            {k.current_minute_usage} used now
+                          <div style={{ fontSize: "0.8125rem", fontWeight: 600 }}>
+                            {k.current_minute_usage} / {k.rate_limit_per_minute} req/min
+                          </div>
+                          <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)" }}>
+                            {k.rate_limit_remaining} remaining
                           </div>
                         </td>
-                        <td style={{ minWidth: "160px" }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem", marginBottom: "4px" }}>
-                            <span><b>{k.today_usage.toLocaleString()}</b> / {k.daily_quota.toLocaleString()}</span>
-                            <span>{quotaPercent}%</span>
+                        <td>
+                          <div style={{ fontSize: "0.8125rem", fontWeight: 600 }}>
+                            {k.today_usage.toLocaleString()} / {k.daily_quota.toLocaleString()}
                           </div>
-                          <div style={{ width: "100%", height: "6px", backgroundColor: "var(--border)", borderRadius: "3px", overflow: "hidden" }}>
-                            <div 
-                              style={{ 
-                                width: `${quotaPercent}%`, 
-                                height: "100%", 
-                                backgroundColor: isExhausted ? "var(--error)" : (isNearLimit ? "#f59e0b" : "var(--success)"),
-                                transition: "width 0.3s ease"
-                              }} 
+                          <div
+                            style={{
+                              height: "4px",
+                              width: "100%",
+                              backgroundColor: "var(--color-bg-subtle)",
+                              borderRadius: "var(--radius-full)",
+                              overflow: "hidden",
+                              marginTop: "4px",
+                            }}
+                          >
+                            <div
+                              style={{
+                                height: "100%",
+                                width: `${quotaPercent}%`,
+                                backgroundColor: quotaPercent > 90 ? "var(--color-danger)" : "var(--color-primary)",
+                              }}
                             />
                           </div>
-                          {isExhausted && (
-                            <span style={{ fontSize: "0.7rem", color: "var(--error)", fontWeight: 600 }}>QUOTA EXHAUSTED (429)</span>
-                          )}
-                          {isNearLimit && (
-                            <span style={{ fontSize: "0.7rem", color: "#f59e0b", fontWeight: 600 }}>{k.daily_quota_remaining} remaining</span>
-                          )}
                         </td>
                         <td>
-                          <div style={{ fontSize: "0.85rem" }}>00:00 UTC</div>
-                          <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
-                            in {Math.round(k.daily_reset_seconds / 3600)}h {Math.round((k.daily_reset_seconds % 3600) / 60)}m
-                          </div>
+                          <StatusBadge 
+                            status={isRevoked ? "failed" : "active"} 
+                            label={isRevoked ? "Revoked" : "Active"} 
+                            size="sm" 
+                          />
                         </td>
-                        <td>
-                          {k.revoked_at ? (
-                            <span className="badge" style={{ background: "var(--error)", color: "white" }}>Revoked</span>
-                          ) : (
-                            <span className="badge" style={{ background: "var(--success)", color: "white" }}>Active</span>
-                          )}
-                        </td>
-                        <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                          <button 
-                            className="btn secondary small" 
-                            style={{ marginRight: "6px" }}
-                            onClick={() => setSelectedKey(k)}
-                          >
-                            Details
-                          </button>
-                          {!k.revoked_at && (
-                            <button 
-                              className="btn secondary small" 
-                              style={{ color: "var(--error)", borderColor: "var(--error)" }} 
-                              onClick={() => handleRevoke(k.key_id)}
+                        <td style={{ textAlign: "right" }}>
+                          <div style={{ display: "flex", gap: "6px", justifyContent: "flex-end" }}>
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => setSelectedKey(k)}
                             >
-                              Revoke
-                            </button>
-                          )}
+                              Metrics
+                            </Button>
+                            {!isRevoked && (
+                              <Button
+                                variant="danger"
+                                size="sm"
+                                onClick={() => setKeyToRevoke(k)}
+                              >
+                                Revoke
+                              </Button>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     );
@@ -338,71 +301,194 @@ export default function PublisherApiKeys() {
               </table>
             </div>
           )}
-        </div>
+        </Card>
 
-        <div className="card">
-          <h2 style={{ marginBottom: "16px" }}>Generate New Key</h2>
-          <form onSubmit={handleCreate} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-            <div>
-              <label style={{ display: "block", marginBottom: "4px", fontSize: "0.85rem", fontWeight: 500 }}>Key Name / Label</label>
-              <input 
-                type="text" 
-                required 
-                value={name} 
-                onChange={(e) => setName(e.target.value)} 
-                className="input" 
-                placeholder="e.g. Chatbot Assistant S2S" 
-                style={{ width: "100%" }} 
-              />
+        {/* Generate API Key Form */}
+        <Card
+          title="Generate New API Key"
+          subtitle="Configure request quotas and authentication environment."
+        >
+          <form onSubmit={handleCreate}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+              <div className="field">
+                <label htmlFor="key-name" style={{ fontWeight: 600, fontSize: "0.875rem", marginBottom: "4px", display: "block" }}>
+                  Key Description / Label *
+                </label>
+                <input
+                  id="key-name"
+                  type="text"
+                  required
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="input"
+                  placeholder="e.g. Chatbot S2S Ad Integration"
+                  disabled={creating}
+                />
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                <div className="field">
+                  <label htmlFor="rate-limit" style={{ fontWeight: 600, fontSize: "0.875rem", marginBottom: "4px", display: "block" }}>
+                    Rate Limit (req/min)
+                  </label>
+                  <input
+                    id="rate-limit"
+                    type="number"
+                    min="1"
+                    max="10000"
+                    value={rateLimit}
+                    onChange={(e) => setRateLimit(Number(e.target.value))}
+                    className="input"
+                    disabled={creating}
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="daily-quota" style={{ fontWeight: 600, fontSize: "0.875rem", marginBottom: "4px", display: "block" }}>
+                    Daily Quota (req/day)
+                  </label>
+                  <input
+                    id="daily-quota"
+                    type="number"
+                    min="100"
+                    max="1000000"
+                    value={dailyQuota}
+                    onChange={(e) => setDailyQuota(Number(e.target.value))}
+                    className="input"
+                    disabled={creating}
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "4px" }}>
+                <input
+                  id="sandbox-mode"
+                  type="checkbox"
+                  checked={isSandbox}
+                  onChange={(e) => setIsSandbox(e.target.checked)}
+                  disabled={creating}
+                />
+                <label htmlFor="sandbox-mode" style={{ fontSize: "0.875rem", cursor: "pointer" }}>
+                  Sandbox Key (test ads only, no billing debits)
+                </label>
+              </div>
+
+              <div style={{ marginTop: "12px" }}>
+                <Button 
+                  type="submit" 
+                  variant="primary" 
+                  isLoading={creating} 
+                  disabled={!name.trim()}
+                  style={{ width: "100%" }}
+                >
+                  Generate Key Pair
+                </Button>
+              </div>
             </div>
-
-            <div>
-              <label style={{ display: "block", marginBottom: "4px", fontSize: "0.85rem", fontWeight: 500 }}>Environment</label>
-              <select 
-                className="input" 
-                value={isSandbox ? "sandbox" : "live"} 
-                onChange={(e) => setIsSandbox(e.target.value === "sandbox")}
-                style={{ width: "100%" }}
-              >
-                <option value="live">Live (Production pk_live_)</option>
-                <option value="sandbox">Sandbox (Testing pk_test_)</option>
-              </select>
-            </div>
-
-            <div>
-              <label style={{ display: "block", marginBottom: "4px", fontSize: "0.85rem", fontWeight: 500 }}>Rate Limit (req/min)</label>
-              <input 
-                type="number" 
-                required 
-                min={1} 
-                max={10000} 
-                value={rateLimit} 
-                onChange={(e) => setRateLimit(Number(e.target.value))} 
-                className="input" 
-                style={{ width: "100%" }} 
-              />
-            </div>
-
-            <div>
-              <label style={{ display: "block", marginBottom: "4px", fontSize: "0.85rem", fontWeight: 500 }}>Daily Quota (req/day)</label>
-              <input 
-                type="number" 
-                required 
-                min={1} 
-                max={1000000} 
-                value={dailyQuota} 
-                onChange={(e) => setDailyQuota(Number(e.target.value))} 
-                className="input" 
-                style={{ width: "100%" }} 
-              />
-            </div>
-
-            <button type="submit" className="btn primary" style={{ marginTop: "4px" }}>
-              Generate Key
-            </button>
           </form>
-        </div>
+        </Card>
       </div>
-    </div>
+
+      {/* Usage Metrics Modal */}
+      {selectedKey && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: "rgba(15, 23, 42, 0.6)",
+            backdropFilter: "blur(2px)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+            padding: "20px",
+          }}
+        >
+          <div
+            style={{
+              backgroundColor: "var(--color-bg-surface)",
+              borderRadius: "var(--radius-xl)",
+              maxWidth: "550px",
+              width: "100%",
+              padding: "24px",
+              boxShadow: "var(--shadow-xl)",
+              border: "1px solid var(--border-color)",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: "1.125rem", fontWeight: 700 }}>
+                  Usage Metrics: {selectedKey.name}
+                </h3>
+                <p style={{ margin: "4px 0 0", fontSize: "0.8125rem", color: "var(--color-text-muted)" }}>
+                  Key Prefix: {selectedKey.key_prefix}...
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => setSelectedKey(null)}
+                aria-label="Close dialog"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "20px" }}>
+              <div style={{ background: "var(--color-bg-subtle)", padding: "12px", borderRadius: "var(--radius-md)" }}>
+                <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)" }}>Total Today Requests</div>
+                <div style={{ fontSize: "1.25rem", fontWeight: 700, marginTop: "2px" }}>
+                  {selectedKey.breakdown.total_requests.toLocaleString()}
+                </div>
+              </div>
+              <div style={{ background: "var(--color-bg-subtle)", padding: "12px", borderRadius: "var(--radius-md)" }}>
+                <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)" }}>Ads Served</div>
+                <div style={{ fontSize: "1.25rem", fontWeight: 700, marginTop: "2px", color: "var(--color-success)" }}>
+                  {selectedKey.breakdown.served_ads.toLocaleString()}
+                </div>
+              </div>
+              <div style={{ background: "var(--color-bg-subtle)", padding: "12px", borderRadius: "var(--radius-md)" }}>
+                <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)" }}>Rate Limited Requests</div>
+                <div style={{ fontSize: "1.25rem", fontWeight: 700, marginTop: "2px", color: selectedKey.breakdown.rate_limited_requests > 0 ? "var(--color-danger)" : "inherit" }}>
+                  {selectedKey.breakdown.rate_limited_requests.toLocaleString()}
+                </div>
+              </div>
+              <div style={{ background: "var(--color-bg-subtle)", padding: "12px", borderRadius: "var(--radius-md)" }}>
+                <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)" }}>Quota Exceeded</div>
+                <div style={{ fontSize: "1.25rem", fontWeight: 700, marginTop: "2px" }}>
+                  {selectedKey.breakdown.quota_exceeded_requests.toLocaleString()}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ fontSize: "0.8125rem", color: "var(--color-text-muted)", marginBottom: "20px" }}>
+              Created: <strong>{dateString(selectedKey.created_at)}</strong> | Last Used: <strong>{selectedKey.last_used_at ? dateString(selectedKey.last_used_at) : "Never"}</strong>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <Button variant="secondary" onClick={() => setSelectedKey(null)}>
+                Close
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Revocation Confirmation Dialog */}
+      <ConfirmDialog
+        isOpen={!!keyToRevoke}
+        title="Revoke API Key"
+        message={`Are you sure you want to revoke key "${keyToRevoke?.name}" (${keyToRevoke?.key_prefix}...)? Any integrations using this secret key will immediately be rejected by the server.`}
+        confirmText="Revoke Key"
+        variant="danger"
+        isLoading={revoking}
+        onConfirm={confirmRevoke}
+        onCancel={() => setKeyToRevoke(null)}
+      />
+    </PageContainer>
   );
 }

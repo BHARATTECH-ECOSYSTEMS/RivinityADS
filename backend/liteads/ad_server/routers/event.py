@@ -2,18 +2,22 @@
 Event tracking endpoints.
 """
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from liteads.ad_server.services.event_service import EventService
+from liteads.ad_server.services.replay_guard import acquire_replay_guard
 from liteads.common.database import get_session
 from liteads.common.logger import get_logger, log_context
+from liteads.common.tracking_sig import verify_tracking
 from liteads.common.utils import current_timestamp
 from liteads.schemas.request import EventRequest
 from liteads.schemas.response import EventResponse
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+VALID_EVENT_TYPES = {"impression", "imp", "click", "clk", "conversion", "conv"}
 
 
 def get_event_service(session: AsyncSession = Depends(get_session)) -> EventService:
@@ -41,15 +45,21 @@ async def track_event(
     )
 
     logger.info("Event received")
-    
-    from liteads.common.tracking_sig import verify_tracking
+
+    # 1. Validate event type upfront before signature or replay guard
+    if not event.event_type or event.event_type.lower() not in VALID_EVENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid or unknown event type: {event.event_type}",
+        )
+
+    # 2. Verify tracking signature
     if not event.sig:
-        from fastapi import HTTPException
         raise HTTPException(status_code=400, detail="Missing signature")
     verify_tracking(event.request_id, event.ad_id, event.slot_id or "", event.sig)
 
-    from liteads.ad_server.services.replay_guard import enforce_replay_guard
-    await enforce_replay_guard(event.event_type, event.request_id, event.ad_id)
+    # 3. Acquire replay guard reservation
+    reservation = await acquire_replay_guard(event.event_type, event.request_id, event.ad_id)
 
     # Prepare extra data, preserving caller extra without mutation
     extra = dict(event.extra) if event.extra else {}
@@ -62,15 +72,34 @@ async def track_event(
             )
         extra["slot_id"] = event.slot_id
 
-    # Record the event
-    success = await event_service.track_event(
-        request_id=event.request_id,
-        ad_id=event.ad_id,
-        event_type=event.event_type,
-        user_id=event.user_id,
-        timestamp=event.timestamp or current_timestamp(),
-        extra=extra if extra else None,
-    )
+    # 4. Record the event with transactional retry safety
+    try:
+        success = await event_service.track_event(
+            request_id=event.request_id,
+            ad_id=event.ad_id,
+            event_type=event.event_type,
+            user_id=event.user_id,
+            timestamp=event.timestamp or current_timestamp(),
+            extra=extra if extra else None,
+            seq=reservation.seq,
+            raise_on_duplicate=True,
+        )
+        if success:
+            await reservation.finalize()
+        else:
+            await reservation.release()
+    except HTTPException as he:
+        if he.status_code == 429:
+            try:
+                await reservation.finalize()
+            except Exception:
+                pass
+        else:
+            await reservation.release()
+        raise
+    except Exception:
+        await reservation.release()
+        raise
 
     return EventResponse(
         success=success,
@@ -100,22 +129,51 @@ async def track_event_get(
 
     logger.info("Pixel event received")
 
-    from liteads.common.tracking_sig import verify_tracking
+    # 1. Validate event type upfront before signature or replay guard
+    if not type or type.lower() not in VALID_EVENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid or unknown event type: {type}",
+        )
+
+    # 2. Verify tracking signature
     verify_tracking(req, ad, slot or "", sig)
 
-    from liteads.ad_server.services.replay_guard import enforce_replay_guard
-    await enforce_replay_guard(type, req, ad)
+    # 3. Acquire replay guard reservation
+    reservation = await acquire_replay_guard(type, req, ad)
 
-    success = await event_service.track_event(
-        request_id=req,
-        ad_id=ad,
-        event_type=type,
-        user_id=None,
-        timestamp=current_timestamp(),
-        extra={"slot_id": slot} if slot else None,
-    )
+    # 4. Record the event with transactional retry safety
+    try:
+        success = await event_service.track_event(
+            request_id=req,
+            ad_id=ad,
+            event_type=type,
+            user_id=None,
+            timestamp=current_timestamp(),
+            extra={"slot_id": slot} if slot else None,
+            seq=reservation.seq,
+            raise_on_duplicate=True,
+        )
+
+        if success:
+            await reservation.finalize()
+        else:
+            await reservation.release()
+    except HTTPException as he:
+        if he.status_code == 429:
+            try:
+                await reservation.finalize()
+            except Exception:
+                pass
+        else:
+            await reservation.release()
+        raise
+    except Exception:
+        await reservation.release()
+        raise
 
     return EventResponse(
         success=success,
         message="Event recorded" if success else "Failed to record event",
     )
+

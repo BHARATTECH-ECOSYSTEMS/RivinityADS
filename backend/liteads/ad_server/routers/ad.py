@@ -347,6 +347,7 @@ async def request_ads(
             ad_id=ad_id,
             campaign_id=candidate.campaign_id,
             creative_id=candidate.creative_id,
+            ad_set_id=candidate.ad_set_id,
             creative=creative,
             tracking=tracking,
             sponsored=True,

@@ -43,7 +43,7 @@ async def setup_data(test_db: AsyncSession):
 def override_user(publisher_id: int | None = None, advertiser_id: int | None = None, role: str = "publisher"):
     from liteads.common.security import current_user
     async def mock_user():
-        return User(id=1, role=role, publisher_id=publisher_id, advertiser_id=advertiser_id, email="test@test.com")
+        return User(id=1, role=role, publisher_id=publisher_id, advertiser_id=advertiser_id, email="test@test.com", is_active=True, email_verified=True)
     app.dependency_overrides[current_user] = mock_user
 
 def reset_user():

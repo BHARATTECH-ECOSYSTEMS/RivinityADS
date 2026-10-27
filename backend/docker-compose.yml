@@ -5,7 +5,7 @@ services:
       context: .
       dockerfile: deployment/docker/Dockerfile
     ports:
-      - "8000:8000"
+      - "${LITEADS_PORT_BINDING:-127.0.0.1:8000}:8000"
     environment:
       - LITEADS_ENV=dev
       - LITEADS_DATABASE__HOST=postgres
@@ -32,6 +32,17 @@ services:
       - RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID:-}
       - RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET:-}
       - RAZORPAY_WEBHOOK_SECRET=${RAZORPAY_WEBHOOK_SECRET:-}
+      - LITEADS_SERVER__TRUSTED_PROXIES=${LITEADS_SERVER__TRUSTED_PROXIES:-127.0.0.1,::1,172.16.0.0/12}
+      # Deployment Topology:
+      # - Monolith Mode (default): 'docker compose up' runs in-process schedulers inside ad-server.
+      # - Dedicated Worker Mode: when running with '--profile worker', set LITEADS_ENABLE_OPTIMIZATION_WORKER=false
+      #   and LITEADS_ENABLE_WEBHOOK_WORKER=false to prevent redundant dual scheduler loops.
+      - LITEADS_ENABLE_WEBHOOK_WORKER=${LITEADS_ENABLE_WEBHOOK_WORKER:-true}
+      - LITEADS_ENABLE_OPTIMIZATION_WORKER=${LITEADS_ENABLE_OPTIMIZATION_WORKER:-true}
+      - LITEADS_ENABLE_NOTIFICATION_WORKER=${LITEADS_ENABLE_NOTIFICATION_WORKER:-true}
+      - LITEADS_OPTIMIZATION__MODE=${LITEADS_OPTIMIZATION__MODE:-suggestions_only}
+      - LITEADS_OPTIMIZATION__KILL_SWITCH=${LITEADS_OPTIMIZATION__KILL_SWITCH:-false}
+      - LITEADS_OPTIMIZATION__INTERVAL_SECONDS=${LITEADS_OPTIMIZATION__INTERVAL_SECONDS:-900}
     depends_on:
       postgres:
         condition: service_healthy
@@ -45,6 +56,99 @@ services:
     restart: unless-stopped
     networks:
       - liteads-network
+
+  # Webhook Outbox Worker (dedicated worker process)
+  webhook-worker:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile
+    command: ["python", "-m", "liteads.ad_server.services.webhook_worker"]
+    environment:
+      - LITEADS_ENV=dev
+      - LITEADS_DATABASE__HOST=postgres
+      - LITEADS_DATABASE__PORT=5432
+      - LITEADS_DATABASE__NAME=liteads
+      - LITEADS_DATABASE__USER=liteads
+      - LITEADS_DATABASE__PASSWORD=liteads_password
+      - LITEADS_REDIS__HOST=redis
+      - LITEADS_REDIS__PORT=6379
+      - LITEADS_AUTH__JWT_SECRET=${LITEADS_AUTH__JWT_SECRET}
+      - LITEADS_TRACKING__SECRET=${LITEADS_TRACKING__SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - liteads-network
+    profiles:
+      - worker
+
+  # Campaign Optimization Worker (dedicated worker process)
+  optimization-worker:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile
+    command: ["python", "-m", "liteads.ad_server.services.optimization_worker"]
+    environment:
+      - LITEADS_ENV=dev
+      - LITEADS_DATABASE__HOST=postgres
+      - LITEADS_DATABASE__PORT=5432
+      - LITEADS_DATABASE__NAME=liteads
+      - LITEADS_DATABASE__USER=liteads
+      - LITEADS_DATABASE__PASSWORD=liteads_password
+      - LITEADS_REDIS__HOST=redis
+      - LITEADS_REDIS__PORT=6379
+      - LITEADS_AUTH__JWT_SECRET=${LITEADS_AUTH__JWT_SECRET}
+      - LITEADS_TRACKING__SECRET=${LITEADS_TRACKING__SECRET}
+      - LAYA_BASE_URL=http://laya:8000
+      - LITEADS_OPTIMIZATION__MODE=${LITEADS_OPTIMIZATION__MODE:-suggestions_only}
+      - LITEADS_OPTIMIZATION__KILL_SWITCH=${LITEADS_OPTIMIZATION__KILL_SWITCH:-false}
+      - LITEADS_OPTIMIZATION__INTERVAL_SECONDS=${LITEADS_OPTIMIZATION__INTERVAL_SECONDS:-900}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - liteads-network
+    profiles:
+      - worker
+
+  # Notification Delivery Worker (dedicated worker process)
+  notification-worker:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile
+    command: ["python", "-m", "liteads.ad_server.services.notification_worker"]
+    environment:
+      - LITEADS_ENV=dev
+      - LITEADS_DATABASE__HOST=postgres
+      - LITEADS_DATABASE__PORT=5432
+      - LITEADS_DATABASE__NAME=liteads
+      - LITEADS_DATABASE__USER=liteads
+      - LITEADS_DATABASE__PASSWORD=liteads_password
+      - LITEADS_REDIS__HOST=redis
+      - LITEADS_REDIS__PORT=6379
+      - LITEADS_AUTH__JWT_SECRET=${LITEADS_AUTH__JWT_SECRET}
+      - LITEADS_TRACKING__SECRET=${LITEADS_TRACKING__SECRET}
+      - LITEADS_EMAIL__HOST=mailpit
+      - LITEADS_EMAIL__PORT=1025
+      - LITEADS_EMAIL__USER=
+      - LITEADS_EMAIL__PASSWORD=
+      - LITEADS_EMAIL__USE_TLS=false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - liteads-network
+    profiles:
+      - worker
 
   # PostgreSQL Database
   postgres:

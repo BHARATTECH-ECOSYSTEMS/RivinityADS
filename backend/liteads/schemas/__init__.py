@@ -28,6 +28,16 @@ from liteads.schemas.response import (
     HealthResponse,
     TrackingUrls,
 )
+from liteads.schemas.notification import (
+    MarkAllReadResponse,
+    NotificationListResponse,
+    NotificationPreferenceItem,
+    NotificationPreferenceListResponse,
+    NotificationPreferenceResponse,
+    NotificationPreferenceUpdateRequest,
+    NotificationResponse,
+    UnreadCountResponse,
+)
 from liteads.schemas.targeting import (
     GeoEntry,
     TargetingResponse,
@@ -51,6 +61,15 @@ __all__ = [
     "ErrorResponse",
     "CreativeResponse",
     "TrackingUrls",
+    # Notification schemas
+    "NotificationResponse",
+    "NotificationListResponse",
+    "UnreadCountResponse",
+    "MarkAllReadResponse",
+    "NotificationPreferenceItem",
+    "NotificationPreferenceResponse",
+    "NotificationPreferenceListResponse",
+    "NotificationPreferenceUpdateRequest",
     # Targeting schemas
     "GeoEntry",
     "TargetingSet",

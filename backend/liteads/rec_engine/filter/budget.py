@@ -46,16 +46,58 @@ class BudgetFilter(BaseFilter):
         if not candidates:
             return []
 
-        # Batch get budget info
+        # Batch get budget info for campaigns
         campaign_ids = list(set(c.campaign_id for c in candidates))
         budget_infos = await self._get_budget_batch(campaign_ids)
 
-        # Filter by campaign budget
+        # Batch get AdSet daily budgets from Redis
+        today = current_date()
+        ad_set_ids = list(set(
+            c.ad_set_id for c in candidates
+            if c.ad_set_id is not None and c.metadata.get("ad_set_daily_budget") is not None
+        ))
+        ad_set_spent: dict[int, float] = {}
+        if ad_set_ids:
+            try:
+                pipeline = redis_client.pipeline()
+                for as_id in ad_set_ids:
+                    pipeline.hgetall(f"adset_budget:{as_id}:{today}")
+                cached_as = await pipeline.execute()
+                for as_id, d in zip(ad_set_ids, cached_as):
+                    if isinstance(d, dict):
+                        ad_set_spent[as_id] = float(d.get("spent_today", 0))
+                    elif d is not None:
+                        try:
+                            ad_set_spent[as_id] = float(d)
+                        except (ValueError, TypeError):
+                            ad_set_spent[as_id] = 0.0
+                    else:
+                        ad_set_spent[as_id] = 0.0
+            except Exception as e:
+                logger.warning(f"Failed to get ad set budgets from cache: {e}")
+
+        # Filter by campaign budget AND ad set sub-budget
         temp_result = []
         for candidate in candidates:
             budget_info = budget_infos.get(candidate.campaign_id)
-            if budget_info and budget_info.has_budget:
-                temp_result.append(candidate)
+            if not budget_info or not budget_info.has_budget:
+                continue
+
+            # Check campaign budget with buffer ratio
+            if budget_info.budget_daily and budget_info.spent_today >= budget_info.budget_daily * self.buffer_ratio:
+                continue
+            if budget_info.budget_total and budget_info.spent_total >= budget_info.budget_total * self.buffer_ratio:
+                continue
+
+            # Check AdSet daily sub-budget
+            if candidate.ad_set_id is not None and candidate.metadata.get("ad_set_daily_budget") is not None:
+                daily_sub_budget = float(candidate.metadata["ad_set_daily_budget"])
+                if daily_sub_budget > 0:
+                    spent = ad_set_spent.get(candidate.ad_set_id, 0.0)
+                    if spent >= daily_sub_budget * self.buffer_ratio:
+                        continue  # AdSet sub-budget exhausted
+
+            temp_result.append(candidate)
 
         # Filter by advertiser balance
         result = []
@@ -90,6 +132,25 @@ class BudgetFilter(BaseFilter):
         budget_info = await self._get_budget(candidate.campaign_id)
         if not budget_info.has_budget:
             return False
+
+        if budget_info.budget_daily and budget_info.spent_today >= budget_info.budget_daily * self.buffer_ratio:
+            return False
+        if budget_info.budget_total and budget_info.spent_total >= budget_info.budget_total * self.buffer_ratio:
+            return False
+
+        # Check AdSet daily sub-budget
+        if candidate.ad_set_id is not None and candidate.metadata.get("ad_set_daily_budget") is not None:
+            daily_sub_budget = float(candidate.metadata["ad_set_daily_budget"])
+            if daily_sub_budget > 0:
+                today = current_date()
+                spent = 0.0
+                try:
+                    val = await redis_client.hget(f"adset_budget:{candidate.ad_set_id}:{today}", "spent_today")
+                    spent = float(val) if val else 0.0
+                except Exception:
+                    pass
+                if spent >= daily_sub_budget * self.buffer_ratio:
+                    return False
 
         if self.session:
             from sqlalchemy import select
@@ -162,9 +223,10 @@ class BudgetFilter(BaseFilter):
         self,
         campaign_id: int,
         cost: Decimal,
+        ad_set_id: int | None = None,
     ) -> None:
         """
-        Update campaign spent amount.
+        Update campaign and ad set spent amount.
 
         Called after ad is served/clicked.
         """
@@ -175,6 +237,10 @@ class BudgetFilter(BaseFilter):
             await redis_client.hincrbyfloat(key, "spent_today", float(cost))
             await redis_client.hincrbyfloat(key, "spent_total", float(cost))
             await redis_client.expire(key, 86400 * 2)  # 2 days TTL
+            if ad_set_id is not None:
+                as_key = f"adset_budget:{ad_set_id}:{today}"
+                await redis_client.hincrbyfloat(as_key, "spent_today", float(cost))
+                await redis_client.expire(as_key, 86400 * 2)
         except Exception as e:
             logger.error(f"Failed to update spent for campaign {campaign_id}: {e}")
 
@@ -200,4 +266,18 @@ class BudgetFilter(BaseFilter):
 
         if mapping:
             await redis_client.hmset(key, mapping)
+            await redis_client.expire(key, 86400 * 2)
+
+    async def set_ad_set_budget(
+        self,
+        ad_set_id: int,
+        daily_budget: float | None,
+    ) -> None:
+        """
+        Set ad set daily budget in cache.
+        """
+        today = current_date()
+        key = f"adset_budget:{ad_set_id}:{today}"
+        if daily_budget is not None:
+            await redis_client.hset(key, "daily_budget", str(daily_budget))
             await redis_client.expire(key, 86400 * 2)

@@ -34,6 +34,7 @@ class AdResponse(BaseModel):
     ad_id: str = Field(..., description="Ad identifier")
     campaign_id: int = Field(..., description="Campaign identifier")
     creative_id: int = Field(..., description="Creative identifier")
+    ad_set_id: int | None = Field(None, description="Ad set identifier")
     creative: CreativeResponse = Field(..., description="Creative content")
     tracking: TrackingUrls = Field(..., description="Tracking URLs")
     sponsored: bool = Field(True, description="Indicates this is a sponsored ad")

@@ -85,60 +85,68 @@ class TargetingRetrieval(BaseRetrieval):
                 # Campaign has assignments but we can't resolve slot publisher — skip
                 continue
 
-            # Check if campaign matches user targeting
-            if not self._match_targeting(campaign_data, user_context):
-                continue
-
-            # Extract sector_include rules to pass to candidates for personalization
-            targeted_sectors = []
-            for rule in campaign_data.get("targeting_rules", []):
-                if rule["rule_type"] == "sector" and rule["is_include"]:
-                    if rule["rule_value"] and "entries" in rule["rule_value"]:
-                        targeted_sectors.extend(rule["rule_value"]["entries"])
-
-            # Create candidate for each creative that matches slot dimensions
-            for creative_data in campaign_data.get("creatives", []):
-                # Format matching
-                c_format = creative_data.get("creative_type", 1)
-                if is_chat_surface and c_format == 4:
-                    continue  # Interstitial format is forbidden on chat surfaces
-                if slot_format is not None and c_format != slot_format:
+            # Evaluate each eligible ad set
+            ad_sets = campaign_data.get("ad_sets", [])
+            for ad_set_data in ad_sets:
+                # Match targeting rules scoped strictly to this ad set
+                if not self._match_targeting(ad_set_data, user_context):
                     continue
 
-                # Size matching: skip creatives that don't fit the slot
-                if slot_width and slot_height:
-                    c_w = creative_data.get("width", 0) or 0
-                    c_h = creative_data.get("height", 0) or 0
-                    # Creative 0x0 means "any size" (responsive)
-                    if c_w != 0 and c_h != 0:
-                        if c_w != slot_width or c_h != slot_height:
-                            continue
+                targeted_sectors = []
+                for rule in ad_set_data.get("targeting_rules", []):
+                    if rule["rule_type"] == "sector" and rule["is_include"]:
+                        if rule["rule_value"] and "entries" in rule["rule_value"]:
+                            targeted_sectors.extend(rule["rule_value"]["entries"])
+                        elif rule["rule_value"] and "sectors" in rule["rule_value"]:
+                            targeted_sectors.extend(rule["rule_value"]["sectors"])
 
-                candidate = AdCandidate(
-                    campaign_id=campaign_data["id"],
-                    creative_id=creative_data["id"],
-                    advertiser_id=campaign_data["advertiser_id"],
-                    bid=campaign_data["bid_amount"],
-                    bid_type=campaign_data["bid_type"],
-                    title=creative_data.get("title"),
-                    description=creative_data.get("description"),
-                    image_url=creative_data.get("image_url"),
-                    video_url=creative_data.get("video_url"),
-                    landing_url=creative_data.get("landing_url", ""),
-                    creative_type=creative_data.get("creative_type", 1),
-                    width=creative_data.get("width"),
-                    height=creative_data.get("height"),
-                    metadata={
-                        "sectors": targeted_sectors,
-                        "freq_cap_daily": campaign_data.get("freq_cap_daily"),
-                        "freq_cap_hourly": campaign_data.get("freq_cap_hourly"),
-                    },
-                )
+                for creative_data in ad_set_data.get("creatives", []):
+                    # Format matching
+                    c_format = creative_data.get("creative_type", 1)
+                    if is_chat_surface and c_format == 4:
+                        continue  # Interstitial format is forbidden on chat surfaces
+                    if slot_format is not None and c_format != slot_format:
+                        continue
 
-                if is_explicitly_assigned:
-                    assigned_candidates.append(candidate)
-                else:
-                    unassigned_candidates.append(candidate)
+                    # Size matching: skip creatives that don't fit the slot
+                    if slot_width and slot_height:
+                        c_w = creative_data.get("width", 0) or 0
+                        c_h = creative_data.get("height", 0) or 0
+                        # Creative 0x0 means "any size" (responsive)
+                        if c_w != 0 and c_h != 0:
+                            if c_w != slot_width or c_h != slot_height:
+                                continue
+
+                    candidate = AdCandidate(
+                        campaign_id=campaign_data["id"],
+                        ad_set_id=ad_set_data.get("id"),
+                        creative_id=creative_data["id"],
+                        advertiser_id=campaign_data["advertiser_id"],
+                        bid=ad_set_data.get("bid_amount", campaign_data["bid_amount"]),
+                        bid_type=ad_set_data.get("bid_type", campaign_data["bid_type"]),
+                        title=creative_data.get("title"),
+                        description=creative_data.get("description"),
+                        image_url=creative_data.get("image_url"),
+                        video_url=creative_data.get("video_url"),
+                        landing_url=creative_data.get("landing_url", ""),
+                        creative_type=creative_data.get("creative_type", 1),
+                        width=creative_data.get("width"),
+                        height=creative_data.get("height"),
+                        metadata={
+                            "sectors": targeted_sectors,
+                            "freq_cap_daily": ad_set_data.get("freq_cap_daily"),
+                            "freq_cap_hourly": ad_set_data.get("freq_cap_hourly"),
+                            "ad_set_daily_budget": ad_set_data.get("daily_budget"),
+                        },
+                    )
+
+                    if is_explicitly_assigned:
+                        assigned_candidates.append(candidate)
+                    else:
+                        unassigned_candidates.append(candidate)
+
+                    if len(assigned_candidates) + len(unassigned_candidates) >= limit:
+                        break
 
                 if len(assigned_candidates) + len(unassigned_candidates) >= limit:
                     break
@@ -176,7 +184,7 @@ class TargetingRetrieval(BaseRetrieval):
         return 0, 0, None, None, False
 
     async def _get_active_campaigns(self) -> list[dict[str, Any]]:
-        """Get all active campaigns with creatives and targeting rules."""
+        """Get all active campaigns with ad sets, creatives, and targeting rules."""
         # Try cache first
         cache_key = CacheKeys.active_ads()
         cached = await redis_client.get(cache_key)
@@ -218,8 +226,7 @@ class TargetingRetrieval(BaseRetrieval):
                 "spent_total": float(campaign.spent_total),
                 "freq_cap_daily": campaign.freq_cap_daily,
                 "freq_cap_hourly": campaign.freq_cap_hourly,
-                "creatives": [],
-                "targeting_rules": [],
+                "ad_sets": [],
                 "assignments": [],
             }
 
@@ -230,10 +237,51 @@ class TargetingRetrieval(BaseRetrieval):
                     "slot_id": assignment.slot_id,
                 })
 
-            # Add creatives
-            for creative in campaign.creatives:
-                if creative.status == Status.ACTIVE and creative.moderation_status == ModerationStatus.APPROVED.value:
-                    campaign_data["creatives"].append({
+            ad_sets_data: list[dict[str, Any]] = []
+            campaign_ad_sets = getattr(campaign, "ad_sets", [])
+            if campaign_ad_sets:
+                for ad_set in campaign_ad_sets:
+                    if not ad_set.is_active or ad_set.status != Status.ACTIVE:
+                        continue
+                    set_creatives = [
+                        {
+                            "id": c.id,
+                            "title": c.title,
+                            "description": c.description,
+                            "image_url": c.image_url,
+                            "video_url": c.video_url,
+                            "landing_url": c.landing_url,
+                            "creative_type": c.creative_type,
+                            "width": c.width,
+                            "height": c.height,
+                        }
+                        for c in getattr(ad_set, "creatives", [])
+                        if c.status == Status.ACTIVE and c.moderation_status == ModerationStatus.APPROVED.value
+                    ]
+                    set_rules = [
+                        {
+                            "rule_type": r.rule_type,
+                            "rule_value": r.rule_value,
+                            "is_include": r.is_include,
+                        }
+                        for r in getattr(ad_set, "targeting_rules", [])
+                    ]
+                    if set_creatives:
+                        ad_sets_data.append({
+                            "id": ad_set.id,
+                            "name": ad_set.name,
+                            "bid_type": ad_set.bid_type,
+                            "bid_amount": float(ad_set.bid_amount) if ad_set.bid_amount and float(ad_set.bid_amount) > 0 else float(campaign.bid_amount),
+                            "daily_budget": float(ad_set.daily_budget) if ad_set.daily_budget is not None else None,
+                            "freq_cap_daily": ad_set.freq_cap_daily if ad_set.freq_cap_daily is not None else campaign.freq_cap_daily,
+                            "freq_cap_hourly": ad_set.freq_cap_hourly if ad_set.freq_cap_hourly is not None else campaign.freq_cap_hourly,
+                            "targeting_rules": set_rules,
+                            "creatives": set_creatives,
+                        })
+            else:
+                # Backward compatibility fallback if campaign has no ad_sets attached
+                legacy_creatives = [
+                    {
                         "id": creative.id,
                         "title": creative.title,
                         "description": creative.description,
@@ -243,17 +291,33 @@ class TargetingRetrieval(BaseRetrieval):
                         "creative_type": creative.creative_type,
                         "width": creative.width,
                         "height": creative.height,
+                    }
+                    for creative in getattr(campaign, "creatives", [])
+                    if creative.status == Status.ACTIVE and creative.moderation_status == ModerationStatus.APPROVED.value
+                ]
+                legacy_rules = [
+                    {
+                        "rule_type": rule.rule_type,
+                        "rule_value": rule.rule_value,
+                        "is_include": rule.is_include,
+                    }
+                    for rule in getattr(campaign, "targeting_rules", [])
+                ]
+                if legacy_creatives:
+                    ad_sets_data.append({
+                        "id": None,
+                        "name": "Default Ad Set",
+                        "bid_type": campaign.bid_type,
+                        "bid_amount": float(campaign.bid_amount),
+                        "daily_budget": float(campaign.budget_daily) if campaign.budget_daily else None,
+                        "freq_cap_daily": campaign.freq_cap_daily,
+                        "freq_cap_hourly": campaign.freq_cap_hourly,
+                        "targeting_rules": legacy_rules,
+                        "creatives": legacy_creatives,
                     })
 
-            # Add targeting rules
-            for rule in campaign.targeting_rules:
-                campaign_data["targeting_rules"].append({
-                    "rule_type": rule.rule_type,
-                    "rule_value": rule.rule_value,
-                    "is_include": rule.is_include,
-                })
-
-            if campaign_data["creatives"]:  # Only add if has active creatives
+            campaign_data["ad_sets"] = ad_sets_data
+            if ad_sets_data:
                 campaign_list.append(campaign_data)
 
         # Cache the result

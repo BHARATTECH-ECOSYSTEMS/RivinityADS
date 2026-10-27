@@ -16,6 +16,12 @@ from liteads.common.email_templates import (
     build_verification_email,
 )
 from liteads.common.logger import get_logger
+from liteads.ad_server.services.notification_service import NotificationService
+from liteads.models.notification import (
+    NotificationCategory,
+    NotificationSeverity,
+    NotificationType,
+)
 from liteads.common.security import (
     DUMMY_PASSWORD_HASH,
     check_login_rate_limit,
@@ -388,6 +394,7 @@ async def reset_password(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Reset token is invalid")
 
     user.password_hash = hash_password(payload.password)
+    user.password_changed_at = now
 
     # Revoke all active refresh tokens for the account
     await session.execute(
@@ -408,19 +415,42 @@ async def reset_password(
         )
     )
 
-    await session.commit()
-
-    # Send security notification
-    email_content = build_password_changed_email(recipient_email=user.email)
+    # Queue durable in-app security notification and transactional email outbox job
+    user_id = user.id
+    user_email = user.email
+    token_record_id = record.id
+    email_content = build_password_changed_email(recipient_email=user_email)
     try:
-        await send_email(
-            to_address=user.email,
-            subject=email_content.subject,
-            text_content=email_content.text_content,
-            html_content=email_content.html_content,
+        await NotificationService.create_notification(
+            session=session,
+            user_id=user_id,
+            category=NotificationCategory.SECURITY,
+            type=NotificationType.PASSWORD_RESET_CONFIRMATION,
+            severity=NotificationSeverity.WARNING,
+            title="Password Changed",
+            message="Your password was successfully changed. If you did not make this change, please sign in and secure your account immediately.",
+            link="/login",
+            resource_type="user",
+            resource_id=str(user_id),
+            dedupe_key=f"pwd_reset:{user_id}:{token_record_id}",
+            send_email=True,
+            recipient_email=user_email,
+            email_subject=email_content.subject,
+            email_body_text=email_content.text_content,
+            email_body_html=email_content.html_content,
         )
+        await session.commit()
     except Exception as exc:
-        logger.error("Failed to send password changed notification email", user_id=user.id, error=str(exc))
+        await session.rollback()
+        logger.error(
+            "Failed to finalize password reset notification; transaction rolled back",
+            user_id=user_id,
+            error=str(exc),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while finalizing password reset. Please try again.",
+        )
 
     return MessageResponse(message="Password reset")
 

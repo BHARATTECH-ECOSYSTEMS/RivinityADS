@@ -14,6 +14,7 @@ async def advertiser(test_db):
     adv = Advertiser(
         name="Executor Test Advertiser",
         contact_email="executor@example.com",
+        balance=Decimal("1000.00"),
     )
     test_db.add(adv)
     await test_db.commit()
@@ -228,6 +229,7 @@ async def test_autopilot_on_sector_add_only(test_db, campaign):
 
 
 async def test_invalid_execution_missing_payload_fails_safely(test_db, campaign):
+    camp_id = campaign.id
     campaign.autopilot = True
     await test_db.commit()
     
@@ -246,11 +248,12 @@ async def test_invalid_execution_missing_payload_fails_safely(test_db, campaign)
         await executor.execute(campaign, policy_result, target_payload=None)
         
     # No false changelog
-    log_res = await test_db.execute(select(CampaignChangeLog).where(CampaignChangeLog.campaign_id == campaign.id))
+    log_res = await test_db.execute(select(CampaignChangeLog).where(CampaignChangeLog.campaign_id == camp_id))
     assert log_res.scalar_one_or_none() is None
 
 
-async def test_creative_execution_controlled_failure(test_db, campaign):
+async def test_creative_execution_routes_to_human_suggestion(test_db, campaign):
+    camp_id = campaign.id
     campaign.autopilot = True
     await test_db.commit()
     
@@ -264,14 +267,43 @@ async def test_creative_execution_controlled_failure(test_db, campaign):
         operation_type="SUGGESTION"
     )
     
-    with pytest.raises(OptimizationExecutionError, match="No concrete creative execution mechanism exists"):
+    # Under Phase 5, improve_creative routes safely to human-review suggestion without crashing or throwing
+    await executor.execute(campaign, policy_result)
+        
+    log_res = await test_db.execute(select(CampaignChangeLog).where(CampaignChangeLog.campaign_id == camp_id))
+    assert log_res.scalar_one_or_none() is None
+
+    sugg_res = await test_db.execute(select(Suggestion).where(Suggestion.campaign_id == camp_id))
+    sugg = sugg_res.scalar_one_or_none()
+    assert sugg is not None
+    assert sugg.action["action"] == "improve_creative"
+    assert sugg.status == "PENDING"
+
+
+async def test_unsupported_action_controlled_failure(test_db, campaign):
+    camp_id = campaign.id
+    campaign.autopilot = True
+    await test_db.commit()
+    
+    executor = OptimizationExecutor(test_db)
+    policy_result = OptimizationPolicyResult(
+        accepted=True,
+        reason="OK",
+        action="unsupported_action_xyz",
+        confidence=0.9,
+        autopilot=True,
+        operation_type="MODIFY"
+    )
+    
+    with pytest.raises(OptimizationExecutionError, match="Unsupported action: unsupported_action_xyz"):
         await executor.execute(campaign, policy_result)
         
-    log_res = await test_db.execute(select(CampaignChangeLog).where(CampaignChangeLog.campaign_id == campaign.id))
+    log_res = await test_db.execute(select(CampaignChangeLog).where(CampaignChangeLog.campaign_id == camp_id))
     assert log_res.scalar_one_or_none() is None
 
 
 async def test_transactionality_rollback(test_db, campaign):
+    camp_id = campaign.id
     campaign.autopilot = True
     await test_db.commit()
     
@@ -294,7 +326,7 @@ async def test_transactionality_rollback(test_db, campaign):
     await test_db.refresh(campaign)
     assert campaign.budget_daily == Decimal("100.00")
     
-    log_res = await test_db.execute(select(CampaignChangeLog).where(CampaignChangeLog.campaign_id == campaign.id))
+    log_res = await test_db.execute(select(CampaignChangeLog).where(CampaignChangeLog.campaign_id == camp_id))
     assert log_res.scalar_one_or_none() is None
 
 
@@ -309,13 +341,13 @@ async def test_budget_boundary_exact_30(test_db, campaign):
         confidence=0.9, autopilot=True, proposed_budget_delta=30.0,
         operation_type="MODIFY"
     )
-    await executor.execute(campaign, policy_result)
+    await executor.execute(campaign, policy_result, enforce_cooldown=False)
     await test_db.refresh(campaign)
     assert campaign.budget_daily == Decimal("130.00")
     
     # -30%
     policy_result.proposed_budget_delta = -30.0
-    await executor.execute(campaign, policy_result)
+    await executor.execute(campaign, policy_result, enforce_cooldown=False)
     await test_db.refresh(campaign)
     assert campaign.budget_daily == Decimal("100.00")
 
@@ -334,6 +366,7 @@ async def test_budget_boundary_exceeds_30(test_db, campaign):
     with pytest.raises(OptimizationExecutionError, match="Budget change exceeds 30% guardrail"):
         await executor.execute(campaign, policy_result)
         
+    await test_db.refresh(campaign)
     # -30.1%
     policy_result.proposed_budget_delta = -30.1
     with pytest.raises(OptimizationExecutionError, match="Budget change exceeds 30% guardrail"):
@@ -345,6 +378,7 @@ from sqlalchemy.exc import IntegrityError
 
 
 async def test_transaction_changelog_failure(test_db, campaign):
+    camp_id = campaign.id
     campaign.autopilot = True
     await test_db.commit()
     executor = OptimizationExecutor(test_db)
@@ -357,16 +391,17 @@ async def test_transaction_changelog_failure(test_db, campaign):
     
     with patch("liteads.ad_server.services.optimization_executor.CampaignChangeLog", side_effect=ValueError("Simulated ChangeLog init failure")):
         with pytest.raises(OptimizationExecutionError, match="Action execution failed: Simulated ChangeLog init failure"):
-            await executor.execute(campaign, policy_result)
+            await executor.execute(campaign, policy_result, enforce_cooldown=False)
             
     await test_db.refresh(campaign)
     assert campaign.budget_daily == Decimal("100.00") # Rolled back
     
-    log_res = await test_db.execute(select(CampaignChangeLog).where(CampaignChangeLog.campaign_id == campaign.id))
+    log_res = await test_db.execute(select(CampaignChangeLog).where(CampaignChangeLog.campaign_id == camp_id))
     assert log_res.scalar_one_or_none() is None
 
 
 async def test_transaction_commit_failure(test_db, campaign):
+    camp_id = campaign.id
     campaign.autopilot = True
     await test_db.commit()
     executor = OptimizationExecutor(test_db)
@@ -379,16 +414,17 @@ async def test_transaction_commit_failure(test_db, campaign):
     
     with patch.object(test_db, 'commit', side_effect=IntegrityError("simulated", "params", "orig")):
         with pytest.raises(OptimizationExecutionError, match="Action execution failed:"):
-            await executor.execute(campaign, policy_result)
+            await executor.execute(campaign, policy_result, enforce_cooldown=False)
             
     await test_db.refresh(campaign)
     assert campaign.budget_daily == Decimal("100.00")
     
-    log_res = await test_db.execute(select(CampaignChangeLog).where(CampaignChangeLog.campaign_id == campaign.id))
+    log_res = await test_db.execute(select(CampaignChangeLog).where(CampaignChangeLog.campaign_id == camp_id))
     assert log_res.scalar_one_or_none() is None
 
 
 async def test_transaction_targeting_failure(test_db, campaign):
+    camp_id = campaign.id
     campaign.autopilot = True
     await test_db.commit()
     executor = OptimizationExecutor(test_db)
@@ -402,10 +438,10 @@ async def test_transaction_targeting_failure(test_db, campaign):
     
     with patch("liteads.ad_server.services.optimization_executor.TargetingRule", side_effect=ValueError("Simulated TargetingRule init failure")):
         with pytest.raises(OptimizationExecutionError, match="Action execution failed: Simulated TargetingRule init failure"):
-            await executor.execute(campaign, policy_result, target_payload)
+            await executor.execute(campaign, policy_result, target_payload, enforce_cooldown=False)
             
-    rules_res = await test_db.execute(select(TargetingRule).where(TargetingRule.campaign_id == campaign.id))
+    rules_res = await test_db.execute(select(TargetingRule).where(TargetingRule.campaign_id == camp_id))
     assert rules_res.scalar_one_or_none() is None
     
-    log_res = await test_db.execute(select(CampaignChangeLog).where(CampaignChangeLog.campaign_id == campaign.id))
+    log_res = await test_db.execute(select(CampaignChangeLog).where(CampaignChangeLog.campaign_id == camp_id))
     assert log_res.scalar_one_or_none() is None

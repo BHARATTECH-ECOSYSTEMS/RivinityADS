@@ -45,13 +45,32 @@ class GenerativeIntentClient:
 
     def _build_system_prompt(self) -> str:
         return """You are a campaign builder assistant for RivinityAds.
-Understand the user's message and return only valid JSON with this shape:
-{"intent":"UNKNOWN","slots":{"name":null,"budget_daily":null,"budget_total":null,
-"country":null,"state":null,"city":null,"sector":null,"is_exclude":null,
-"amount":null},"confidence":null,"reply":null}
+Understand the user's message and guide them through the advertising hierarchy:
+Campaign -> Ad Set -> Ads (Creatives).
 
-Allowed intents: CREATE_CAMPAIGN, SET_BUDGET, SET_GEO, SET_SECTOR,
-REQUEST_PAYMENT, LAUNCH_CAMPAIGN, UNKNOWN.
+Return only valid JSON with this shape:
+{"intent":"UNKNOWN","slots":{"name":null,"campaign_id":null,"ad_set_id":null,"ad_set_name":null,
+"budget_daily":null,"budget_total":null,"bid_amount":null,"bid_type":null,
+"country":null,"state":null,"city":null,"sector":null,"is_exclude":null,"amount":null,
+"title":null,"landing_url":null,"image_url":null,"video_url":null,"creative_type":null,"width":null,"height":null},
+"confidence":null,"reply":null}
+
+Allowed intents:
+- CREATE_CAMPAIGN: create a new campaign
+- SELECT_CAMPAIGN: select or switch to an existing campaign by ID
+- UPDATE_CAMPAIGN: update campaign name or global budget
+- CREATE_AD_SET: create a new ad set under current campaign
+- SELECT_AD_SET: switch to or select an ad set by ID or name
+- UPDATE_AD_SET: update an ad set's sub-budget, bid, or schedule
+- SET_BUDGET: update daily or total budget for campaign or active ad set
+- SET_GEO: set geo targeting for the active ad set
+- SET_SECTOR: set sector targeting for the active ad set
+- CREATE_AD: create an ad / creative for the active ad set
+- REVIEW_CAMPAIGN: review campaign structure, ad sets, ads, and launch prerequisites
+- REQUEST_PAYMENT: add funds / top up advertiser wallet
+- LAUNCH_CAMPAIGN: activate the campaign
+- UNKNOWN: fallback when request cannot be safely mapped
+
 Do not execute tools, authorize users, or manipulate wallet balances.
 Return UNKNOWN when the request does not safely map to an allowed intent."""
 
@@ -61,19 +80,34 @@ Return UNKNOWN when the request does not safely map to an allowed intent."""
             "type": "object",
             "properties": {
                 "intent": {"type": "string", "enum": [
-                    "CREATE_CAMPAIGN", "SET_BUDGET", "SET_GEO", "SET_SECTOR",
+                    "CREATE_CAMPAIGN", "SELECT_CAMPAIGN", "UPDATE_CAMPAIGN",
+                    "CREATE_AD_SET", "SELECT_AD_SET", "UPDATE_AD_SET",
+                    "SET_BUDGET", "SET_GEO", "SET_SECTOR",
+                    "CREATE_AD", "REVIEW_CAMPAIGN",
                     "REQUEST_PAYMENT", "LAUNCH_CAMPAIGN", "UNKNOWN"
                 ]},
                 "slots": {"type": "object", "properties": {
                     "name": {"type": ["string", "null"]},
+                    "campaign_id": {"type": ["integer", "null"]},
+                    "ad_set_id": {"type": ["integer", "null"]},
+                    "ad_set_name": {"type": ["string", "null"]},
                     "budget_daily": {"type": ["number", "null"]},
                     "budget_total": {"type": ["number", "null"]},
+                    "bid_amount": {"type": ["number", "null"]},
+                    "bid_type": {"type": ["integer", "null"]},
                     "country": {"type": ["string", "null"]},
                     "state": {"type": ["string", "null"]},
                     "city": {"type": ["string", "null"]},
                     "sector": {"type": ["string", "null"]},
                     "is_exclude": {"type": ["boolean", "null"]},
                     "amount": {"type": ["number", "null"]},
+                    "title": {"type": ["string", "null"]},
+                    "landing_url": {"type": ["string", "null"]},
+                    "image_url": {"type": ["string", "null"]},
+                    "video_url": {"type": ["string", "null"]},
+                    "creative_type": {"type": ["integer", "null"]},
+                    "width": {"type": ["integer", "null"]},
+                    "height": {"type": ["integer", "null"]},
                 }},
                 "confidence": {"type": ["number", "null"]},
                 "reply": {"type": ["string", "null"]},

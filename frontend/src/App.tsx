@@ -14,6 +14,7 @@ import Advertisers from "./pages/admin/Advertisers";
 import CampaignsAdmin from "./pages/admin/Campaigns";
 import Publishers from "./pages/admin/Publishers";
 import CreativeModeration from "./pages/admin/CreativeModeration";
+import FinanceReconciliation from "./pages/admin/FinanceReconciliation";
 import AdvertiserDashboard from "./pages/advertiser/Dashboard";
 import CampaignBuilder from "./pages/advertiser/CampaignBuilder";
 import CampaignDetail from "./pages/advertiser/CampaignDetail";
@@ -27,6 +28,8 @@ import PublisherWebhooks from "./pages/publisher/Webhooks";
 import Integration from "./pages/publisher/Integration";
 import AdPreview from "./pages/publisher/AdPreview";
 import PlacementHealth from "./pages/publisher/PlacementHealth";
+import Notifications from "./pages/Notifications";
+
 
 function HomeRedirect() {
   const { session } = useAuth();
@@ -52,6 +55,7 @@ export default function App() {
                 <Route path="campaigns" element={<CampaignsAdmin />} />
                 <Route path="creatives" element={<CreativeModeration />} />
                 <Route path="publishers" element={<Publishers />} />
+                <Route path="finance" element={<FinanceReconciliation />} />
               </Route>
               <Route path="/advertiser" element={<RequireRole roles={["advertiser"]} />}>
                 <Route index element={<AdvertiserDashboard />} />
@@ -72,6 +76,8 @@ export default function App() {
               </Route>
               <Route path="/tools" element={<Tools />} />
               <Route path="/health" element={<Health />} />
+              <Route path="/notifications" element={<Notifications />} />
+              <Route path="/notifications/preferences" element={<Navigate to="/notifications?tab=preferences" replace />} />
             </Route>
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

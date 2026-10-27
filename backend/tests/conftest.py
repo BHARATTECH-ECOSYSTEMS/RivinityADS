@@ -43,6 +43,27 @@ def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
     loop.close()
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def cleanup_redis_between_tests():
+    """Ensure Redis tracking keys do not leak across test runs."""
+    from liteads.common.cache import redis_client
+    if redis_client.connected:
+        try:
+            keys = await redis_client.client.keys("trk:*")
+            if keys:
+                await redis_client.client.delete(*keys)
+        except Exception:
+            pass
+    yield
+    if redis_client.connected:
+        try:
+            keys = await redis_client.client.keys("trk:*")
+            if keys:
+                await redis_client.client.delete(*keys)
+        except Exception:
+            pass
+
+
 @pytest_asyncio.fixture(scope="function")
 async def test_db() -> AsyncGenerator[AsyncSession, None]:
     """Create a test database session."""

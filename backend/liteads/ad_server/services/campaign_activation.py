@@ -14,7 +14,15 @@ async def activate_campaign_logic(
     campaign_id: int,
     advertiser_id: int
 ) -> Campaign:
-    # Explicitly load relationships for async context
+    # 1. Canonical lock order: Advertiser -> Campaign
+    advertiser = await session.get(Advertiser, advertiser_id, with_for_update=True)
+    if advertiser is None:
+        raise CampaignActivationError("Advertiser not found")
+
+    if advertiser.balance <= Decimal("0"):
+        raise CampaignActivationError("Insufficient wallet balance to activate campaign")
+
+    # 2. Lock Campaign with relationships loaded
     stmt = (
         select(Campaign)
         .where(Campaign.id == campaign_id)
@@ -57,13 +65,6 @@ async def activate_campaign_logic(
         
     if not campaign.targeting_rules:
         raise CampaignActivationError("Campaign must have targeting configured")
-        
-    advertiser = await session.get(Advertiser, campaign.advertiser_id, with_for_update=True)
-    if advertiser is None:
-        raise CampaignActivationError("Advertiser not found")
-        
-    if advertiser.balance <= Decimal("0"):
-        raise CampaignActivationError("Insufficient wallet balance to activate campaign")
-        
+
     campaign.status = 1  # Status.ACTIVE
     return campaign

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../../auth/AuthContext";
 import {
@@ -8,6 +8,16 @@ import {
   type FormatBenchmark,
 } from "../../api/client";
 import { money, num } from "../../lib/format";
+import {
+  PageContainer,
+  PageHeader,
+  Card,
+  Button,
+  StatusBadge,
+  Alert,
+  LoadingSkeleton,
+  EmptyState,
+} from "../../components/ui";
 
 type VerdictFilter = "ALL" | "great" | "healthy" | "low_visibility" | "insufficient_data";
 
@@ -44,10 +54,14 @@ export default function PlacementHealth() {
 
   if (!publisherId) {
     return (
-      <div className="card" style={{ padding: "32px", textAlign: "center" }}>
-        <h2>Publisher Account Required</h2>
-        <p className="muted">You must be logged in as a publisher to view placement health.</p>
-      </div>
+      <PageContainer>
+        <Card>
+          <EmptyState
+            title="Publisher Account Required"
+            description="You must be logged in as a publisher to view placement health diagnostics."
+          />
+        </Card>
+      </PageContainer>
     );
   }
 
@@ -73,164 +87,46 @@ export default function PlacementHealth() {
   const renderVerdictBadge = (verdict: string) => {
     switch (verdict) {
       case "great":
-        return (
-          <span
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: "4px",
-              padding: "4px 10px",
-              borderRadius: "999px",
-              fontSize: "12px",
-              fontWeight: 700,
-              backgroundColor: "#dcfce7",
-              color: "#15803d",
-              border: "1px solid #bbf7d0",
-            }}
-          >
-            ★ Great
-          </span>
-        );
+        return <StatusBadge status="success" label="★ Great" size="sm" />;
       case "healthy":
-        return (
-          <span
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: "4px",
-              padding: "4px 10px",
-              borderRadius: "999px",
-              fontSize: "12px",
-              fontWeight: 700,
-              backgroundColor: "#eff6ff",
-              color: "#1d4ed8",
-              border: "1px solid #bfdbfe",
-            }}
-          >
-            ✓ Healthy
-          </span>
-        );
+        return <StatusBadge status="active" label="✓ Healthy" size="sm" />;
       case "low_visibility":
-        return (
-          <span
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: "4px",
-              padding: "4px 10px",
-              borderRadius: "999px",
-              fontSize: "12px",
-              fontWeight: 700,
-              backgroundColor: "#fef3c7",
-              color: "#b45309",
-              border: "1px solid #fde68a",
-            }}
-          >
-            ⚠ Low Visibility
-          </span>
-        );
+        return <StatusBadge status="warning" label="⚠ Low Visibility" size="sm" />;
       case "insufficient_data":
       default:
-        return (
-          <span
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: "4px",
-              padding: "4px 10px",
-              borderRadius: "999px",
-              fontSize: "12px",
-              fontWeight: 600,
-              backgroundColor: "#f1f5f9",
-              color: "#475569",
-              border: "1px solid #cbd5e1",
-            }}
-          >
-            ⏳ Insufficient Data
-          </span>
-        );
+        return <StatusBadge status="pending" label="⏳ Insufficient Data" size="sm" />;
     }
   };
 
-  const renderFormatBadge = (formatName: string) => (
-    <span
-      style={{
-        display: "inline-block",
-        padding: "2px 8px",
-        borderRadius: "4px",
-        fontSize: "11px",
-        fontWeight: 600,
-        textTransform: "uppercase",
-        backgroundColor: "#e2e8f0",
-        color: "#334155",
-        letterSpacing: "0.03em",
-      }}
-    >
-      {formatName}
-    </span>
-  );
-
   return (
-    <div style={{ maxWidth: "1200px", margin: "0 auto" }}>
-      {/* Header Banner */}
-      <div
-        className="flex row space-between align-center"
-        style={{ marginBottom: "20px", flexWrap: "wrap", gap: "12px" }}
-      >
-        <div>
-          <h1 style={{ marginBottom: "4px" }}>Placement Health Analysis</h1>
-          <p className="muted" style={{ margin: 0 }}>
-            Automated performance benchmarking and health classification for your ad inventory.
-          </p>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-          {data && (
-            <div
-              style={{
-                background: "#ffffff",
-                border: "1px solid #cbd5e1",
-                borderRadius: "8px",
-                padding: "6px 12px",
-                fontSize: "13px",
-                color: "#475569",
-                fontWeight: 500,
-              }}
+    <PageContainer>
+      <PageHeader
+        eyebrow="Inventory Diagnostics"
+        title="Placement Health Analysis"
+        description="Automated performance benchmarking and health classification for your ad inventory."
+        actions={
+          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+            {data && (
+              <span style={{ fontSize: "0.8125rem", color: "var(--color-text-muted)" }}>
+                Rolling 30 Days: <strong>{data.start_date}</strong> to <strong>{data.end_date}</strong>
+              </span>
+            )}
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={loadData}
+              isLoading={loading}
             >
-              📅 Rolling 30 Days: <strong>{data.start_date}</strong> to <strong>{data.end_date}</strong>
-            </div>
-          )}
-          <button
-            onClick={loadData}
-            disabled={loading}
-            className="btn secondary small"
-            style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}
-          >
-            {loading ? "Refreshing..." : "↻ Refresh"}
-          </button>
-        </div>
-      </div>
+              Refresh
+            </Button>
+          </div>
+        }
+      />
 
       {error && (
-        <div
-          style={{
-            backgroundColor: "#fef2f2",
-            border: "1px solid #fca5a5",
-            borderRadius: "8px",
-            padding: "16px",
-            marginBottom: "20px",
-            color: "#991b1b",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <div>
-            <strong>Error loading placement health:</strong> {error}
-          </div>
-          <button onClick={loadData} className="btn secondary small">
-            Retry
-          </button>
-        </div>
+        <Alert variant="danger" title="Error Loading Data" onClose={() => setError(null)}>
+          {error}
+        </Alert>
       )}
 
       {/* Summary KPI Cards */}
@@ -242,103 +138,74 @@ export default function PlacementHealth() {
           gap: "16px",
         }}
       >
-        <div className="card" style={{ margin: 0, padding: "16px" }}>
-          <div className="muted" style={{ fontSize: "12px", textTransform: "uppercase", fontWeight: 600 }}>
+        <Card style={{ margin: 0, padding: "16px" }}>
+          <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)", textTransform: "uppercase", fontWeight: 600 }}>
             Total Placements
           </div>
-          <div style={{ fontSize: "28px", fontWeight: 700, marginTop: "6px" }}>
+          <div style={{ fontSize: "1.75rem", fontWeight: 700, marginTop: "6px" }}>
             {data ? num(data.total_placements) : "—"}
           </div>
-          <div className="muted" style={{ fontSize: "12px", marginTop: "4px" }}>
+          <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)", marginTop: "4px" }}>
             Active inventory slots
           </div>
-        </div>
+        </Card>
 
-        <div className="card" style={{ margin: 0, padding: "16px", borderLeft: "4px solid #10b981" }}>
-          <div style={{ color: "#15803d", fontSize: "12px", textTransform: "uppercase", fontWeight: 600 }}>
-            Great (CTR &gt; 1.0%)
+        <Card style={{ margin: 0, padding: "16px", borderLeft: "4px solid var(--color-success)" }}>
+          <div style={{ color: "var(--color-success)", fontSize: "0.75rem", textTransform: "uppercase", fontWeight: 600 }}>
+            Great (High Yield)
           </div>
-          <div style={{ fontSize: "28px", fontWeight: 700, marginTop: "6px", color: "#15803d" }}>
+          <div style={{ fontSize: "1.75rem", fontWeight: 700, marginTop: "6px", color: "var(--color-success)" }}>
             {data ? num(countGreat) : "—"}
           </div>
-          <div className="muted" style={{ fontSize: "12px", marginTop: "4px" }}>
-            High-yield inventory
+          <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)", marginTop: "4px" }}>
+            Outperforming platform median
           </div>
-        </div>
+        </Card>
 
-        <div className="card" style={{ margin: 0, padding: "16px", borderLeft: "4px solid #3b82f6" }}>
-          <div style={{ color: "#1d4ed8", fontSize: "12px", textTransform: "uppercase", fontWeight: 600 }}>
-            Healthy (0.2% - 1.0%)
+        <Card style={{ margin: 0, padding: "16px", borderLeft: "4px solid var(--color-primary)" }}>
+          <div style={{ color: "var(--color-primary)", fontSize: "0.75rem", textTransform: "uppercase", fontWeight: 600 }}>
+            Healthy (Consistent)
           </div>
-          <div style={{ fontSize: "28px", fontWeight: 700, marginTop: "6px", color: "#1d4ed8" }}>
+          <div style={{ fontSize: "1.75rem", fontWeight: 700, marginTop: "6px", color: "var(--color-primary)" }}>
             {data ? num(countHealthy) : "—"}
           </div>
-          <div className="muted" style={{ fontSize: "12px", marginTop: "4px" }}>
-            Consistent performers
+          <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)", marginTop: "4px" }}>
+            Consistent delivery metrics
           </div>
-        </div>
+        </Card>
 
-        <div className="card" style={{ margin: 0, padding: "16px", borderLeft: "4px solid #f59e0b" }}>
-          <div style={{ color: "#b45309", fontSize: "12px", textTransform: "uppercase", fontWeight: 600 }}>
+        <Card style={{ margin: 0, padding: "16px", borderLeft: "4px solid #f59e0b" }}>
+          <div style={{ color: "#b45309", fontSize: "0.75rem", textTransform: "uppercase", fontWeight: 600 }}>
             Low Visibility (&lt; 0.2%)
           </div>
-          <div style={{ fontSize: "28px", fontWeight: 700, marginTop: "6px", color: "#b45309" }}>
+          <div style={{ fontSize: "1.75rem", fontWeight: 700, marginTop: "6px", color: "#b45309" }}>
             {data ? num(countLowVis) : "—"}
           </div>
-          <div className="muted" style={{ fontSize: "12px", marginTop: "4px" }}>
+          <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)", marginTop: "4px" }}>
             Needs position adjustment
           </div>
-        </div>
+        </Card>
 
-        <div className="card" style={{ margin: 0, padding: "16px", borderLeft: "4px solid #94a3b8" }}>
-          <div style={{ color: "#475569", fontSize: "12px", textTransform: "uppercase", fontWeight: 600 }}>
-            Insufficient Data (&lt; 100)
+        <Card style={{ margin: 0, padding: "16px", borderLeft: "4px solid #94a3b8" }}>
+          <div style={{ color: "#475569", fontSize: "0.75rem", textTransform: "uppercase", fontWeight: 600 }}>
+            Insufficient Data
           </div>
-          <div style={{ fontSize: "28px", fontWeight: 700, marginTop: "6px", color: "#475569" }}>
+          <div style={{ fontSize: "1.75rem", fontWeight: 700, marginTop: "6px", color: "#475569" }}>
             {data ? num(countInsufficient) : "—"}
           </div>
-          <div className="muted" style={{ fontSize: "12px", marginTop: "4px" }}>
-            Awaiting 100+ impressions
+          <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)", marginTop: "4px" }}>
+            Traffic &lt; 100 impressions
           </div>
-        </div>
+        </Card>
       </div>
 
       {/* Platform Benchmarks Reference Card */}
       {data && data.benchmarks && Object.keys(data.benchmarks).length > 0 && (
-        <div
-          className="card"
-          style={{
-            marginBottom: "24px",
-            backgroundColor: "#f8fafc",
-            border: "1px solid #e2e8f0",
-            padding: "16px 20px",
-          }}
+        <Card
+          title="Platform Benchmark Medians (Format-Specific)"
+          subtitle="Computed across active platform placements (minimum 100 impressions). Comparisons are strictly format-to-format."
+          style={{ marginBottom: "24px" }}
         >
-          <div
-            className="flex row space-between align-center"
-            style={{ marginBottom: "12px", flexWrap: "wrap", gap: "8px" }}
-          >
-            <div>
-              <h3 style={{ margin: 0, fontSize: "15px", fontWeight: 600, color: "#1e293b" }}>
-                📊 Platform Benchmark Medians (Format-Specific)
-              </h3>
-              <p className="muted" style={{ margin: "2px 0 0", fontSize: "12px" }}>
-                Computed from eligible platform placements (minimum 100 impressions). Comparisons are strictly format-to-format.
-              </p>
-            </div>
-            <span
-              style={{
-                fontSize: "11px",
-                color: "#64748b",
-                backgroundColor: "#e2e8f0",
-                padding: "2px 8px",
-                borderRadius: "4px",
-              }}
-            >
-              Privacy Safe • Zero Competitor Leakage
-            </span>
-          </div>
-
           <div
             style={{
               display: "grid",
@@ -350,27 +217,27 @@ export default function PlacementHealth() {
               <div
                 key={fmtKey}
                 style={{
-                  backgroundColor: "#ffffff",
-                  border: "1px solid #cbd5e1",
-                  borderRadius: "8px",
+                  backgroundColor: "var(--color-bg-subtle)",
+                  border: "1px solid var(--border-color)",
+                  borderRadius: "var(--radius-md)",
                   padding: "12px 14px",
                 }}
               >
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <strong>{bm.format_name || fmtKey}</strong>
-                  <span className="muted" style={{ fontSize: "11px" }}>
+                  <span style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>
                     {bm.eligible_slots_count} eligible slots
                   </span>
                 </div>
                 <div style={{ display: "flex", gap: "16px", marginTop: "8px", fontSize: "13px" }}>
                   <div>
-                    <span className="muted" style={{ fontSize: "11px", display: "block" }}>
+                    <span style={{ fontSize: "11px", color: "var(--color-text-muted)", display: "block" }}>
                       Median CTR
                     </span>
                     <strong>{bm.median_ctr !== null ? (bm.median_ctr * 100).toFixed(2) + "%" : "N/A"}</strong>
                   </div>
                   <div>
-                    <span className="muted" style={{ fontSize: "11px", display: "block" }}>
+                    <span style={{ fontSize: "11px", color: "var(--color-text-muted)", display: "block" }}>
                       Median eCPM
                     </span>
                     <strong>{bm.median_ecpm !== null ? money(bm.median_ecpm) : "N/A"}</strong>
@@ -379,206 +246,138 @@ export default function PlacementHealth() {
               </div>
             ))}
           </div>
-        </div>
+        </Card>
       )}
 
-      {/* Main Placement Health Table Card */}
-      <div className="card">
-        {/* Table Filters and Search */}
+      {/* Placements Detailed Analysis Table */}
+      <Card
+        title="Placement Diagnostics &amp; Recommendations"
+        subtitle="Individual unit performance and actionable optimization steps."
+      >
+        {/* Controls: Filter Chips and Search */}
         <div
-          className="flex row space-between align-center"
           style={{
-            marginBottom: "16px",
-            paddingBottom: "16px",
-            borderBottom: "1px solid #e2e8f0",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
             flexWrap: "wrap",
             gap: "12px",
+            marginBottom: "16px",
           }}
         >
-          {/* Verdict Filter Buttons */}
           <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-            {(
-              [
-                { id: "ALL", label: `All (${placements.length})` },
-                { id: "great", label: `Great (${countGreat})` },
-                { id: "healthy", label: `Healthy (${countHealthy})` },
-                { id: "low_visibility", label: `Low Vis (${countLowVis})` },
-                { id: "insufficient_data", label: `Insufficient (${countInsufficient})` },
-              ] as const
-            ).map((btn) => (
+            {[
+              { id: "ALL", label: `All (${placements.length})` },
+              { id: "great", label: `Great (${countGreat})` },
+              { id: "healthy", label: `Healthy (${countHealthy})` },
+              { id: "low_visibility", label: `Low Vis (${countLowVis})` },
+              { id: "insufficient_data", label: `Insufficient (${countInsufficient})` },
+            ].map((tab) => (
               <button
-                key={btn.id}
-                onClick={() => setFilter(btn.id)}
-                className={`btn small ${filter === btn.id ? "primary" : "secondary"}`}
-                style={{ fontSize: "12px" }}
+                key={tab.id}
+                type="button"
+                className={`btn ${filter === tab.id ? "btn-primary" : "btn-secondary"} btn-sm`}
+                onClick={() => setFilter(tab.id as VerdictFilter)}
               >
-                {btn.label}
+                {tab.label}
               </button>
             ))}
           </div>
 
-          {/* Search box */}
           <div style={{ minWidth: "220px" }}>
             <input
               type="text"
-              placeholder="Search placement or code..."
+              placeholder="Search placement or format..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="input"
-              style={{
-                width: "100%",
-                padding: "6px 12px",
-                fontSize: "13px",
-                borderRadius: "6px",
-                border: "1px solid #cbd5e1",
-              }}
+              style={{ fontSize: "0.8125rem", padding: "6px 10px" }}
             />
           </div>
         </div>
 
-        {/* Loading State */}
-        {loading && !data && (
-          <div style={{ padding: "48px", textAlign: "center" }} className="muted">
-            <div style={{ fontSize: "18px", marginBottom: "8px" }}>⏳</div>
-            Loading placement health analysis...
+        {loading ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: "10px", padding: "16px 0" }}>
+            <LoadingSkeleton variant="rect" height={40} />
+            <LoadingSkeleton variant="rect" height={40} />
+            <LoadingSkeleton variant="rect" height={40} />
           </div>
-        )}
-
-        {/* Empty Inventory State */}
-        {!loading && placements.length === 0 && (
-          <div style={{ padding: "48px 24px", textAlign: "center" }}>
-            <div style={{ fontSize: "36px", marginBottom: "12px" }}>📦</div>
-            <h3 style={{ margin: "0 0 8px" }}>No Ad Placements Found</h3>
-            <p className="muted" style={{ maxWidth: "480px", margin: "0 auto 20px", fontSize: "14px" }}>
-              You haven't configured any ad placements yet. Create your first ad unit to begin tracking impressions and receiving automated performance health verdicts.
-            </p>
-            <Link to="/publisher/slots" className="btn primary">
-              Create Ad Unit →
-            </Link>
-          </div>
-        )}
-
-        {/* Filtered Empty State */}
-        {!loading && placements.length > 0 && filteredPlacements.length === 0 && (
-          <div style={{ padding: "36px", textAlign: "center" }} className="muted">
-            No placements matched the selected filter (<strong>{filter}</strong>).
-          </div>
-        )}
-
-        {/* Placements Table */}
-        {!loading && filteredPlacements.length > 0 && (
-          <div style={{ overflowX: "auto" }}>
-            <table className="table" style={{ width: "100%" }}>
+        ) : filteredPlacements.length === 0 ? (
+          <EmptyState
+            title="No placements match filter"
+            description="Adjust your search query or verdict category filter."
+          />
+        ) : (
+          <div className="table-container" style={{ overflowX: "auto" }}>
+            <table className="table">
               <thead>
                 <tr>
-                  <th style={{ width: "24%" }}>Placement</th>
-                  <th style={{ width: "10%" }}>Format</th>
-                  <th style={{ width: "12%", textAlign: "right" }}>30d Volume</th>
-                  <th style={{ width: "13%", textAlign: "right" }}>CTR &amp; Peer</th>
-                  <th style={{ width: "13%", textAlign: "right" }}>eCPM &amp; Peer</th>
-                  <th style={{ width: "12%" }}>Health Verdict</th>
-                  <th style={{ width: "16%" }}>Recommended Action</th>
+                  <th>Placement</th>
+                  <th>Format</th>
+                  <th style={{ textAlign: "right" }}>30d Volume</th>
+                  <th style={{ textAlign: "right" }}>CTR vs Benchmark</th>
+                  <th style={{ textAlign: "right" }}>eCPM vs Benchmark</th>
+                  <th>Verdict</th>
+                  <th>Optimization Recommendation</th>
+                  <th style={{ textAlign: "right" }}>Action</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredPlacements.map((p) => {
-                  const bm = p.benchmark;
-                  const hasBenchmark = bm && bm.median_ctr !== null && bm.median_ecpm !== null;
-                  const ctrDiff = hasBenchmark ? p.ctr - (bm.median_ctr || 0) : null;
-                  const ecpmDiff = hasBenchmark ? p.ecpm - (bm.median_ecpm || 0) : null;
+                  const hasBenchmark = p.benchmark && p.benchmark.median_ctr !== null;
+                  const ctrDiff = hasBenchmark && p.impressions >= 100 ? p.ctr - (p.benchmark.median_ctr || 0) : null;
+                  const ecpmDiff = hasBenchmark && p.impressions >= 100 && p.benchmark.median_ecpm !== null ? p.ecpm - p.benchmark.median_ecpm : null;
 
                   return (
                     <tr key={p.slot_id}>
-                      {/* Name & ID */}
                       <td>
-                        <div style={{ fontWeight: 600, color: "#0f172a" }}>{p.slot_name}</div>
-                        <div
-                          style={{
-                            fontSize: "11px",
-                            fontFamily: "monospace",
-                            color: "#64748b",
-                            marginTop: "2px",
-                          }}
-                        >
+                        <div style={{ fontWeight: 600 }}>{p.slot_name}</div>
+                        <div style={{ fontSize: "11px", fontFamily: "var(--font-mono)", color: "var(--color-text-muted)" }}>
                           {p.slot_id}
                         </div>
                       </td>
-
-                      {/* Format */}
-                      <td>{renderFormatBadge(p.format_name)}</td>
-
-                      {/* Volume (Impressions & Clicks) */}
-                      <td style={{ textAlign: "right" }}>
-                        <div style={{ fontWeight: 600 }}>{num(p.impressions)} impr</div>
-                        <div className="muted" style={{ fontSize: "11px", marginTop: "2px" }}>
-                          {num(p.clicks)} clicks • {money(p.earnings)}
-                        </div>
+                      <td>
+                        <span style={{ fontSize: "11px", background: "var(--color-bg-subtle)", padding: "2px 6px", borderRadius: "4px", textTransform: "uppercase", fontWeight: 600 }}>
+                          {p.format_name}
+                        </span>
                       </td>
-
-                      {/* CTR vs Peer Benchmark */}
+                      <td style={{ textAlign: "right" }}>
+                        <div>{num(p.impressions)} imps</div>
+                        <div style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>{num(p.clicks)} clicks</div>
+                      </td>
                       <td style={{ textAlign: "right" }}>
                         <div style={{ fontWeight: 600 }}>{(p.ctr * 100).toFixed(2)}%</div>
-                        {hasBenchmark ? (
-                          <div
-                            style={{
-                              fontSize: "11px",
-                              marginTop: "2px",
-                              color: (ctrDiff || 0) >= 0 ? "#15803d" : "#b45309",
-                            }}
-                          >
-                            {(ctrDiff || 0) >= 0 ? "+" : ""}
-                            {((ctrDiff || 0) * 100).toFixed(2)}% vs med ({((bm.median_ctr || 0) * 100).toFixed(2)}%)
+                        {ctrDiff !== null ? (
+                          <div style={{ fontSize: "11px", color: ctrDiff >= 0 ? "var(--color-success)" : "var(--color-danger)" }}>
+                            {ctrDiff >= 0 ? "+" : ""}{(ctrDiff * 100).toFixed(2)}% vs bm
                           </div>
                         ) : (
-                          <div className="muted" style={{ fontSize: "11px", marginTop: "2px" }}>
-                            no peer benchmark
-                          </div>
+                          <div style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>—</div>
                         )}
                       </td>
-
-                      {/* eCPM vs Peer Benchmark */}
                       <td style={{ textAlign: "right" }}>
                         <div style={{ fontWeight: 600 }}>{money(p.ecpm)}</div>
-                        {hasBenchmark ? (
-                          <div
-                            style={{
-                              fontSize: "11px",
-                              marginTop: "2px",
-                              color: (ecpmDiff || 0) >= 0 ? "#15803d" : "#b45309",
-                            }}
-                          >
-                            {(ecpmDiff || 0) >= 0 ? "+" : ""}
-                            {money(ecpmDiff || 0)} vs med ({money(bm.median_ecpm || 0)})
+                        {ecpmDiff !== null ? (
+                          <div style={{ fontSize: "11px", color: ecpmDiff >= 0 ? "var(--color-success)" : "var(--color-danger)" }}>
+                            {ecpmDiff >= 0 ? "+" : ""}{money(ecpmDiff)} vs bm
                           </div>
                         ) : (
-                          <div className="muted" style={{ fontSize: "11px", marginTop: "2px" }}>
-                            no peer benchmark
-                          </div>
+                          <div style={{ fontSize: "11px", color: "var(--color-text-muted)" }}>—</div>
                         )}
                       </td>
-
-                      {/* Health Verdict */}
-                      <td>{renderVerdictBadge(p.verdict)}</td>
-
-                      {/* Recommendation */}
                       <td>
-                        <div
-                          style={{
-                            fontSize: "12px",
-                            fontWeight: 500,
-                            color:
-                              p.verdict === "great"
-                                ? "#15803d"
-                                : p.verdict === "low_visibility"
-                                ? "#b45309"
-                                : p.verdict === "insufficient_data"
-                                ? "#64748b"
-                                : "#1e293b",
-                            lineHeight: 1.4,
-                          }}
+                        {renderVerdictBadge(p.verdict)}
+                      </td>
+                      <td style={{ fontSize: "0.8125rem", color: "var(--color-text-secondary)", maxWidth: "320px" }}>
+                        {p.recommendation}
+                      </td>
+                      <td style={{ textAlign: "right" }}>
+                        <Link
+                          to={`/publisher/preview?slot_id=${encodeURIComponent(p.slot_id)}`}
+                          className="btn btn-secondary btn-sm"
                         >
-                          {p.recommendation}
-                        </div>
+                          Preview
+                        </Link>
                       </td>
                     </tr>
                   );
@@ -587,36 +386,7 @@ export default function PlacementHealth() {
             </table>
           </div>
         )}
-      </div>
-
-      {/* Helpful Guidance Footer Card */}
-      <div
-        className="card"
-        style={{
-          marginTop: "24px",
-          backgroundColor: "#f8fafc",
-          border: "1px solid #e2e8f0",
-          fontSize: "13px",
-          lineHeight: 1.6,
-          color: "#475569",
-        }}
-      >
-        <h4 style={{ margin: "0 0 8px", color: "#1e293b" }}>💡 Understanding Health Classifications</h4>
-        <ul style={{ margin: 0, paddingLeft: "20px" }}>
-          <li>
-            <strong>Great (CTR &gt; 1.0%):</strong> Top-tier engagement. For CTR &gt; 2.0%, the optimizer recommends raising the floor price because advertiser demand exceeds available supply.
-          </li>
-          <li>
-            <strong>Healthy (0.2% - 1.0% CTR):</strong> Standard, consistent performance aligning with healthy platform benchmarks.
-          </li>
-          <li>
-            <strong>Low Visibility (CTR &lt; 0.2%):</strong> Placement engagement is below normal benchmarks. Recommended action is moving the slot above the fold or widening dimensions.
-          </li>
-          <li>
-            <strong>Insufficient Data (&lt; 100 impressions):</strong> Guardrail threshold. Placements require at least 100 impressions within the 30-day window before receiving an automated health verdict.
-          </li>
-        </ul>
-      </div>
-    </div>
+      </Card>
+    </PageContainer>
   );
 }

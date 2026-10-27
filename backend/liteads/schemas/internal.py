@@ -15,6 +15,7 @@ class AdCandidate:
     advertiser_id: int
     bid: float
     bid_type: int
+    ad_set_id: int | None = None
 
     # Targeting match info
     targeting_score: float = 1.0
@@ -62,6 +63,9 @@ class UserContext:
     pincode: str = ""
     latitude: float | None = None
     longitude: float | None = None
+    location_source: str = "unknown"  # "ip", "device_gps", "coarse_network", "unknown"
+    location_accuracy_meters: float | None = None
+    location_consent: bool = False
 
     # Context
     app_id: str = ""

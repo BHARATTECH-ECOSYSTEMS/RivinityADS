@@ -168,6 +168,34 @@ class LayaSettings(BaseSettings):
     timeout_ms: int = 30000
 
 
+class OptimizationSettings(BaseSettings):
+    """Campaign optimization configuration (Phase 5)."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="LITEADS_OPTIMIZATION__",
+        extra="ignore",
+    )
+
+    enabled: bool = True
+    interval_seconds: int = 900
+    lock_ttl_seconds: int = 300
+    lock_renewal_interval_seconds: int = 60
+    campaign_lock_ttl_seconds: int = 60
+
+    # Explicit operating mode: "shadow", "suggestions_only", "limited_pilot", "autopilot"
+    mode: Literal["shadow", "suggestions_only", "limited_pilot", "autopilot"] = "suggestions_only"
+    kill_switch: bool = False
+
+    cooldown_seconds: int = 3600
+    rejection_cooldown_seconds: int = 86400
+    max_daily_changes_per_campaign: int = 3
+
+    # Financial & policy guardrails
+    max_budget_delta_pct: float = 0.30
+    pilot_max_budget_delta_amount: float = 500.0
+    pilot_campaign_ids: list[int] = Field(default_factory=list)
+
+
 class AuthSettings(BaseSettings):
     """Authentication and token configuration."""
 
@@ -272,6 +300,21 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     debug: bool = False
     env: Literal["dev", "prod", "test"] = "dev"
+    enable_webhook_worker: bool = Field(
+        default=True,
+        description="Whether to run the durable webhook outbox worker in-process within the API server. "
+        "Set to false (LITEADS_ENABLE_WEBHOOK_WORKER=false) when running a dedicated worker container.",
+    )
+    enable_optimization_worker: bool = Field(
+        default=True,
+        description="Whether to run the optimization loop scheduler in-process within the API server. "
+        "Set to false (LITEADS_ENABLE_OPTIMIZATION_WORKER=false) when running a dedicated worker container.",
+    )
+    enable_notification_worker: bool = Field(
+        default=True,
+        description="Whether to run the durable notification delivery worker in-process within the API server. "
+        "Set to false (LITEADS_ENABLE_NOTIFICATION_WORKER=false) when running a dedicated worker container.",
+    )
 
     # Nested settings
     server: ServerSettings = Field(default_factory=ServerSettings)
@@ -287,6 +330,7 @@ class Settings(BaseSettings):
     tracking: TrackingSettings = Field(default_factory=TrackingSettings)
     geo: GeoSettings = Field(default_factory=GeoSettings)
     laya: LayaSettings = Field(default_factory=LayaSettings)
+    optimization: OptimizationSettings = Field(default_factory=OptimizationSettings)
     payment: PaymentSettings = Field(default_factory=PaymentSettings)
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)
@@ -382,6 +426,8 @@ def get_settings() -> Settings:
         flat_config["tracking"] = TrackingSettings(**merged["tracking"])
     if "laya" in merged:
         flat_config["laya"] = LayaSettings(**merged["laya"])
+    if "optimization" in merged:
+        flat_config["optimization"] = OptimizationSettings(**merged["optimization"])
     if "payment" in merged:
         flat_config["payment"] = PaymentSettings(**merged["payment"])
     if "openai" in merged:
@@ -475,6 +521,96 @@ def get_settings() -> Settings:
             "api_key": os.getenv("OPENAI_API_KEY", openai.api_key),
         }
     )
+
+    enable_worker_env = os.getenv("LITEADS_ENABLE_WEBHOOK_WORKER")
+    if enable_worker_env is not None:
+        flat_config["enable_webhook_worker"] = enable_worker_env.lower() in ("true", "1", "yes", "on")
+    else:
+        flat_config["enable_webhook_worker"] = True
+
+    enable_notif_worker_env = os.getenv("LITEADS_ENABLE_NOTIFICATION_WORKER")
+    if enable_notif_worker_env is not None:
+        flat_config["enable_notification_worker"] = enable_notif_worker_env.lower() in ("true", "1", "yes", "on")
+    else:
+        flat_config["enable_notification_worker"] = True
+
+    optimization = flat_config.get("optimization", OptimizationSettings())
+    opt_updates = {}
+    
+    # 1. Mode
+    opt_mode = (
+        os.getenv("LITEADS_OPTIMIZATION__MODE")
+        or os.getenv("LITEADS_OPTIMIZATION_MODE")
+        or os.getenv("OPTIMIZATION_MODE")
+    )
+    if opt_mode and opt_mode.lower() in ("shadow", "suggestions_only", "limited_pilot", "autopilot"):
+        opt_updates["mode"] = opt_mode.lower()
+
+    # 2. Kill Switch
+    opt_kill = (
+        os.getenv("LITEADS_OPTIMIZATION__KILL_SWITCH")
+        or os.getenv("LITEADS_OPTIMIZATION_KILL_SWITCH")
+        or os.getenv("OPTIMIZATION_KILL_SWITCH")
+    )
+    if opt_kill is not None:
+        opt_updates["kill_switch"] = opt_kill.lower() in ("true", "1", "yes", "on")
+
+    # 3. Interval Seconds
+    opt_interval = (
+        os.getenv("LITEADS_OPTIMIZATION__INTERVAL_SECONDS")
+        or os.getenv("LITEADS_OPTIMIZATION_INTERVAL_SECONDS")
+        or os.getenv("OPTIMIZATION_INTERVAL_SECONDS")
+    )
+    if opt_interval and opt_interval.isdigit():
+        opt_updates["interval_seconds"] = int(opt_interval)
+
+    # 4. Cooldown Seconds
+    opt_cooldown = (
+        os.getenv("LITEADS_OPTIMIZATION__COOLDOWN_SECONDS")
+        or os.getenv("OPTIMIZATION_COOLDOWN_SECONDS")
+    )
+    if opt_cooldown and opt_cooldown.isdigit():
+        opt_updates["cooldown_seconds"] = int(opt_cooldown)
+
+    # 5. Rejection Cooldown Seconds
+    opt_rej_cooldown = (
+        os.getenv("LITEADS_OPTIMIZATION__REJECTION_COOLDOWN_SECONDS")
+        or os.getenv("OPTIMIZATION_REJECTION_COOLDOWN_SECONDS")
+    )
+    if opt_rej_cooldown and opt_rej_cooldown.isdigit():
+        opt_updates["rejection_cooldown_seconds"] = int(opt_rej_cooldown)
+
+    # 6. Max Daily Changes
+    opt_daily_changes = (
+        os.getenv("LITEADS_OPTIMIZATION__MAX_DAILY_CHANGES_PER_CAMPAIGN")
+        or os.getenv("LITEADS_OPTIMIZATION__MAX_DAILY_CHANGES")
+        or os.getenv("OPTIMIZATION_MAX_DAILY_CHANGES_PER_CAMPAIGN")
+        or os.getenv("OPTIMIZATION_MAX_DAILY_CHANGES")
+    )
+    if opt_daily_changes and opt_daily_changes.isdigit():
+        opt_updates["max_daily_changes_per_campaign"] = int(opt_daily_changes)
+
+    # 7. Pilot Max Budget Delta
+    opt_pilot_delta = (
+        os.getenv("LITEADS_OPTIMIZATION__PILOT_MAX_BUDGET_DELTA_AMOUNT")
+        or os.getenv("OPTIMIZATION_PILOT_MAX_BUDGET_DELTA_AMOUNT")
+    )
+    if opt_pilot_delta:
+        try:
+            opt_updates["pilot_max_budget_delta_amount"] = float(opt_pilot_delta)
+        except ValueError:
+            pass
+
+    flat_config["optimization"] = optimization.model_copy(update=opt_updates)
+
+    enable_opt_worker_env = (
+        os.getenv("LITEADS_ENABLE_OPTIMIZATION_WORKER")
+        or os.getenv("ENABLE_OPTIMIZATION_WORKER")
+    )
+    if enable_opt_worker_env is not None:
+        flat_config["enable_optimization_worker"] = enable_opt_worker_env.lower() in ("true", "1", "yes", "on")
+    else:
+        flat_config["enable_optimization_worker"] = True
 
     return Settings(**flat_config)
 

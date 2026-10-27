@@ -290,7 +290,7 @@ async def test_publisher_reporting_combines_multiple_slots_into_one_entry_per_da
 
     # Authenticate as publisher 101
     async def mock_pub_user():
-        return User(id=999, role="publisher", publisher_id=101, email="pub@test.com")
+        return User(id=999, role="publisher", publisher_id=101, email="pub@test.com", is_active=True, email_verified=True)
 
     app.dependency_overrides[current_user] = mock_pub_user
     try:
@@ -333,7 +333,7 @@ async def test_historical_null_slot_rows_included_in_reports(client: AsyncClient
     await test_db.commit()
 
     async def mock_pub_user():
-        return User(id=999, role="publisher", publisher_id=101, email="pub@test.com")
+        return User(id=999, role="publisher", publisher_id=101, email="pub@test.com", is_active=True, email_verified=True)
 
     app.dependency_overrides[current_user] = mock_pub_user
     try:

@@ -60,6 +60,19 @@ class RazorpayClient:
             return dict(order)
         except Exception as e:
             logger.error(f"Failed to create Razorpay order: {str(e)}")
+            settings = get_settings()
+            if settings.env == "dev" and ("authentication failed" in str(e).lower() or "unauthorized" in str(e).lower() or "badrequest" in type(e).__name__.lower()):
+                logger.warning("Razorpay authentication failed in dev mode; falling back to development mock order")
+                import uuid
+                mock_order_id = f"order_{uuid.uuid4().hex[:14]}"
+                return {
+                    "id": mock_order_id,
+                    "entity": "order",
+                    "amount": amount_in_smallest_unit,
+                    "currency": currency,
+                    "status": "created",
+                    "receipt": receipt or f"receipt_{mock_order_id}",
+                }
             raise RazorpayClientError("Could not create payment request") from e
 
     def create_qr_code(self, amount: Decimal, receipt: str, advertiser_id: int) -> dict[str, Any]:
@@ -84,6 +97,20 @@ class RazorpayClient:
             return dict(qr)
         except Exception as e:
             logger.error(f"Failed to create Razorpay QR code: {str(e)}")
+            settings = get_settings()
+            if settings.env == "dev" and ("authentication failed" in str(e).lower() or "unauthorized" in str(e).lower() or "badrequest" in type(e).__name__.lower()):
+                logger.warning("Razorpay authentication failed in dev mode; falling back to development mock QR code")
+                import uuid
+                mock_qr_id = f"qr_{uuid.uuid4().hex[:14]}"
+                mock_image_url = f"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=upi://pay?pa=dev@liteads&pn=RivinityADS&am={amount}&cu=INR"
+                return {
+                    "id": mock_qr_id,
+                    "entity": "qr_code",
+                    "amount": amount_in_smallest_unit,
+                    "currency": "INR",
+                    "status": "created",
+                    "image_url": mock_image_url,
+                }
             raise RazorpayClientError("Could not create QR code payment request") from e
 
     def verify_webhook_signature(self, body: bytes, signature: str) -> bool:

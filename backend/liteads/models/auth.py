@@ -21,6 +21,7 @@ class User(Base, TimestampMixin):
     publisher_id: Mapped[int | None] = mapped_column(ForeignKey("publishers.id"), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
 
 
 class RefreshToken(Base, TimestampMixin):

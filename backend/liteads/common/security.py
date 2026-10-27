@@ -4,9 +4,10 @@ import base64
 import hashlib
 import hmac
 import ipaddress
+import math
 import secrets
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import jwt
@@ -56,7 +57,7 @@ def verify_password(password: str, encoded: str | None) -> bool:
 
 def _token(subject: int, token_type: str, expires: timedelta, **claims: Any) -> str:
     now = datetime.now(UTC)
-    payload = {"sub": str(subject), "type": token_type, "iat": now, "exp": now + expires, **claims}
+    payload = {"sub": str(subject), "type": token_type, "iat": now.timestamp(), "exp": (now + expires).timestamp(), **claims}
     return jwt.encode(payload, get_settings().auth.jwt_secret, algorithm="HS256")
 
 
@@ -71,8 +72,9 @@ def create_refresh_token(user: User) -> str:
 def decode_token(token: str, expected_type: str) -> dict[str, Any]:
     try:
         payload = jwt.decode(token, get_settings().auth.jwt_secret, algorithms=["HS256"])
-    except jwt.PyJWTError as exc:
+    except (jwt.PyJWTError, TypeError, ValueError, OverflowError) as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token") from exc
+
     if payload.get("type") != expected_type or not payload.get("sub"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
     return payload
@@ -341,6 +343,31 @@ async def current_user(
     user = await session.get(User, int(payload["sub"]))
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User is inactive or missing")
+
+    if user.password_changed_at is not None:
+        raw_iat = payload.get("iat")
+        if raw_iat is None or isinstance(raw_iat, bool) or not isinstance(raw_iat, (int, float)):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+        if math.isnan(raw_iat) or math.isinf(raw_iat) or raw_iat <= 0:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+
+        pwd_changed_at = user.password_changed_at
+        if pwd_changed_at.tzinfo is None:
+            pwd_changed_at = pwd_changed_at.replace(tzinfo=timezone.utc)
+        pwd_changed_ts = pwd_changed_at.timestamp()
+
+        # Handle JWT timestamp precision:
+        # - Sub-second precision (float): direct exact comparison against pwd_changed_ts.
+        # - Second-level precision (int): compare at the integer second boundary so that genuinely
+        #   new tokens issued within the same second as the reset are not falsely invalidated,
+        #   while strictly invalidating all tokens issued in prior seconds without any broad grace period.
+        if isinstance(raw_iat, float):
+            if raw_iat < pwd_changed_ts:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+        else:
+            if raw_iat < int(pwd_changed_ts):
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+
     return user
 
 

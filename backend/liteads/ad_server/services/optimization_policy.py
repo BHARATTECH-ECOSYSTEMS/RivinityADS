@@ -7,6 +7,7 @@ Evaluates Laya decisions against campaign guardrails and eligibility.
 from dataclasses import dataclass
 from typing import Any
 from decimal import Decimal
+import math
 
 from liteads.models.ad import Campaign
 from liteads.models.base import ModerationStatus
@@ -95,6 +96,15 @@ class OptimizationPolicyService:
                 autopilot=autopilot
             )
             
+        if not math.isfinite(confidence) or confidence < 0.0 or confidence > 1.0:
+            return OptimizationPolicyResult(
+                accepted=False,
+                reason=f"Invalid confidence: {confidence}",
+                action=action,
+                confidence=0.0,
+                autopilot=autopilot
+            )
+
         if confidence < self.CONFIDENCE_THRESHOLD:
             return OptimizationPolicyResult(
                 accepted=False,
@@ -103,13 +113,25 @@ class OptimizationPolicyService:
                 confidence=confidence,
                 autopilot=autopilot
             )
+
+        # 4. Creative Compliance / Moderation Check
+        creatives = campaign.__dict__.get("creatives") or getattr(campaign, "creatives", [])
+        if any(getattr(c, "moderation_status", None) == ModerationStatus.REJECTED for c in creatives):
+            return OptimizationPolicyResult(
+                accepted=False,
+                reason="Campaign has rejected creatives; optimization disallowed until creative compliance is resolved",
+                action=action,
+                confidence=confidence,
+                autopilot=autopilot
+            )
             
-        # 4. Action-specific Guardrails
-        if action == "increase_budget_20" or action == "decrease_budget_20":
+        # 5. Action-specific Guardrails
+        target_payload = getattr(decision, "target_payload", None)
+        if action in ("increase_budget_20", "decrease_budget_20"):
             return self._evaluate_budget_action(action, campaign, confidence, autopilot)
             
         if action in ("shift_to_new_geo", "shift_to_new_sector"):
-            return self._evaluate_targeting_action(action, campaign, confidence, autopilot)
+            return self._evaluate_targeting_action(action, campaign, confidence, autopilot, target_payload)
             
         if action == "improve_creative":
             return OptimizationPolicyResult(
@@ -133,40 +155,97 @@ class OptimizationPolicyService:
     def _evaluate_budget_action(
         self, action: str, campaign: Campaign, confidence: float, autopilot: bool
     ) -> OptimizationPolicyResult:
-        """Evaluate budget actions against the ±30% guardrail."""
-        current_budget = float(campaign.budget_daily)
-        pct_change = 0.20 if action == "increase_budget_20" else -0.20
-        
-        # Guardrail check (even though 20% is <= 30%, we strictly enforce it here)
-        if abs(pct_change) > self.BUDGET_GUARDRAIL_MAX_PCT:
+        """Evaluate budget actions against the ±30% guardrail, zero budgets, and ceilings."""
+        if campaign.budget_daily is None or campaign.budget_daily <= Decimal("0"):
             return OptimizationPolicyResult(
                 accepted=False,
-                reason=f"Budget change {pct_change*100}% exceeds guardrail {self.BUDGET_GUARDRAIL_MAX_PCT*100}%",
+                reason="Campaign daily budget must be greater than zero",
+                action=action,
+                confidence=confidence,
+                autopilot=autopilot
+            )
+
+        current_budget = Decimal(str(campaign.budget_daily))
+        pct_change = Decimal("0.20") if action == "increase_budget_20" else Decimal("-0.20")
+        
+        # Guardrail check (even though 20% is <= 30%, we strictly enforce it here)
+        if abs(pct_change) > Decimal(str(self.BUDGET_GUARDRAIL_MAX_PCT)):
+            return OptimizationPolicyResult(
+                accepted=False,
+                reason=f"Budget change {float(pct_change)*100}% exceeds guardrail {self.BUDGET_GUARDRAIL_MAX_PCT*100}%",
                 action=action,
                 confidence=confidence,
                 autopilot=autopilot
             )
             
-        proposed_delta = current_budget * pct_change
-        
+        proposed_delta = (current_budget * pct_change).quantize(Decimal("0.0001"))
+        new_daily = current_budget + proposed_delta
+
+        if new_daily <= Decimal("0"):
+            return OptimizationPolicyResult(
+                accepted=False,
+                reason="Proposed budget change results in non-positive daily budget",
+                action=action,
+                confidence=confidence,
+                autopilot=autopilot
+            )
+
+        # Lifetime budget ceiling checks
+        if campaign.budget_total and campaign.budget_total > Decimal("0"):
+            spent_total = Decimal(str(campaign.spent_total or "0"))
+            if spent_total >= campaign.budget_total:
+                return OptimizationPolicyResult(
+                    accepted=False,
+                    reason="Campaign has reached lifetime budget ceiling",
+                    action=action,
+                    confidence=confidence,
+                    autopilot=autopilot
+                )
+            if action == "increase_budget_20" and new_daily > campaign.budget_total:
+                return OptimizationPolicyResult(
+                    accepted=False,
+                    reason="Proposed daily budget exceeds lifetime budget ceiling",
+                    action=action,
+                    confidence=confidence,
+                    autopilot=autopilot
+                )
+
         return OptimizationPolicyResult(
             accepted=True,
             reason="Budget change within guardrails",
             action=action,
             confidence=confidence,
             autopilot=autopilot,
-            proposed_budget_delta=proposed_delta,
+            proposed_budget_delta=float(proposed_delta),
             operation_type="MODIFY"
         )
         
     def _evaluate_targeting_action(
-        self, action: str, campaign: Campaign, confidence: float, autopilot: bool
+        self, action: str, campaign: Campaign, confidence: float, autopilot: bool, target_payload: dict[str, Any] | None = None
     ) -> OptimizationPolicyResult:
-        """Evaluate targeting actions, ensuring ADD-ONLY semantics."""
-        # Targeting changes must be ADD-ONLY as per Phase 2 spec.
-        # We enforce this by explicitly tagging the operation_type as ADD.
-        # A hypothetical future executor that receives operation_type="REPLACE" would fail.
-        # We do not invent replacement semantics here.
+        """Evaluate targeting actions, ensuring ADD-ONLY semantics and target validation."""
+        if target_payload is not None:
+            if action == "shift_to_new_geo":
+                geo = target_payload.get("geo")
+                if not geo or (isinstance(geo, str) and not geo.strip()):
+                    return OptimizationPolicyResult(
+                        accepted=False,
+                        reason="Missing or empty geo target in payload",
+                        action=action,
+                        confidence=confidence,
+                        autopilot=autopilot
+                    )
+            elif action == "shift_to_new_sector":
+                sector = target_payload.get("sector")
+                if not sector or (isinstance(sector, str) and not sector.strip()):
+                    return OptimizationPolicyResult(
+                        accepted=False,
+                        reason="Missing or empty sector target in payload",
+                        action=action,
+                        confidence=confidence,
+                        autopilot=autopilot
+                    )
+
         return OptimizationPolicyResult(
             accepted=True,
             reason="Targeting shift allowed as ADD operation",

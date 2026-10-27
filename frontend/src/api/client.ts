@@ -17,7 +17,21 @@ import type {
   ResendVerificationInput,
   RequestPasswordResetInput,
   ResetPasswordInput,
+  NotificationItem,
+  NotificationResponse,
+  NotificationListResponse,
+  UnreadCountResponse,
+  MarkAllReadResponse,
+  NotificationPreferenceItem,
+  NotificationPreferenceUpdateRequest,
+  NotificationPreferenceListResponse,
+  AdSet,
+  AdSetCreateInput,
+  AdSetUpdateInput,
+  AdSetTargetingResponse,
+  AdSetReportingResponse,
 } from "../types";
+
 export type {
   UserContextPayload,
   MessageResponse,
@@ -152,14 +166,18 @@ export const getAdvertiser = (id: number) => apiFetch<Advertiser>(`/api/v1/adver
 export const updateAdvertiser = (id: number, payload: Partial<Advertiser>) => apiFetch<Advertiser>(`/api/v1/advertiser/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
 export const setAdvertiserStatus = (id: number, status: number) => updateAdvertiser(id, { status });
 export interface CampaignInput { advertiser_id: number; name: string; description?: string; budget_daily: number; budget_total: number; bid_type: number; bid_amount: number; freq_cap_daily: number; freq_cap_hourly: number; }
-export interface CreativeInput { campaign_id: number; title: string; description?: string; image_url?: string; landing_url: string; creative_type: number; width: number; height: number; }
+export interface CreativeInput { campaign_id: number; ad_set_id?: number | null; title: string; description?: string; image_url?: string; video_url?: string; landing_url: string; creative_type: number; width: number; height: number; }
 export const listCampaigns = (advertiserId?: number) => apiFetch<Campaign[]>(`/api/v1/campaign${advertiserId ? `?advertiser_id=${advertiserId}` : ""}`);
 export const createCampaign = (payload: CampaignInput) => apiFetch<Campaign>("/api/v1/campaign", { method: "POST", body: JSON.stringify(payload) });
 export const getCampaign = (id: number) => apiFetch<Campaign>(`/api/v1/campaign/${id}`);
 export const updateCampaign = (id: number, payload: Partial<Campaign>) => apiFetch<Campaign>(`/api/v1/campaign/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
 export const setCampaignStatus = (id: number, status: number) => updateCampaign(id, { status });
 export const activateCampaign = (id: number) => apiFetch<Campaign>(`/api/v1/campaign/${id}/activate`, { method: "POST" });
-export const listCreatives = (campaignId: number) => apiFetch<Creative[]>(`/api/v1/creative?campaign_id=${campaignId}`);
+export const listCreatives = (campaignId: number, adSetId?: number) => {
+  const params = new URLSearchParams({ campaign_id: campaignId.toString() });
+  if (adSetId !== undefined && adSetId !== null) params.append("ad_set_id", adSetId.toString());
+  return apiFetch<Creative[]>(`/api/v1/creative?${params.toString()}`);
+};
 export const createCreative = (payload: CreativeInput) => apiFetch<Creative>("/api/v1/creative", { method: "POST", body: JSON.stringify(payload) });
 export interface SlotData { id: number; publisher_id: number; property_id: number | null; slot_id: string; name: string; format: number; width: number; height: number; status: number; floor_price: number; is_chat_surface: boolean; }
 export interface SlotInput { slot_id: string; name: string; format: number; width: number; height: number; property_id?: number | null; floor_price?: number; is_chat_surface?: boolean; }
@@ -252,7 +270,64 @@ export const deleteCampaignAssignment = (campaignId: number, assignmentId: numbe
 export interface PublisherAssignment { id: number; campaign_id: number; campaign_name: string; advertiser_name: string; slot_id: string | null; slot_name: string | null; status: string; }
 export const listPublisherAssignments = () => apiFetch<PublisherAssignment[]>("/api/v1/publisher/assignments");
 // Targeting and References
-export interface GeoEntry { country: string; state?: string | null; city?: string | null; pincode?: string | null; }
+export type RadiusUnit = "meters" | "km" | "miles";
+export const MIN_RADIUS_METERS = 100;
+export const MAX_RADIUS_METERS = 100000;
+
+export interface GeoEntry {
+  country?: string | null;
+  state?: string | null;
+  city?: string | null;
+  pincode?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  radius_meters?: number | null;
+  radius_unit?: RadiusUnit | null;
+  name?: string | null;
+}
+
+export function convertRadiusToMeters(value: number, unit: RadiusUnit): number {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  if (unit === "km") return Math.round(value * 1000 * 100) / 100;
+  if (unit === "miles") return Math.round(value * 1609.344 * 100) / 100;
+  return Math.round(value * 100) / 100;
+}
+
+export function convertMetersToUnit(meters: number, unit: RadiusUnit): number {
+  if (!Number.isFinite(meters) || meters <= 0) return 0;
+  if (unit === "km") return Math.round((meters / 1000) * 100) / 100;
+  if (unit === "miles") return Math.round((meters / 1609.344) * 100) / 100;
+  return Math.round(meters * 100) / 100;
+}
+
+export function isRadiusGeoEntry(e: GeoEntry): boolean {
+  return (
+    e.radius_meters !== undefined &&
+    e.radius_meters !== null &&
+    e.latitude !== undefined &&
+    e.latitude !== null &&
+    e.longitude !== undefined &&
+    e.longitude !== null
+  );
+}
+
+export function formatGeoEntry(e: GeoEntry): string {
+  if (isRadiusGeoEntry(e)) {
+    const lat = e.latitude != null ? Number(e.latitude).toFixed(4) : "—";
+    const lon = e.longitude != null ? Number(e.longitude).toFixed(4) : "—";
+    const radiusKm = e.radius_meters != null ? (e.radius_meters / 1000).toFixed(1) : "—";
+    const label = e.name ? `"${e.name}" ` : "";
+    const country = e.country ? ` [${e.country}]` : "";
+    return `🎯 Radius: ${radiusKm} km around (${lat}, ${lon}) ${label}${country}`.trim();
+  }
+  const parts: string[] = [];
+  if (e.country) parts.push(e.country);
+  if (e.state) parts.push(e.state);
+  if (e.city) parts.push(e.city);
+  if (e.pincode) parts.push(e.pincode);
+  return parts.filter(Boolean).join(" > ");
+}
+
 export interface TargetingSet { geo_include: GeoEntry[]; geo_exclude: GeoEntry[]; sector_include: string[]; sector_exclude: string[]; }
 export interface TargetingResponse extends TargetingSet { campaign_id: number; }
 export const getCampaignTargeting = (campaignId: number) => apiFetch<TargetingResponse>(`/api/v1/campaign/${campaignId}/targeting`);
@@ -318,14 +393,55 @@ export const createPublisherApiKey = (publisherId: number, payload: string | Api
 export const revokePublisherApiKey = (publisherId: number, keyId: number) => apiFetch<void>(`/api/v1/publisher/${publisherId}/keys/${keyId}`, { method: "DELETE" });
 
 // Webhooks
-export interface Webhook { id: number; owner_type: string; owner_id: number; url: string; events: string[]; is_active: boolean; created_at: string; updated_at: string; }
+export interface Webhook {
+  id: number;
+  owner_type: string;
+  owner_id: number;
+  url: string;
+  events: string[];
+  is_active: boolean;
+  deliveries_ok: number;
+  deliveries_failed: number;
+  created_at: string;
+  updated_at: string;
+}
 export interface WebhookCreateResponse extends Webhook { secret: string; }
 export interface WebhookInput { url: string; events: string[]; is_active?: boolean; }
+
+export interface WebhookDelivery {
+  id: number;
+  webhook_id: number;
+  owner_type: string;
+  owner_id: number;
+  event_id: string | null;
+  event_type: string;
+  status: "pending" | "processing" | "delivered" | "failed";
+  attempts: number;
+  max_attempts: number;
+  next_attempt_at: string;
+  last_attempt_at: string | null;
+  last_http_status: number | null;
+  last_error: string | null;
+  delivered_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WebhookDeliveryDetail extends WebhookDelivery {
+  payload: string;
+}
+
 export const listWebhooks = () => apiFetch<Webhook[]>("/api/v1/webhooks");
 export const createWebhook = (payload: WebhookInput) => apiFetch<WebhookCreateResponse>("/api/v1/webhooks", { method: "POST", body: JSON.stringify(payload) });
 export const updateWebhook = (id: number, payload: Partial<WebhookInput>) => apiFetch<Webhook>(`/api/v1/webhooks/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
 export const deleteWebhook = (id: number) => apiFetch<void>(`/api/v1/webhooks/${id}`, { method: "DELETE" });
-export const testWebhook = (id: number, payload?: any) => apiFetch<{success: boolean; status_code?: number; response?: string}>(`/api/v1/webhooks/${id}/test`, { method: "POST", body: payload ? JSON.stringify(payload) : undefined });
+export const testWebhook = (id: number, payload?: any) => apiFetch<{delivered: boolean; status_code?: number; error?: string; delivery_id?: number}>(`/api/v1/webhooks/${id}/test`, { method: "POST", body: payload ? JSON.stringify(payload) : undefined });
+export const listWebhookDeliveries = (webhookId: number, limit = 50, offset = 0) =>
+  apiFetch<WebhookDelivery[]>(`/api/v1/webhooks/${webhookId}/deliveries?limit=${limit}&offset=${offset}`);
+export const getWebhookDeliveryDetail = (webhookId: number, deliveryId: number) =>
+  apiFetch<WebhookDeliveryDetail>(`/api/v1/webhooks/${webhookId}/deliveries/${deliveryId}`);
+export const retryWebhookDelivery = (webhookId: number, deliveryId: number) =>
+  apiFetch<WebhookDelivery>(`/api/v1/webhooks/${webhookId}/deliveries/${deliveryId}/retry`, { method: "POST" });
 
 
 // Suggestions
@@ -342,3 +458,128 @@ export const sendChatMessage = (sessionId: string, message: string) => {
         body: JSON.stringify({ session_id: sessionId, message })
     });
 };
+
+// Notification APIs (Phase 6)
+export interface NotificationFilters {
+  page?: number;
+  page_size?: number;
+  unread_only?: boolean;
+  category?: string;
+}
+
+export const listNotifications = (filters?: NotificationFilters): Promise<NotificationListResponse> => {
+  const params = new URLSearchParams();
+  if (filters?.page) params.set("page", String(filters.page));
+  if (filters?.page_size) params.set("page_size", String(filters.page_size));
+  if (filters?.unread_only) params.set("unread_only", "true");
+  if (filters?.category) params.set("category", filters.category);
+  const qs = params.toString();
+  return apiFetch<NotificationListResponse>(`/api/v1/notifications${qs ? `?${qs}` : ""}`);
+};
+
+export const getUnreadNotificationCount = (): Promise<UnreadCountResponse> => {
+  return apiFetch<UnreadCountResponse>("/api/v1/notifications/unread-count");
+};
+
+export const markNotificationRead = (notificationId: number): Promise<NotificationResponse> => {
+  return apiFetch<NotificationResponse>(`/api/v1/notifications/${notificationId}/read`, {
+    method: "PATCH",
+  });
+};
+
+export const markAllNotificationsRead = (): Promise<MarkAllReadResponse> => {
+  return apiFetch<MarkAllReadResponse>("/api/v1/notifications/read-all", {
+    method: "PATCH",
+  });
+};
+
+export const getNotificationPreferences = (): Promise<NotificationPreferenceListResponse> => {
+  return apiFetch<NotificationPreferenceListResponse>("/api/v1/notifications/preferences");
+};
+
+export const updateNotificationPreferences = (
+  preferences: NotificationPreferenceItem[] | NotificationPreferenceUpdateRequest
+): Promise<NotificationPreferenceListResponse> => {
+  return apiFetch<NotificationPreferenceListResponse>("/api/v1/notifications/preferences", {
+    method: "PUT",
+    body: JSON.stringify(preferences),
+  });
+};
+
+/**
+ * Validate and sanitize notification navigation links.
+ * Restricts to internal relative URL paths without protocols, credentials, or hostnames.
+ */
+export function getSafeInternalLink(link: string | null | undefined): string | null {
+  if (!link || typeof link !== "string") return null;
+  const trimmed = link.trim();
+  // Disallow absolute URLs with protocols (http:, javascript:, data:, etc.) or protocol-relative '//'
+  if (
+    trimmed.startsWith("/") &&
+    !trimmed.startsWith("//") &&
+    !trimmed.startsWith("/\\") &&
+    !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)
+  ) {
+    return trimmed;
+  }
+  return null;
+}
+
+// ── Phase 7B: AdSets ────────────────────────────────────────────────────────
+
+export const createAdSet = (campaignId: number, data: AdSetCreateInput): Promise<AdSet> =>
+  apiFetch<AdSet>(`/api/v1/campaign/${campaignId}/ad-sets`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+
+export const listAdSets = (campaignId: number): Promise<AdSet[]> =>
+  apiFetch<AdSet[]>(`/api/v1/campaign/${campaignId}/ad-sets`);
+
+export const getAdSet = (adSetId: number): Promise<AdSet> =>
+  apiFetch<AdSet>(`/api/v1/ad-set/${adSetId}`);
+
+export const updateAdSet = (adSetId: number, data: AdSetUpdateInput): Promise<AdSet> =>
+  apiFetch<AdSet>(`/api/v1/ad-set/${adSetId}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+
+export const pauseAdSet = (adSetId: number): Promise<AdSet> =>
+  apiFetch<AdSet>(`/api/v1/ad-set/${adSetId}/pause`, {
+    method: "PATCH",
+  });
+
+export const resumeAdSet = (adSetId: number): Promise<AdSet> =>
+  apiFetch<AdSet>(`/api/v1/ad-set/${adSetId}/resume`, {
+    method: "PATCH",
+  });
+
+export const deleteAdSet = (adSetId: number): Promise<void> =>
+  apiFetch<void>(`/api/v1/ad-set/${adSetId}`, {
+    method: "DELETE",
+  });
+
+export const getAdSetTargeting = (adSetId: number): Promise<AdSetTargetingResponse> =>
+  apiFetch<AdSetTargetingResponse>(`/api/v1/ad-set/${adSetId}/targeting`);
+
+export const updateAdSetTargeting = (adSetId: number, data: any): Promise<AdSetTargetingResponse> =>
+  apiFetch<AdSetTargetingResponse>(`/api/v1/ad-set/${adSetId}/targeting`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+
+export const getCampaignAdSetReporting = (
+  campaignId: number,
+  startDate?: string,
+  endDate?: string
+): Promise<AdSetReportingResponse> => {
+  const params = new URLSearchParams();
+  if (startDate) params.append("start_date", startDate);
+  if (endDate) params.append("end_date", endDate);
+  const qs = params.toString();
+  return apiFetch<AdSetReportingResponse>(
+    `/api/v1/campaign/${campaignId}/ad-set-reporting${qs ? `?${qs}` : ""}`
+  );
+};
+

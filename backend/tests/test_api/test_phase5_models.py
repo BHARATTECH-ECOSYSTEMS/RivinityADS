@@ -38,7 +38,7 @@ from liteads.schemas.management import (
 async def auth_override(test_db: AsyncSession):
     """Ensure authenticated admin user for management routes."""
     async def mock_user():
-        return User(id=1, role="admin", email="admin@test.com")
+        return User(id=1, role="admin", email="admin@test.com", is_active=True, email_verified=True)
 
     app.dependency_overrides[current_user] = mock_user
 

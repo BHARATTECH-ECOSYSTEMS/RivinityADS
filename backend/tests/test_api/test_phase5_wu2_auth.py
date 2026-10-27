@@ -7,17 +7,197 @@ import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 
 from liteads.ad_server.main import app
+from liteads.common.cache import redis_client
 from liteads.management.api_key_service import ApiKeyService
 from liteads.models.ad import Advertiser, Campaign, Creative
 from liteads.models.publisher import AdSlot, Publisher, PublisherApiKey
 from liteads.schemas.management import ApiKeyCreate
+
+
+class MockRedisPipeline:
+    def __init__(self, store, ttls):
+        self.store = store
+        self.ttls = ttls
+        self.commands = []
+
+    def __getattr__(self, name: str):
+        def _method(*args, **kwargs):
+            self.commands.append((name, args, kwargs))
+            return self
+        return _method
+
+    async def execute(self):
+        results = []
+        for item in self.commands:
+            if len(item) == 2:
+                cmd, args = item
+                kwargs = {}
+            else:
+                cmd, args, kwargs = item
+            if cmd == "get":
+                key = args[0]
+                val = self.store.get(key)
+                results.append(str(val) if val is not None else None)
+            elif cmd == "hgetall":
+                key = args[0]
+                val = self.store.get(key, {})
+                results.append(val if isinstance(val, dict) else {})
+            elif cmd == "incr":
+                key = args[0]
+                val = int(self.store.get(key, 0)) + 1
+                self.store[key] = val
+                results.append(val)
+            elif cmd == "expire":
+                key, ttl = args[0], args[1]
+                if key in self.store:
+                    self.ttls[key] = ttl
+                    results.append(True)
+                else:
+                    results.append(False)
+            elif cmd == "hincrby":
+                key, field = args[0], args[1]
+                amount = args[2] if len(args) > 2 else 1
+                h = self.store.setdefault(key, {})
+                if isinstance(h, dict):
+                    h[field] = h.get(field, 0) + amount
+                    results.append(h[field])
+                else:
+                    results.append(1)
+            else:
+                results.append(None)
+        self.commands.clear()
+        return results
+
+
+@pytest.fixture(autouse=True)
+def mock_redis_auth(monkeypatch):
+    """In-memory Redis mock supporting eval, pipeline, incr, get, ttl, expire."""
+    store = {}
+    ttls = {}
+
+    async def mock_connect():
+        redis_client._connected = True
+
+    async def mock_close():
+        redis_client._connected = False
+
+    async def mock_ping():
+        return True
+
+    async def mock_get(key: str):
+        val = store.get(key)
+        return str(val) if val is not None else None
+
+    async def mock_set(key: str, value, ttl: int | None = None, ex: int | None = None, nx: bool = False, xx: bool = False, **kwargs):
+        if nx and key in store:
+            return False
+        if xx and key not in store:
+            return False
+        store[key] = value
+        effective_ttl = ttl or ex
+        if effective_ttl:
+            ttls[key] = effective_ttl
+        return True
+
+    async def mock_incr(key: str, amount: int = 1):
+        store[key] = store.get(key, 0) + amount
+        return store[key]
+
+    async def mock_expire(key: str, ttl: int):
+        if key in store:
+            ttls[key] = ttl
+            return True
+        return False
+
+    async def mock_ttl(key: str):
+        if key not in store:
+            return -2
+        return ttls.get(key, -1)
+
+    async def mock_delete(*keys: str):
+        count = 0
+        for k in keys:
+            if k in store:
+                del store[k]
+                ttls.pop(k, None)
+                count += 1
+        return count
+
+    async def mock_eval(script: str, *args):
+        numkeys = 1
+        keys = []
+        argv = []
+        if args and isinstance(args[0], (list, tuple)):
+            keys = list(args[0])
+            argv = list(args[1]) if len(args) > 1 else []
+        elif args and isinstance(args[0], int):
+            numkeys = args[0]
+            keys = list(args[1:1 + numkeys])
+            argv = list(args[1 + numkeys:])
+
+        # Rate limiting sliding window Lua
+        if "ZREMRANGEBYSCORE" in script or "max_limit" in script:
+            max_limit = int(argv[2]) if len(argv) > 2 else 60
+            key = keys[0] if keys else "rl"
+            cur = store.get(key, 0)
+            if cur < max_limit:
+                store[key] = cur + 1
+                return [1, max_limit - cur - 1, 60]
+            else:
+                return [0, 0, 60]
+
+        # Daily quota check Lua
+        if "max_quota" in script:
+            max_quota = int(argv[0]) if len(argv) > 0 else 10000
+            key = keys[0] if keys else "quota"
+            cur = store.get(key, 0)
+            if cur < max_quota:
+                store[key] = cur + 1
+                return [1, max_quota - cur - 1, 86400]
+            else:
+                return [0, 0, 86400]
+
+        # Atomic frequency cap incr Lua
+        if "EXPIRE" in script and "INCR" in script:
+            key = keys[0] if keys else "freq"
+            ttl = int(argv[0]) if len(argv) > 0 else 86400
+            store[key] = int(store.get(key, 0)) + 1
+            ttls[key] = ttl
+            return store[key]
+
+        return 1
+
+    def mock_pipeline():
+        return MockRedisPipeline(store, ttls)
+
+    monkeypatch.setattr(redis_client, "connect", mock_connect)
+    monkeypatch.setattr(redis_client, "close", mock_close)
+    monkeypatch.setattr(redis_client, "get", mock_get)
+    monkeypatch.setattr(redis_client, "set", mock_set)
+    monkeypatch.setattr(redis_client, "incr", mock_incr)
+    monkeypatch.setattr(redis_client, "expire", mock_expire)
+    monkeypatch.setattr(redis_client, "ttl", mock_ttl)
+    monkeypatch.setattr(redis_client, "delete", mock_delete)
+    monkeypatch.setattr(redis_client, "pipeline", mock_pipeline)
+
+    mock_inner_client = MagicMock()
+    mock_inner_client.ping = mock_ping
+    mock_inner_client.eval = mock_eval
+    mock_inner_client.pipeline = mock_pipeline
+    mock_inner_client.flushdb = AsyncMock(return_value=True)
+    monkeypatch.setattr(redis_client, "_client", mock_inner_client)
+    redis_client._connected = True
+
+    yield store, ttls
+
+    redis_client._connected = False
 
 
 def make_hmac_headers(

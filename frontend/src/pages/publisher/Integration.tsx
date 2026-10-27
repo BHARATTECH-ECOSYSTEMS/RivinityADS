@@ -1,46 +1,56 @@
-import { useEffect, useState } from "react";
-import { listSlots, requestAds } from "../../api/client";
-import type { SlotData } from "../../api/client";
+import React, { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { listSlots, requestAds, type SlotData } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import type { AdResponse } from "../../types";
+import {
+  PageContainer,
+  PageHeader,
+  Card,
+  Button,
+  StatusBadge,
+  Alert,
+  LoadingSkeleton,
+  EmptyState,
+} from "../../components/ui";
 
 export default function Integration() {
   const { session } = useAuth();
   const [slots, setSlots] = useState<SlotData[]>([]);
   const [selectedSlot, setSelectedSlot] = useState<string>("");
-  const [copied, setCopied] = useState(false);
+  const [copiedTab, setCopiedTab] = useState<string | null>(null);
   const [ad, setAd] = useState<AdResponse | null>(null);
   const [requestId, setRequestId] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [loadingAd, setLoadingAd] = useState(false);
+  const [testError, setTestError] = useState<string | null>(null);
+  const [activeSnippetTab, setActiveSnippetTab] = useState<"iframe" | "sdk" | "s2s">("iframe");
 
-  // Fetch publisher's ad slots
   useEffect(() => {
     const fetchSlots = async () => {
       try {
-        const data = await listSlots();
+        const publisherId = session?.user?.publisher_id;
+        const data = await listSlots(publisherId || undefined);
         setSlots(data);
         if (data.length > 0) setSelectedSlot(data[0].slot_id);
       } catch {
-        // Slots may not be accessible — that's okay
+        // Fallback if slots inaccessible
       }
     };
     void fetchSlots();
-  }, []);
+  }, [session?.user?.publisher_id]);
 
   const currentSlot = slots.find((s) => s.slot_id === selectedSlot);
 
-  // Build the base URL for the serve endpoint
   const apiBase =
-    (import.meta.env.VITE_API_BASE_URL as string | undefined) ??
-    window.location.origin;
+    (import.meta.env?.VITE_API_BASE_URL as string | undefined) ??
+    (typeof window !== "undefined" ? window.location.origin : "http://localhost:5173");
 
   const serveUrl = selectedSlot
     ? `${apiBase}/api/v1/ad/serve?slot_id=${encodeURIComponent(selectedSlot)}`
     : "";
 
   const iframeSnippet = selectedSlot
-    ? `<!-- Bharattech Ads — Slot: ${selectedSlot} -->
+    ? `<!-- RivinityADS Tag — Placement: ${selectedSlot} (${currentSlot?.width || 300}x${currentSlot?.height || 250}) -->
 <iframe
   src="${serveUrl}"
   width="${currentSlot?.width || 300}"
@@ -48,12 +58,13 @@ export default function Integration() {
   frameborder="0"
   scrolling="no"
   style="border:none;overflow:hidden;"
+  title="Advertisement"
 ></iframe>`
     : "Select a slot first";
 
   const scriptSnippet = selectedSlot
-    ? `<!-- Bharattech Ads — Slot: ${selectedSlot} -->
-<div id="oas-slot-${selectedSlot}"></div>
+    ? `<!-- RivinityADS Dynamic Tag — Placement: ${selectedSlot} -->
+<div id="oas-slot-${selectedSlot}" class="rivinity-ad-unit" data-slot-id="${selectedSlot}"></div>
 <script>
 (function() {
   var slot = "${selectedSlot}";
@@ -73,15 +84,15 @@ export default function Integration() {
     : "Select a slot first";
 
   const s2sPythonSnippet = selectedSlot
-    ? `# Server-to-Server / AI Platform Integration (Python) — Slot: ${selectedSlot}
-# SECURITY NOTICE: Run this ONLY in backend servers. Never embed API keys in browser JavaScript!
+    ? `# RivinityADS Server-to-Server HMAC (Python) — Placement: ${selectedSlot}
+# SECURITY NOTICE: Execute ONLY on secure backend servers. Never expose API keys in frontend code.
 import hashlib, hmac, json, time, requests
 
-API_KEY = "pk_live_your_registered_api_key"  # From Publisher -> API Keys
+API_KEY = "pk_live_your_registered_api_key"  # Generated in Publisher -> API Keys
 API_BASE = "${apiBase}"
 
 def request_ad(slot_id: str, platform_user_id: str, sector_context: list[str]):
-    # user.id MUST be a 64-character SHA-256 hex string to protect user privacy
+    # Hash user ID to protect privacy (64-character SHA-256)
     user_hash = hashlib.sha256(platform_user_id.encode("utf-8")).hexdigest()
 
     payload = {
@@ -96,7 +107,7 @@ def request_ad(slot_id: str, platform_user_id: str, sector_context: list[str]):
     body = json.dumps(payload).encode("utf-8")
     ts = str(int(time.time()))
 
-    # Canonical HMAC (v2): HMAC-SHA256(api_key, "POST|/api/v1/ad/request|{timestamp}|{sha256(body)}")
+    # Canonical HMAC: HMAC-SHA256(api_key, "POST|/api/v1/ad/request|{timestamp}|{sha256(body)}")
     body_sha256 = hashlib.sha256(body).hexdigest()
     msg = f"POST|/api/v1/ad/request|{ts}|{body_sha256}".encode("utf-8")
     sig = hmac.new(API_KEY.encode("utf-8"), msg, hashlib.sha256).hexdigest()
@@ -110,19 +121,20 @@ def request_ad(slot_id: str, platform_user_id: str, sector_context: list[str]):
             "X-Timestamp": ts,
             "X-Signature": sig,
         },
-        timeout=5.0
+        timeout=3.0
     )
     response.raise_for_status()
     return response.json()
 
 ad = request_ad("${selectedSlot}", "user_12345", ["developer"])
-print(ad)`
+print("Ad Response:", json.dumps(ad, indent=2))`
     : "Select a slot first";
 
   const loadAd = async () => {
     if (!selectedSlot) return;
-    setLoading(true);
-    setError(null);
+    setLoadingAd(true);
+    setTestError(null);
+    setAd(null);
     try {
       const response = await requestAds({
         slot_id: selectedSlot,
@@ -136,206 +148,277 @@ print(ad)`
       const nextAd = response.ads[0] ?? null;
       setAd(nextAd);
       setRequestId(response.request_id);
-      if (nextAd) new Image().src = nextAd.tracking.impression_url;
-      if (!nextAd) setError("No eligible ad was returned for this slot.");
+      if (nextAd) {
+        new Image().src = nextAd.tracking.impression_url;
+      } else {
+        setTestError("No eligible ad was returned for this slot. Make sure an active campaign targeting this slot format exists.");
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not request an ad");
+      setTestError(err instanceof Error ? err.message : "Could not request an ad");
     } finally {
-      setLoading(false);
+      setLoadingAd(false);
     }
   };
 
-  const copy = async (text: string) => {
+  const copy = async (text: string, tabId: string) => {
     try {
       await navigator.clipboard.writeText(text);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
+      setCopiedTab(tabId);
+      setTimeout(() => setCopiedTab(null), 2500);
     } catch {
-      setError("Clipboard access is unavailable.");
+      // Clipboard write failed
     }
   };
 
   return (
-    <div>
-      <h1>Integration</h1>
-      <p className="muted">
-        Signed in as {session?.user.name}. Select an ad slot below to generate
-        embed code.
-      </p>
+    <PageContainer>
+      <PageHeader
+        eyebrow="Integration Guide"
+        title="Publisher Integration"
+        description="Embed ad units into your web pages, mobile apps, or backend conversational AI pipelines."
+        actions={
+          <Link to="/publisher/preview" className="btn btn-secondary btn-sm">
+            Live Ad Preview →
+          </Link>
+        }
+      />
 
-      {/* Slot Selector */}
-      <div className="card">
-        <h2>Select Ad Slot</h2>
-        {slots.length === 0 ? (
-          <p className="muted">
-            No ad slots found. Create one from the Publisher dashboard first.
-          </p>
-        ) : (
-          <select
-            value={selectedSlot}
-            onChange={(e) => {
-              setSelectedSlot(e.target.value);
-              setAd(null);
-              setRequestId("");
-              setError(null);
-            }}
-            style={{
-              width: "100%",
-              padding: "8px 12px",
-              borderRadius: "6px",
-              border: "1px solid #444",
-              background: "#1a1a2e",
-              color: "#e0e0e0",
-              fontSize: "14px",
-            }}
-          >
-            {slots.map((slot) => (
-              <option key={slot.slot_id} value={slot.slot_id}>
-                {slot.name} — {slot.slot_id} ({slot.width}×{slot.height})
-              </option>
-            ))}
-          </select>
-        )}
-      </div>
-
-      {/* Live Preview */}
-      {selectedSlot && (
-        <div className="card">
-          <h2>Live Preview</h2>
-          <p className="muted">
-            This iframe loads the ad directly from the backend serve endpoint.
-          </p>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "center",
-              padding: "16px",
-              background: "#111",
-              borderRadius: "8px",
-              marginTop: "12px",
-            }}
-          >
-            <iframe
-              src={serveUrl}
-              width={currentSlot?.width || 300}
-              height={currentSlot?.height || 250}
-              frameBorder="0"
-              scrolling="no"
-              style={{ border: "1px solid #333", borderRadius: "4px" }}
-              title="Ad Preview"
-            />
+      {/* Slot Selector Banner */}
+      <Card style={{ marginBottom: "24px" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "16px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", flex: 1, minWidth: "280px" }}>
+            <label htmlFor="slot-select" style={{ fontWeight: 600, fontSize: "0.875rem", whiteSpace: "nowrap" }}>
+              Select Ad Placement:
+            </label>
+            <select
+              id="slot-select"
+              value={selectedSlot}
+              onChange={(e) => {
+                setSelectedSlot(e.target.value);
+                setAd(null);
+                setTestError(null);
+              }}
+              className="select"
+              style={{ flex: 1 }}
+            >
+              {slots.map((s) => (
+                <option key={s.slot_id} value={s.slot_id}>
+                  {s.name} ({s.slot_id} — {s.width}×{s.height}px)
+                </option>
+              ))}
+            </select>
           </div>
-        </div>
-      )}
 
-      {/* JSON Ad Preview */}
-      <div className="card">
-        <div className="actions">
-          <button
-            className="btn"
-            onClick={() => void loadAd()}
-            disabled={loading || !selectedSlot}
-          >
-            {loading ? "Requesting..." : "Preview JSON response"}
-          </button>
-        </div>
-        {error && <p className="error">{error}</p>}
-        {ad && (
-          <div className="ad-card">
-            <div>
-              {ad.creative.image_url && (
-                <img
-                  src={ad.creative.image_url}
-                  alt={ad.creative.title ?? "Advertisement"}
-                  width={ad.creative.width}
-                  height={ad.creative.height}
+          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            {currentSlot && (
+              <div style={{ display: "flex", gap: "6px" }}>
+                <StatusBadge 
+                  status={currentSlot.status === 1 ? "active" : "paused"} 
+                  label={currentSlot.status === 1 ? "Active Slot" : "Paused"}
+                  size="sm"
                 />
-              )}
-            </div>
-            <div className="ad-body">
-              <div className="sponsored">
-                Sponsored · {ad.creative.creative_type}
+                {currentSlot.is_chat_surface && (
+                  <StatusBadge status="info" label="Chat AI Surface" size="sm" />
+                )}
               </div>
-              <div className="ad-title">{ad.creative.title}</div>
-              {ad.creative.description && (
-                <div className="ad-desc">{ad.creative.description}</div>
-              )}
-              <a
-                className="btn small"
-                href={ad.creative.landing_url}
-                target="_blank"
-                rel="noreferrer"
-                onClick={() => {
-                  new Image().src = ad.tracking.click_url;
-                }}
+            )}
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={loadAd}
+              isLoading={loadingAd}
+              disabled={!selectedSlot}
+            >
+              Send Live Test Request
+            </Button>
+          </div>
+        </div>
+      </Card>
+
+      {/* Integration Snippets Card */}
+      <Card
+        title="Integration Code Snippets"
+        subtitle="Choose the integration method suited to your tech stack."
+        style={{ marginBottom: "24px" }}
+      >
+        <div style={{ display: "flex", gap: "8px", marginBottom: "16px", borderBottom: "1px solid var(--border-color)", paddingBottom: "12px" }}>
+          <button
+            type="button"
+            className={`btn ${activeSnippetTab === "iframe" ? "btn-primary" : "btn-secondary"} btn-sm`}
+            onClick={() => setActiveSnippetTab("iframe")}
+          >
+            Standard Web Iframe
+          </button>
+          <button
+            type="button"
+            className={`btn ${activeSnippetTab === "sdk" ? "btn-primary" : "btn-secondary"} btn-sm`}
+            onClick={() => setActiveSnippetTab("sdk")}
+          >
+            Dynamic JavaScript Tag
+          </button>
+          <button
+            type="button"
+            className={`btn ${activeSnippetTab === "s2s" ? "btn-primary" : "btn-secondary"} btn-sm`}
+            onClick={() => setActiveSnippetTab("s2s")}
+          >
+            Server-to-Server HMAC (Python)
+          </button>
+        </div>
+
+        {activeSnippetTab === "iframe" && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+              <span style={{ fontSize: "0.8125rem", color: "var(--color-text-muted)" }}>
+                Zero JavaScript required. Fully isolated sandbox rendering.
+              </span>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => copy(iframeSnippet, "iframe")}
               >
-                Open landing page
-              </a>
+                {copiedTab === "iframe" ? "Copied!" : "Copy Snippet"}
+              </Button>
             </div>
+            <pre
+              style={{
+                backgroundColor: "var(--color-bg-inverse)",
+                color: "#e2e8f0",
+                padding: "16px",
+                borderRadius: "var(--radius-md)",
+                fontFamily: "var(--font-mono)",
+                fontSize: "0.8125rem",
+                overflowX: "auto",
+                border: "1px solid #334155",
+                lineHeight: 1.5,
+              }}
+            >
+              {iframeSnippet}
+            </pre>
           </div>
         )}
-        {requestId && <p className="muted">Request ID: {requestId}</p>}
-      </div>
 
-      {/* Embed Code — iframe */}
-      <div className="card">
-        <h2>Embed Code (iframe)</h2>
-        <p className="muted">
-          Copy and paste this code into your website where the ad should appear.
-        </p>
-        <pre style={{ position: "relative" }}>
-          {iframeSnippet}
-          <button
-            className="btn secondary small"
-            onClick={() => void copy(iframeSnippet)}
-            style={{ position: "absolute", top: "8px", right: "8px" }}
-          >
-            {copied ? "Copied!" : "Copy"}
-          </button>
-        </pre>
-      </div>
+        {activeSnippetTab === "sdk" && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+              <span style={{ fontSize: "0.8125rem", color: "var(--color-text-muted)" }}>
+                Asynchronously injected container suitable for single-page applications.
+              </span>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => copy(scriptSnippet, "sdk")}
+              >
+                {copiedTab === "sdk" ? "Copied!" : "Copy Snippet"}
+              </Button>
+            </div>
+            <pre
+              style={{
+                backgroundColor: "var(--color-bg-inverse)",
+                color: "#e2e8f0",
+                padding: "16px",
+                borderRadius: "var(--radius-md)",
+                fontFamily: "var(--font-mono)",
+                fontSize: "0.8125rem",
+                overflowX: "auto",
+                border: "1px solid #334155",
+                lineHeight: 1.5,
+              }}
+            >
+              {scriptSnippet}
+            </pre>
+          </div>
+        )}
 
-      {/* Embed Code — script tag */}
-      <div className="card">
-        <h2>Embed Code (script)</h2>
-        <p className="muted">
-          Alternative embed method using a script tag for dynamic loading.
-        </p>
-        <pre style={{ position: "relative" }}>
-          {scriptSnippet}
-          <button
-            className="btn secondary small"
-            onClick={() => void copy(scriptSnippet)}
-            style={{ position: "absolute", top: "8px", right: "8px" }}
-          >
-            {copied ? "Copied!" : "Copy"}
-          </button>
-        </pre>
-      </div>
+        {activeSnippetTab === "s2s" && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+              <span style={{ fontSize: "0.8125rem", color: "var(--color-text-muted)" }}>
+                Cryptographically signed server-to-server request for backend LLM / Chatbots.
+              </span>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => copy(s2sPythonSnippet, "s2s")}
+              >
+                {copiedTab === "s2s" ? "Copied!" : "Copy Snippet"}
+              </Button>
+            </div>
+            <pre
+              style={{
+                backgroundColor: "var(--color-bg-inverse)",
+                color: "#e2e8f0",
+                padding: "16px",
+                borderRadius: "var(--radius-md)",
+                fontFamily: "var(--font-mono)",
+                fontSize: "0.8125rem",
+                overflowX: "auto",
+                border: "1px solid #334155",
+                lineHeight: 1.5,
+              }}
+            >
+              {s2sPythonSnippet}
+            </pre>
+          </div>
+        )}
+      </Card>
 
-      {/* Server-to-Server (AI Platforms) */}
-      <div className="card" style={{ border: "1px solid #3b82f6" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-          <span style={{ fontSize: "20px" }}>🔒</span>
-          <h2 style={{ margin: 0, color: "#60a5fa" }}>Server-to-Server / AI Platform Integration</h2>
-        </div>
-        <p className="muted" style={{ marginTop: "8px" }}>
-          For AI assistants, backend chat workflows, and server-to-server calls with cryptographic HMAC authentication.
-        </p>
-        <div style={{ background: "rgba(239, 68, 68, 0.1)", border: "1px solid #ef4444", borderRadius: "6px", padding: "10px 14px", margin: "12px 0", fontSize: "13px", color: "#fca5a5" }}>
-          <strong>⚠️ Security Requirement:</strong> Only execute this request from your private backend server. Never include API keys or sign requests inside browser JavaScript or public client code.
-        </div>
-        <pre style={{ position: "relative" }}>
-          {s2sPythonSnippet}
-          <button
-            className="btn secondary small"
-            onClick={() => void copy(s2sPythonSnippet)}
-            style={{ position: "absolute", top: "8px", right: "8px" }}
-          >
-            {copied ? "Copied!" : "Copy"}
-          </button>
-        </pre>
-      </div>
-    </div>
+      {/* Live Sandbox Ad Request Result */}
+      {(ad || testError) && (
+        <Card
+          title="Sandbox Ad Response Inspector"
+          subtitle={`Request ID: ${requestId || "N/A"}`}
+        >
+          {testError && (
+            <Alert variant="warning" title="No Fill / Ad Request Error">
+              {testError}
+            </Alert>
+          )}
+
+          {ad && (
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                  <StatusBadge status="success" label="Ad Winner Returned" size="sm" />
+                  <span style={{ fontWeight: 600, fontSize: "1rem" }}>{ad.creative.title}</span>
+                </div>
+                <span style={{ fontSize: "0.8125rem", color: "var(--color-text-muted)" }}>
+                  Impression tracker automatically verified
+                </span>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", marginBottom: "16px" }}>
+                <div style={{ background: "var(--color-bg-subtle)", padding: "12px", borderRadius: "var(--radius-md)" }}>
+                  <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)", textTransform: "uppercase" }}>Creative Details</div>
+                  <div style={{ fontSize: "0.875rem", marginTop: "4px" }}>
+                    Type: <strong>{ad.creative.creative_type}</strong> | Dimensions: <strong>{ad.creative.width}×{ad.creative.height}px</strong>
+                  </div>
+                  {ad.creative.description && (
+                    <div style={{ fontSize: "0.8125rem", color: "var(--color-text-secondary)", marginTop: "4px" }}>
+                      {ad.creative.description}
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ background: "var(--color-bg-subtle)", padding: "12px", borderRadius: "var(--radius-md)" }}>
+                  <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)", textTransform: "uppercase" }}>Landing URL</div>
+                  <a
+                    href={ad.creative.landing_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{ fontSize: "0.875rem", color: "var(--color-primary)", wordBreak: "break-all", display: "block", marginTop: "4px" }}
+                  >
+                    {ad.creative.landing_url}
+                  </a>
+                </div>
+              </div>
+
+              <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>
+                Impression Ping: {ad.tracking.impression_url}
+              </div>
+            </div>
+          )}
+        </Card>
+      )}
+    </PageContainer>
   );
 }

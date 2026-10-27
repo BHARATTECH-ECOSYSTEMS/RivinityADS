@@ -2,6 +2,7 @@
 
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any
 
 from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
@@ -108,6 +109,7 @@ class SuggestionResponse(ORMModel):
     campaign_id: int
     action: dict
     status: str
+    dedup_key: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -116,9 +118,56 @@ class SuggestionStatusPatch(BaseModel):
     status: str
 
 
+class AdSetCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    status: int = Field(default=1, ge=0, le=5)
+    daily_budget: Decimal | None = Field(default=None, ge=0)
+    bid_type: int = Field(default=1, ge=1, le=4)
+    bid_amount: Decimal = Field(default=Decimal("0"), ge=0)
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    freq_cap_daily: int | None = Field(default=10, ge=0)
+    freq_cap_hourly: int | None = Field(default=3, ge=0)
+    delivery_mode: str = Field(default="standard", max_length=32)
+    targeting_summary: dict[str, Any] | None = None
+
+
+class AdSetUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    status: int | None = Field(default=None, ge=0, le=5)
+    daily_budget: Decimal | None = Field(default=None, ge=0)
+    bid_type: int | None = Field(default=None, ge=1, le=4)
+    bid_amount: Decimal | None = Field(default=None, ge=0)
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    freq_cap_daily: int | None = Field(default=None, ge=0)
+    freq_cap_hourly: int | None = Field(default=None, ge=0)
+    delivery_mode: str | None = Field(default=None, max_length=32)
+    targeting_summary: dict[str, Any] | None = None
+
+
+class AdSetResponse(ORMModel):
+    id: int
+    campaign_id: int
+    name: str
+    status: int
+    daily_budget: Decimal | None = None
+    bid_type: int
+    bid_amount: Decimal
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    freq_cap_daily: int | None = None
+    freq_cap_hourly: int | None = None
+    delivery_mode: str
+    targeting_summary: dict[str, Any] | None = None
+    created_at: datetime
+    updated_at: datetime
+
 
 class CreativeCreate(BaseModel):
     campaign_id: int = Field(gt=0)
+    ad_set_id: int | None = None
     title: str = Field(min_length=1, max_length=255)
     description: str | None = None
     image_url: str | None = None
@@ -137,6 +186,7 @@ class CreativeCreate(BaseModel):
 
 
 class CreativeUpdate(BaseModel):
+    ad_set_id: int | None = None
     title: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
     image_url: str | None = None
@@ -157,6 +207,7 @@ class CreativeUpdate(BaseModel):
 class CreativeResponse(ORMModel):
     id: int
     campaign_id: int
+    ad_set_id: int | None = None
     title: str
     description: str | None
     image_url: str | None
@@ -289,6 +340,7 @@ class PublisherReportingResponse(BaseModel):
 class AdvertiserReportingResponse(BaseModel):
     advertiser_id: int
     campaign_id: int | None = None
+    ad_set_id: int | None = None
     start_date: date
     end_date: date
     impressions: int
@@ -298,6 +350,30 @@ class AdvertiserReportingResponse(BaseModel):
     ctr: Decimal
     cvr: Decimal
     daily_breakdown: list[DailyStatResponse] = []
+
+
+class AdSetReportingItem(BaseModel):
+    ad_set_id: int
+    ad_set_name: str
+    status: int
+    impressions: int
+    clicks: int
+    conversions: int
+    spend: Decimal
+    ctr: Decimal
+    cvr: Decimal
+
+
+class AdSetReportingResponse(BaseModel):
+    campaign_id: int
+    start_date: date
+    end_date: date
+    ad_sets: list[AdSetReportingItem] = []
+    total_impressions: int
+    total_clicks: int
+    total_conversions: int
+    total_spend: Decimal
+
 
 
 class ApiKeyCreate(BaseModel):
