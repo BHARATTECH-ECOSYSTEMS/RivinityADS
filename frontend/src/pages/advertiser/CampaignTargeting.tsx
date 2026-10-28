@@ -48,7 +48,12 @@ export default function CampaignTargeting({ campaignId, adSets = [] }: CampaignT
         });
       } else {
         const data = await getCampaignTargeting(campaignId);
-        setTargeting(data);
+        setTargeting({
+          geo_include: data.geo_include || [],
+          geo_exclude: data.geo_exclude || [],
+          sector_include: data.sector_include || [],
+          sector_exclude: data.sector_exclude || [],
+        });
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load targeting configuration");

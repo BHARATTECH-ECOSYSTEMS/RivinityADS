@@ -92,10 +92,10 @@ export default function AdvertiserDashboard() {
   const verifiedDomainsCount = domains.filter((d) => d.status === "VERIFIED").length;
 
   // Aggregate budget & pacing calculations
-  const totalDailyCeiling = rows.reduce((sum, c) => sum + (c.status === 1 ? c.budget_daily : 0), 0);
-  const totalLifetimeBudget = rows.reduce((sum, c) => sum + c.budget_total, 0);
-  const totalLifetimeSpent = rows.reduce((sum, c) => sum + c.spent_total, 0);
-  const spentTodaySum = rows.reduce((sum, c) => sum + c.spent_today, 0);
+  const totalDailyCeiling = rows.reduce((sum, c) => sum + (c.status === 1 ? Number(c.budget_daily || 0) : 0), 0);
+  const totalLifetimeBudget = rows.reduce((sum, c) => sum + Number(c.budget_total || 0), 0);
+  const totalLifetimeSpent = rows.reduce((sum, c) => sum + Number(c.spent_total || 0), 0);
+  const spentTodaySum = rows.reduce((sum, c) => sum + Number(c.spent_today || 0), 0);
 
   const dailyPacingPct = totalDailyCeiling > 0 ? Math.min(100, Math.round((spentTodaySum / totalDailyCeiling) * 100)) : 0;
   const lifetimePacingPct = totalLifetimeBudget > 0 ? Math.min(100, Math.round((totalLifetimeSpent / totalLifetimeBudget) * 100)) : 0;
@@ -301,7 +301,7 @@ export default function AdvertiserDashboard() {
                 <div>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: "var(--font-size-xs)" }}>
                     <span className="text-muted">Today's Spend Pacing</span>
-                    <strong>{dailyPacingPct}% of ${totalDailyCeiling} daily limit</strong>
+                    <strong>{dailyPacingPct}% of ${totalDailyCeiling.toFixed(2)} daily limit</strong>
                   </div>
                   <div className="pacing-bar-container">
                     <div
@@ -317,7 +317,7 @@ export default function AdvertiserDashboard() {
                 <div>
                   <div style={{ display: "flex", justifyContent: "space-between", fontSize: "var(--font-size-xs)" }}>
                     <span className="text-muted">Lifetime Budget Pacing</span>
-                    <strong>{lifetimePacingPct}% of ${totalLifetimeBudget} lifetime budget</strong>
+                    <strong>{lifetimePacingPct}% of ${totalLifetimeBudget.toFixed(2)} lifetime budget</strong>
                   </div>
                   <div className="pacing-bar-container">
                     <div

@@ -285,6 +285,17 @@ async def request_ads(
     if slot:
         if slot.status != Status.ACTIVE:
             raise HTTPException(status_code=400, detail="Ad slot is not active")
+        if slot.property_id:
+            from liteads.models.publisher import PublisherProperty
+            prop_res = await session.execute(
+                select(PublisherProperty).where(PublisherProperty.id == slot.property_id)
+            )
+            prop = prop_res.scalar_one_or_none()
+            if prop:
+                if prop.status != Status.ACTIVE:
+                    raise HTTPException(status_code=400, detail="Publisher property is not active")
+                if prop.verification_status != "VERIFIED":
+                    raise HTTPException(status_code=403, detail="Publisher property is not verified")
         if caller.is_authenticated:
             if publisher_id is not None and slot.publisher_id != publisher_id:
                 raise HTTPException(status_code=403, detail="Not authorized for this slot")
@@ -309,11 +320,12 @@ async def request_ads(
     for candidate in candidates[: ad_request.num_ads]:
         ad_id = f"ad_{candidate.campaign_id}_{candidate.creative_id}"
         slot_q = quote(ad_request.slot_id)
-        sig_param = ""
+        click_token = None
         try:
-            from liteads.common.tracking_sig import sign_tracking
+            from liteads.common.tracking_sig import sign_tracking, sign_click_token
             sig = sign_tracking(request_id, ad_id, ad_request.slot_id)
             sig_param = f"&sig={sig}"
+            click_token = sign_click_token(request_id, candidate.campaign_id, candidate.creative_id)
         except Exception:
             pass
 
@@ -327,9 +339,9 @@ async def request_ads(
                 f"&req={request_id}&ad={ad_id}&slot={slot_q}{sig_param}"
             ),
             conversion_url=(
-                f"{base_url}/api/v1/event/track?type=conversion"
-                f"&req={request_id}&ad={ad_id}&slot={slot_q}{sig_param}"
+                f"{base_url}/api/v1/event/conversion"
             ),
+            click_token=click_token,
         )
 
         creative = CreativeResponse(

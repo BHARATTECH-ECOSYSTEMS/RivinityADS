@@ -177,4 +177,69 @@
     .catch(function (err) {
       console.warn("[rivinity]", err.message || err);
     });
+
+  // ── Global SDK API for Conversion Tracking ─────────────────────────────
+  window.Rivinity = window.Rivinity || {};
+
+  // Check URL query parameters for click token on landing page
+  try {
+    if (typeof window !== "undefined" && window.location && window.location.search) {
+      var match = window.location.search.match(/[?&]rv_click_token=([^&]+)/);
+      if (match && match[1] && typeof sessionStorage !== "undefined") {
+        sessionStorage.setItem("rv_click_token", decodeURIComponent(match[1]));
+      }
+    }
+  } catch (e) {}
+
+  window.Rivinity.trackConversion = function (options) {
+    options = options || {};
+    var token = options.clickToken;
+    if (!token && typeof sessionStorage !== "undefined") {
+      token = sessionStorage.getItem("rv_click_token");
+    }
+    var ep = (options.endpoint || endpoint || "").replace(/\/$/, "");
+    var payload = {
+      click_token: token || null,
+      request_id: options.requestId || null,
+      campaign_id: options.campaignId || null,
+      creative_id: options.creativeId || null,
+      order_id: options.orderId || options.transactionId || null,
+      conversion_value: options.value !== undefined ? options.value : null,
+      currency: options.currency || "INR",
+      is_test: !!options.isTest,
+      extra: options.extra || null,
+    };
+
+    return fetch(ep + "/api/v1/event/conversion", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(function (r) {
+      return r.json();
+    });
+  };
+
+  // ── Consent Banner Dismissal ───────────────────────────────────────────
+  function initConsentBanner() {
+    var banner = document.getElementById("rivinity-consent-banner");
+    if (!banner) return;
+    var acceptBtn = document.getElementById("rivinity-consent-accept");
+    var declineBtn = document.getElementById("rivinity-consent-decline");
+    if (acceptBtn) {
+      acceptBtn.addEventListener("click", function () {
+        banner.style.display = "none";
+      });
+    }
+    if (declineBtn) {
+      declineBtn.addEventListener("click", function () {
+        banner.style.display = "none";
+      });
+    }
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initConsentBanner);
+  } else {
+    initConsentBanner();
+  }
 })();

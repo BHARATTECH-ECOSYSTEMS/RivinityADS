@@ -271,8 +271,31 @@ class PublisherPropertyResponse(ORMModel):
     name: str
     domain: str
     status: int
+    verification_status: str = "PENDING"
+    verification_method: str = "DNS_TXT"
+    verification_token: str | None = None
+    challenge_expires_at: datetime | None = None
+    verified_at: datetime | None = None
+    last_error: str | None = None
+    is_platform_subdomain: bool = False
     created_at: datetime
     updated_at: datetime
+
+
+class PropertyChallengeRequest(BaseModel):
+    method: str = Field(default="DNS_TXT", pattern="^(DNS_TXT|HTML_META)$")
+
+
+class PropertyChallengeResponse(BaseModel):
+    property_id: int
+    domain: str
+    verification_method: str
+    verification_token: str
+    dns_record_name: str
+    dns_record_value: str
+    html_meta_tag: str
+    challenge_expires_at: datetime
+    instructions: str
 
 
 class SlotCreate(BaseModel):
@@ -320,8 +343,13 @@ class DailyStatResponse(BaseModel):
     impressions: int
     clicks: int
     conversions: int
+    total_conversions: int = 0
+    attributed_conversions: int = 0
+    conversion_value: Decimal = Decimal("0")
     spend: Decimal | None = None
     earnings: Decimal | None = None
+    cpa: Decimal | None = None
+    roas: Decimal | None = None
 
 
 class PublisherReportingResponse(BaseModel):
@@ -346,9 +374,15 @@ class AdvertiserReportingResponse(BaseModel):
     impressions: int
     clicks: int
     conversions: int
+    total_conversions: int = 0
+    attributed_conversions: int = 0
+    conversion_value: Decimal = Decimal("0")
     spend: Decimal
+    currency: str = "INR"
     ctr: Decimal
     cvr: Decimal
+    cpa: Decimal | None = None
+    roas: Decimal | None = None
     daily_breakdown: list[DailyStatResponse] = []
 
 
@@ -359,9 +393,15 @@ class AdSetReportingItem(BaseModel):
     impressions: int
     clicks: int
     conversions: int
+    total_conversions: int = 0
+    attributed_conversions: int = 0
+    conversion_value: Decimal = Decimal("0")
     spend: Decimal
+    currency: str = "INR"
     ctr: Decimal
     cvr: Decimal
+    cpa: Decimal | None = None
+    roas: Decimal | None = None
 
 
 class AdSetReportingResponse(BaseModel):
@@ -372,7 +412,14 @@ class AdSetReportingResponse(BaseModel):
     total_impressions: int
     total_clicks: int
     total_conversions: int
+    total_attributed_conversions: int = 0
+    total_conversion_value: Decimal = Decimal("0")
     total_spend: Decimal
+    currency: str = "INR"
+    ctr: Decimal = Decimal("0")
+    cvr: Decimal = Decimal("0")
+    cpa: Decimal | None = None
+    roas: Decimal | None = None
 
 
 

@@ -29,7 +29,11 @@ import Integration from "./pages/publisher/Integration";
 import AdPreview from "./pages/publisher/AdPreview";
 import PlacementHealth from "./pages/publisher/PlacementHealth";
 import Notifications from "./pages/Notifications";
+import { WebsiteList } from "./pages/website/WebsiteList";
+import { WebsiteEditor } from "./pages/website/WebsiteEditor";
 
+
+import ErrorBoundary from "./components/ErrorBoundary";
 
 function HomeRedirect() {
   const { session } = useAuth();
@@ -38,8 +42,9 @@ function HomeRedirect() {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <BrowserRouter>
+    <ErrorBoundary>
+      <AuthProvider>
+        <BrowserRouter>
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/signup" element={<Signup />} />
@@ -55,6 +60,8 @@ export default function App() {
                 <Route path="campaigns" element={<CampaignsAdmin />} />
                 <Route path="creatives" element={<CreativeModeration />} />
                 <Route path="publishers" element={<Publishers />} />
+                <Route path="websites" element={<WebsiteList />} />
+                <Route path="websites/:id" element={<WebsiteEditor />} />
                 <Route path="finance" element={<FinanceReconciliation />} />
               </Route>
               <Route path="/advertiser" element={<RequireRole roles={["advertiser"]} />}>
@@ -66,6 +73,8 @@ export default function App() {
               </Route>
               <Route path="/publisher" element={<RequireRole roles={["publisher"]} />}>
                 <Route index element={<PublisherDashboard />} />
+                <Route path="websites" element={<WebsiteList />} />
+                <Route path="websites/:id" element={<WebsiteEditor />} />
                 <Route path="health" element={<PlacementHealth />} />
                 <Route path="properties" element={<PublisherProperties />} />
                 <Route path="slots" element={<PublisherAdUnits />} />
@@ -84,5 +93,6 @@ export default function App() {
         </Routes>
       </BrowserRouter>
     </AuthProvider>
+    </ErrorBoundary>
   );
 }

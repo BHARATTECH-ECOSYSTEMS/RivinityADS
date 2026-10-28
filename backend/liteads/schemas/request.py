@@ -254,3 +254,21 @@ class TextClassifyResponse(BaseModel):
     scores: dict[str, float] = Field(
         description="Sector → confidence score mapping (0.0 – 1.0)"
     )
+
+
+class ConversionEventRequest(BaseModel):
+    """Conversion tracking request schema for client pixel and S2S postbacks."""
+
+    click_token: str | None = Field(None, description="HMAC-signed click attribution token")
+    request_id: str | None = Field(None, description="Click request_id or reference ID")
+    campaign_id: int | None = Field(None, description="Target campaign identifier")
+    creative_id: int | None = Field(None, description="Target creative identifier")
+    order_id: str | None = Field(None, max_length=128, description="Advertiser transaction or order ID for deduplication")
+    conversion_value: float | None = Field(None, ge=0, description="Monetary value of the conversion")
+    currency: str = Field("INR", min_length=3, max_length=3, description="ISO-4217 3-letter currency code")
+    timestamp: int | None = Field(None, description="Conversion event timestamp (Unix epoch in UTC)")
+    user_id: str | None = Field(None, description="User identifier (privacy-safe SHA-256)")
+    signature: str | None = Field(None, description="HMAC-SHA256 signature for authenticated S2S postback")
+    is_test: bool = Field(False, description="Test mode flag (excluded from billing and production metrics)")
+    extra: dict[str, Any] | None = Field(None, description="Optional metadata")
+

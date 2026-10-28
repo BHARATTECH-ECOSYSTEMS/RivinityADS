@@ -12,6 +12,7 @@ const NAV: Record<Role, { to: string; label: string }[]> = {
     { to: "/admin/campaigns", label: "Campaigns" },
     { to: "/admin/creatives", label: "Creative moderation" },
     { to: "/admin/publishers", label: "Publishers" },
+    { to: "/admin/websites", label: "Websites" },
     { to: "/admin/finance", label: "Financial reconciliation" },
   ],
   advertiser: [
@@ -21,6 +22,7 @@ const NAV: Record<Role, { to: string; label: string }[]> = {
   ],
   publisher: [
     { to: "/publisher", label: "Dashboard" },
+    { to: "/publisher/websites", label: "Websites" },
     { to: "/publisher/health", label: "Placement Health" },
     { to: "/publisher/properties", label: "Properties" },
     { to: "/publisher/slots", label: "Ad Units" },
@@ -108,7 +110,7 @@ export default function Layout() {
         </div>
 
         <nav>
-          {NAV[user.role].map((item) => (
+          {(NAV[user.role] || []).map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
@@ -149,7 +151,7 @@ export default function Layout() {
                 <line x1="3" y1="18" x2="21" y2="18" strokeLinecap="round" />
               </svg>
             </button>
-            <span className="muted console-tag">{ROLE_LABEL[user.role]} console</span>
+            <span className="muted console-tag">{(ROLE_LABEL[user.role] || user.role)} console</span>
           </div>
 
           <div className="actions topbar-actions">

@@ -321,6 +321,9 @@ class AdEvent(Base, TimestampMixin):
     campaign_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True
     )
+    ad_set_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("ad_sets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     creative_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("creatives.id", ondelete="SET NULL"), nullable=True
     )
@@ -334,6 +337,48 @@ class AdEvent(Base, TimestampMixin):
     idempotency_key: Mapped[str | None] = mapped_column(
         String(128), unique=True, index=True, nullable=True
     )
+
+    # Phase 11: Conversion Measurement fields
+    conversion_value: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 4), nullable=True
+    )
+    currency: Mapped[str | None] = mapped_column(
+        String(3), server_default="INR", default="INR", nullable=True
+    )
+    is_attributed: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), default=False, nullable=False
+    )
+    attribution_reason: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    attributed_event_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("ad_events.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    external_order_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, index=True
+    )
+    is_test: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), default=False, nullable=False, index=True
+    )
+
+    # Self-referential relationship to attributed click/impression
+    attributed_event: Mapped["AdEvent | None"] = relationship(
+        "AdEvent", remote_side=[id], foreign_keys=[attributed_event_id], backref="conversions"
+    )
+
+    __table_args__ = (
+        Index("ix_ad_events_attribution", "campaign_id", "is_attributed", "is_test"),
+        Index("ix_ad_events_click_lookup", "request_id", "event_type"),
+        Index(
+            "uq_ad_events_order_dedup",
+            "campaign_id",
+            "external_order_id",
+            unique=True,
+            postgresql_where=text("external_order_id IS NOT NULL AND is_test = false"),
+            sqlite_where=text("external_order_id IS NOT NULL AND is_test = 0"),
+        ),
+    )
+
 
 
 class CampaignAssignment(Base, TimestampMixin):

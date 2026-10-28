@@ -19,6 +19,7 @@ from liteads.ad_server.routers import (
     ad,
     auth,
     chat,
+    conversion,
     domain,
     event,
     finance,
@@ -29,6 +30,8 @@ from liteads.ad_server.routers import (
     reference,
     targeting,
     webhooks,
+    website,
+    website_public,
 )
 from liteads.common.cache import redis_client
 from liteads.common.config import get_settings
@@ -173,10 +176,14 @@ def create_app() -> FastAPI:
 
         duration_ms = (time.perf_counter() - start_time) * 1000
 
+        log_path = request.url.path
+        if log_path.startswith("/preview/"):
+            log_path = "/preview/[REDACTED]"
+
         logger.info(
             "Request completed",
             method=request.method,
-            path=request.url.path,
+            path=log_path,
             status_code=response.status_code,
             duration_ms=round(duration_ms, 2),
         )
@@ -184,7 +191,7 @@ def create_app() -> FastAPI:
         # Add headers
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Response-Time"] = f"{duration_ms:.2f}ms"
-        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
 
         clear_log_context()
 
@@ -247,6 +254,8 @@ def create_app() -> FastAPI:
     app.include_router(domain.router, prefix="/api/v1", tags=["domain"])
     app.include_router(moderation.router, prefix="/api/v1", tags=["moderation"])
     app.include_router(notifications.router, prefix="/api/v1", tags=["notifications"])
+    app.include_router(website.router, prefix="/api/v1/website", tags=["website"])
+    app.include_router(conversion.router)
 
     # Mount JS SDK & static assets so rivinity.js and liteads.js are served at /static/
     static_dir = _STATIC_DIR if _STATIC_DIR.exists() else Path(os.path.join(os.path.dirname(__file__), "..", "static"))
@@ -262,6 +271,9 @@ def create_app() -> FastAPI:
     )
     async def public_api_docs() -> HTMLResponse:
         return HTMLResponse(_PUBLIC_DOCS_HTML)
+
+    # Public website builder hosting (subdomains, SSR, sitemap, robots, draft preview)
+    app.include_router(website_public.router, tags=["website-public"])
 
     return app
 

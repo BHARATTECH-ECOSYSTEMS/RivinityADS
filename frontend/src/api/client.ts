@@ -30,6 +30,17 @@ import type {
   AdSetUpdateInput,
   AdSetTargetingResponse,
   AdSetReportingResponse,
+  ThemeConfig,
+  BlockType,
+  BlockItem,
+  SeoMeta,
+  PageSummary,
+  PageData,
+  ProjectSummary,
+  ProjectData,
+  VersionSummary,
+  PreviewTokenResponse,
+  SlugCheckResponse,
 } from "../types";
 
 export type {
@@ -582,4 +593,121 @@ export const getCampaignAdSetReporting = (
     `/api/v1/campaign/${campaignId}/ad-set-reporting${qs ? `?${qs}` : ""}`
   );
 };
+
+// ── Website Builder Endpoints (Phase 10B/10C/10D) ──────────────────────────
+
+export const checkWebsiteSlug = (slug: string): Promise<SlugCheckResponse> =>
+  apiFetch<SlugCheckResponse>(`/api/v1/website/check-slug?slug=${encodeURIComponent(slug)}`);
+
+export const listWebsiteProjects = (): Promise<ProjectSummary[]> =>
+  apiFetch<ProjectSummary[]>("/api/v1/website/projects");
+
+export const createWebsiteProject = (data: {
+  name: string;
+  slug: string;
+  template_id?: string;
+  theme_config?: Partial<ThemeConfig>;
+}): Promise<ProjectData> =>
+  apiFetch<ProjectData>("/api/v1/website/projects", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+
+export const getWebsiteProject = (id: number): Promise<ProjectData> =>
+  apiFetch<ProjectData>(`/api/v1/website/projects/${id}`);
+
+export const updateWebsiteProject = (
+  id: number,
+  data: {
+    name?: string;
+    template_id?: string;
+    theme_config?: Partial<ThemeConfig>;
+  }
+): Promise<ProjectData> =>
+  apiFetch<ProjectData>(`/api/v1/website/projects/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+
+export const deleteWebsiteProject = (id: number): Promise<void> =>
+  apiFetch<void>(`/api/v1/website/projects/${id}`, {
+    method: "DELETE",
+  });
+
+export const listWebsitePages = (projectId: number): Promise<PageSummary[]> =>
+  apiFetch<PageSummary[]>(`/api/v1/website/projects/${projectId}/pages`);
+
+export const getWebsitePage = (projectId: number, pageId: number): Promise<PageData> =>
+  apiFetch<PageData>(`/api/v1/website/projects/${projectId}/pages/${pageId}`);
+
+export const createWebsitePage = (
+  projectId: number,
+  data: {
+    title: string;
+    slug?: string;
+    is_home?: boolean;
+    seo_meta?: SeoMeta;
+    blocks?: { schema_version: number; blocks: BlockItem[] };
+  }
+): Promise<PageData> =>
+  apiFetch<PageData>(`/api/v1/website/projects/${projectId}/pages`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+
+export const updateWebsitePage = (
+  projectId: number,
+  pageId: number,
+  data: {
+    title?: string;
+    slug?: string;
+    is_home?: boolean;
+    seo_meta?: SeoMeta;
+    blocks?: { schema_version: number; blocks: BlockItem[] };
+  }
+): Promise<PageData> =>
+  apiFetch<PageData>(`/api/v1/website/projects/${projectId}/pages/${pageId}`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+
+export const deleteWebsitePage = (projectId: number, pageId: number): Promise<void> =>
+  apiFetch<void>(`/api/v1/website/projects/${projectId}/pages/${pageId}`, {
+    method: "DELETE",
+  });
+
+export const reorderWebsitePages = (projectId: number, pageIds: number[]): Promise<PageSummary[]> =>
+  apiFetch<PageSummary[]>(`/api/v1/website/projects/${projectId}/pages/reorder`, {
+    method: "POST",
+    body: JSON.stringify({ page_ids: pageIds }),
+  });
+
+export const publishWebsiteProject = (projectId: number, notes?: string): Promise<ProjectData> =>
+  apiFetch<ProjectData>(`/api/v1/website/projects/${projectId}/publish`, {
+    method: "POST",
+    body: JSON.stringify({ notes: notes || null }),
+  });
+
+export const unpublishWebsiteProject = (projectId: number): Promise<ProjectData> =>
+  apiFetch<ProjectData>(`/api/v1/website/projects/${projectId}/unpublish`, {
+    method: "POST",
+  });
+
+export const listWebsiteVersions = (projectId: number): Promise<VersionSummary[]> =>
+  apiFetch<VersionSummary[]>(`/api/v1/website/projects/${projectId}/versions`);
+
+export const rollbackWebsiteVersion = (
+  projectId: number,
+  versionId: number,
+  notes?: string
+): Promise<ProjectData> =>
+  apiFetch<ProjectData>(`/api/v1/website/projects/${projectId}/versions/${versionId}/rollback`, {
+    method: "POST",
+    body: JSON.stringify({ notes: notes || null }),
+  });
+
+export const generateWebsitePreviewToken = (projectId: number): Promise<PreviewTokenResponse> =>
+  apiFetch<PreviewTokenResponse>(`/api/v1/website/projects/${projectId}/preview-token`, {
+    method: "POST",
+  });
 

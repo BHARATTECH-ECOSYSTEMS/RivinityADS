@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "node --experimental-strip-types --test tests/auth_client.test.mjs tests/auth_dom.test.mjs tests/notification_center.test.mjs tests/design_system.test.mjs tests/advertiser_workflow.test.mjs tests/publisher_admin_workflow.test.mjs tests/radius_targeting_ui.test.mjs"
+    "test": "node --experimental-strip-types --test tests/auth_client.test.mjs tests/auth_dom.test.mjs tests/notification_center.test.mjs tests/design_system.test.mjs tests/advertiser_workflow.test.mjs tests/publisher_admin_workflow.test.mjs tests/radius_targeting_ui.test.mjs tests/website_builder.test.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

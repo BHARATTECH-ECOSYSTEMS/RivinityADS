@@ -26,6 +26,7 @@ class TrackingUrls(BaseModel):
     impression_url: str = Field(..., description="URL to call on impression")
     click_url: str = Field(..., description="URL to call on click")
     conversion_url: str | None = Field(None, description="URL to call on conversion")
+    click_token: str | None = Field(None, description="HMAC-signed click attribution token")
 
 
 class AdResponse(BaseModel):
@@ -84,6 +85,23 @@ class EventResponse(BaseModel):
 
     success: bool = Field(..., description="Whether the event was recorded")
     message: str | None = Field(None, description="Optional message")
+
+
+class ConversionEventResponse(BaseModel):
+    """Conversion event response schema."""
+
+    success: bool = Field(..., description="Whether conversion event was processed")
+    event_id: int | None = Field(None, description="Recorded conversion ad_event id")
+    is_attributed: bool = Field(False, description="Whether conversion was attributed to an ad interaction")
+    attribution_reason: str | None = Field(None, description="Explanation of attribution determination")
+    campaign_id: int | None = Field(None, description="Campaign associated with the conversion")
+    creative_id: int | None = Field(None, description="Creative associated with the conversion")
+    conversion_value: float | None = Field(None, description="Recorded monetary value")
+    currency: str | None = Field(None, description="ISO currency code")
+    is_test: bool = Field(False, description="Whether processed in test mode")
+    is_duplicate: bool = Field(False, description="Whether this conversion was an idempotent retry")
+    message: str | None = Field(None, description="Informational message")
+
 
 
 class HealthResponse(BaseModel):

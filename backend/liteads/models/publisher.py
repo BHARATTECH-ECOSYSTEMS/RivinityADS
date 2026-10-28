@@ -3,7 +3,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, JSON, UniqueConstraint, text
+from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, JSON, UniqueConstraint, text
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -53,6 +53,22 @@ class PublisherProperty(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     domain: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[int] = mapped_column(Integer, default=Status.ACTIVE, nullable=False)
+
+    # Property verification fields (Phase 10E)
+    verification_status: Mapped[str] = mapped_column(
+        String(50), default="PENDING", server_default=text("'PENDING'"), nullable=False
+    )
+    verification_method: Mapped[str] = mapped_column(
+        String(50), default="DNS_TXT", server_default=text("'DNS_TXT'"), nullable=False
+    )
+    verification_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    challenge_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_platform_subdomain: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
 
     publisher: Mapped["Publisher"] = relationship("Publisher", back_populates="properties")
     slots: Mapped[list["AdSlot"]] = relationship(

@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from liteads.common.cache import CacheKeys, redis_client
 from liteads.common.logger import get_logger
 from liteads.common.utils import current_date, current_hour
-from liteads.models import AdEvent, AdSet, AdSlot, Campaign, Creative, EventType, PublisherDailyStat, Advertiser
+from liteads.models import AdEvent, AdSet, AdSlot, Campaign, Creative, EventType, PublisherDailyStat, Advertiser, Status, Publisher
 from liteads.ad_server.services.billing import BillingService
 
 logger = get_logger(__name__)
@@ -85,11 +85,36 @@ class EventService:
             
             slot_id = extra.get("slot_id") if extra else None
             publisher_id = None
+            slot = None
             if slot_id:
                 slot_res = await self.session.execute(select(AdSlot).where(AdSlot.slot_id == slot_id))
                 slot = slot_res.scalar_one_or_none()
                 if slot:
                     publisher_id = slot.publisher_id
+
+            # Phase 10F Financial Safeguards:
+            # 1. Non-billable preview or sandbox traffic generates zero billable spend
+            if (extra and (extra.get("is_preview") or extra.get("is_sandbox"))) or request_id.startswith(("prev_", "test_preview_")):
+                cost = Decimal("0")
+
+            # 2. Placements bound to unverified or inactive properties generate zero billable spend
+            if slot and slot.property_id:
+                from liteads.models.publisher import PublisherProperty
+                prop_res = await self.session.execute(
+                    select(PublisherProperty).where(PublisherProperty.id == slot.property_id)
+                )
+                prop_obj = prop_res.scalar_one_or_none()
+                if not prop_obj or prop_obj.status != Status.ACTIVE or prop_obj.verification_status != "VERIFIED":
+                    logger.warning("Event on unverified or inactive property; billable charge suppressed", slot_id=slot_id)
+                    cost = Decimal("0")
+
+            # 3. Placements owned by inactive or suspended publishers generate zero billable spend
+            if publisher_id:
+                pub_res = await self.session.execute(select(Publisher).where(Publisher.id == publisher_id))
+                pub_obj = pub_res.scalar_one_or_none()
+                if not pub_obj or pub_obj.status != Status.ACTIVE:
+                    logger.warning("Event on inactive publisher; billable charge suppressed", publisher_id=publisher_id)
+                    cost = Decimal("0")
             
             logical_event_key = f"{request_id}:{creative_id or 0}:{event_type_enum}:{seq}"
 
@@ -115,7 +140,7 @@ class EventService:
                 event_type=event_type_enum,
                 event_time=datetime.fromtimestamp(timestamp, tz=timezone.utc).replace(tzinfo=None)
                 if timestamp
-                else datetime.utcnow(),
+                else datetime.now(timezone.utc).replace(tzinfo=None),
                 user_id=user_id,
                 cost=cost,
                 idempotency_key=logical_event_key,

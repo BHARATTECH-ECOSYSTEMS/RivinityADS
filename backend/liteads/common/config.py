@@ -286,6 +286,22 @@ class GroqSettings(BaseSettings):
     model: str = "openai/gpt-oss-120b"
 
 
+class WebsiteHostingSettings(BaseSettings):
+    """Configuration for public website builder hosting."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="LITEADS_WEBSITE__",
+        extra="ignore",
+    )
+
+    platform_domain: str = "rivinity.site"
+    allowed_domains: list[str] = Field(
+        default_factory=lambda: ["rivinity.site", "localhost", "127.0.0.1"]
+    )
+    preview_ttl_seconds: int = 900
+    cache_ttl_seconds: int = 3600
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
@@ -335,6 +351,7 @@ class Settings(BaseSettings):
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)
     groq: GroqSettings = Field(default_factory=GroqSettings)
+    website: WebsiteHostingSettings = Field(default_factory=WebsiteHostingSettings)
     llm_provider: Literal["openai", "gemini", "groq"] = "openai"
 
     @field_validator("env")
@@ -436,6 +453,8 @@ def get_settings() -> Settings:
         flat_config["gemini"] = GeminiSettings(**merged["gemini"])
     if "groq" in merged:
         flat_config["groq"] = GroqSettings(**merged["groq"])
+    if "website" in merged:
+        flat_config["website"] = WebsiteHostingSettings(**merged["website"])
 
     # Nested settings are created from YAML above, so apply environment overrides
     # explicitly for deployments such as Docker Compose.

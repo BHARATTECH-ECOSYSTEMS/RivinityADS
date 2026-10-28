@@ -128,6 +128,114 @@ export interface NotificationPreferenceListResponse {
 }
 
 
+export interface ThemeConfig {
+  primary_color: string;
+  secondary_color: string;
+  background_color: string;
+  text_color: string;
+  font_family: string;
+  logo_url?: string | null;
+  favicon_url?: string | null;
+  border_radius: string;
+}
+
+export type BlockType =
+  | "hero"
+  | "text_section"
+  | "features_grid"
+  | "image_gallery"
+  | "contact_form"
+  | "cta_banner"
+  | "ad_placement"
+  | "footer";
+
+export interface BlockItem {
+  id: string;
+  type: BlockType;
+  is_visible: boolean;
+  content: Record<string, any>;
+}
+
+export interface SeoMeta {
+  meta_title?: string | null;
+  meta_description?: string | null;
+  og_image_url?: string | null;
+  noindex?: boolean;
+}
+
+export interface PageSummary {
+  id: number;
+  project_id: number;
+  title: string;
+  slug: string;
+  is_home: boolean;
+  order_index: number;
+  updated_at: string;
+}
+
+export interface PageData extends PageSummary {
+  seo_meta: SeoMeta;
+  blocks: {
+    schema_version: number;
+    blocks: BlockItem[];
+  };
+  created_at: string;
+}
+
+export type WebsiteStatusCode = 0 | 1 | 2 | 3;
+
+export const WebsiteStatusMap: Record<number, string> = {
+  0: "draft",
+  1: "published",
+  2: "archived",
+  3: "suspended",
+};
+
+export interface ProjectSummary {
+  id: number;
+  owner_user_id: number;
+  publisher_id?: number | null;
+  name: string;
+  slug: string;
+  template_id: string;
+  status: number; // 0=draft, 1=published, 2=archived, 3=suspended
+  monetization_status: number;
+  is_deleted: boolean;
+  current_published_version_id?: number | null;
+  published_url?: string;
+  created_at: string;
+  updated_at: string;
+  page_count: number;
+}
+
+export interface ProjectData extends ProjectSummary {
+  custom_domain?: string | null;
+  theme_config: ThemeConfig;
+  pages: PageSummary[];
+}
+
+export interface VersionSummary {
+  id: number;
+  project_id: number;
+  version_number: number;
+  published_by_user_id: number;
+  notes?: string | null;
+  published_at: string;
+  rollback_from_version_id?: number | null;
+}
+
+export interface PreviewTokenResponse {
+  preview_token: string;
+  preview_url: string;
+  expires_in: number;
+}
+
+export interface SlugCheckResponse {
+  slug: string;
+  available: boolean;
+  reason?: string | null;
+}
+
 declare global {
   interface Window {
     Razorpay?: new (options: {

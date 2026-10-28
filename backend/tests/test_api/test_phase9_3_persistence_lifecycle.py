@@ -465,3 +465,120 @@ async def test_legacy_campaign_targeting_persistence_lifecycle(setup_persistence
     assert get_data["geo_include"][0]["radius_meters"] == 12000.0
     assert get_data["geo_include"][0]["country"] == "US"
     assert get_data["geo_exclude"][0]["country"] == "CA"
+
+
+async def test_adset_targeting_validation_rejections(setup_persistence_env):
+    """
+    Step 2.10: Verify AdSet targeting endpoint rejects invalid coordinates, missing fields,
+    out-of-bounds radius, malformed combinations, and duplicates/collisions with 422 Unprocessable Entity.
+    """
+    client = setup_persistence_env["client"]
+    adset1_id = setup_persistence_env["adset1_id"]
+
+    # 1. Invalid Latitude (> 90)
+    res = await client.put(
+        f"/api/v1/ad-set/{adset1_id}/targeting",
+        json={
+            "geo_include": [{"latitude": 95.0, "longitude": 72.8777, "radius_meters": 5000.0}],
+            "geo_exclude": [],
+            "sector_include": [],
+            "sector_exclude": [],
+        },
+    )
+    assert res.status_code == 422
+    assert "latitude must be between -90.0 and 90.0 degrees" in res.text
+
+    # 2. Invalid Longitude (> 180)
+    res = await client.put(
+        f"/api/v1/ad-set/{adset1_id}/targeting",
+        json={
+            "geo_include": [{"latitude": 19.0760, "longitude": 185.0, "radius_meters": 5000.0}],
+            "geo_exclude": [],
+            "sector_include": [],
+            "sector_exclude": [],
+        },
+    )
+    assert res.status_code == 422
+    assert "longitude must be between -180.0 and 180.0 degrees" in res.text
+
+    # 3. Sub-minimum Radius (< 100m)
+    res = await client.put(
+        f"/api/v1/ad-set/{adset1_id}/targeting",
+        json={
+            "geo_include": [{"latitude": 19.0760, "longitude": 72.8777, "radius_meters": 50.0}],
+            "geo_exclude": [],
+            "sector_include": [],
+            "sector_exclude": [],
+        },
+    )
+    assert res.status_code == 422
+    assert "radius_meters must be at least 100.0 meters" in res.text
+
+    # 4. Excessive Radius (> 100,000m)
+    res = await client.put(
+        f"/api/v1/ad-set/{adset1_id}/targeting",
+        json={
+            "geo_include": [{"latitude": 19.0760, "longitude": 72.8777, "radius_meters": 120000.0}],
+            "geo_exclude": [],
+            "sector_include": [],
+            "sector_exclude": [],
+        },
+    )
+    assert res.status_code == 422
+    assert "radius_meters must not exceed 100000.0 meters" in res.text
+
+    # 5. Missing Required Fields (latitude without longitude or radius)
+    res = await client.put(
+        f"/api/v1/ad-set/{adset1_id}/targeting",
+        json={
+            "geo_include": [{"latitude": 19.0760}],
+            "geo_exclude": [],
+            "sector_include": [],
+            "sector_exclude": [],
+        },
+    )
+    assert res.status_code == 422
+    assert "Radius targeting requires latitude, longitude, and radius_meters" in res.text
+
+    # 6. Malformed Combination (mixing radius with administrative city)
+    res = await client.put(
+        f"/api/v1/ad-set/{adset1_id}/targeting",
+        json={
+            "geo_include": [{"latitude": 19.0760, "longitude": 72.8777, "radius_meters": 5000.0, "city": "Mumbai"}],
+            "geo_exclude": [],
+            "sector_include": [],
+            "sector_exclude": [],
+        },
+    )
+    assert res.status_code == 422
+    assert "Radius targeting cannot be combined with city" in res.text
+
+    # 7. Duplicate targets in geo_include
+    res = await client.put(
+        f"/api/v1/ad-set/{adset1_id}/targeting",
+        json={
+            "geo_include": [
+                {"latitude": 19.0760, "longitude": 72.8777, "radius_meters": 5000.0},
+                {"latitude": 19.0760, "longitude": 72.8777, "radius_meters": 5000.0},
+            ],
+            "geo_exclude": [],
+            "sector_include": [],
+            "sector_exclude": [],
+        },
+    )
+    assert res.status_code == 422
+    assert "Duplicate geo target found in geo_include" in res.text
+
+    # 8. Direct collision between geo_include and geo_exclude
+    res = await client.put(
+        f"/api/v1/ad-set/{adset1_id}/targeting",
+        json={
+            "geo_include": [{"latitude": 19.0760, "longitude": 72.8777, "radius_meters": 5000.0}],
+            "geo_exclude": [{"latitude": 19.0760, "longitude": 72.8777, "radius_meters": 5000.0}],
+            "sector_include": [],
+            "sector_exclude": [],
+        },
+    )
+    assert res.status_code == 422
+    assert "Conflicting targeting rule" in res.text
+

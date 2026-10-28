@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from liteads.common.database import get_session
@@ -60,6 +60,8 @@ from liteads.schemas.management import (
     PublisherPropertyCreate,
     PublisherPropertyResponse,
     PublisherPropertyUpdate,
+    PropertyChallengeRequest,
+    PropertyChallengeResponse,
     PublisherReportingResponse,
     AdvertiserReportingResponse,
     DailyStatResponse,
@@ -773,17 +775,47 @@ async def advertiser_reporting(
         
     start_dt = datetime.combine(start, datetime.min.time())
     end_dt = datetime.combine(end, datetime.max.time())
+
+    # Check for currency consistency across the queried campaigns/events
+    curr_query = (
+        select(AdEvent.currency)
+        .distinct()
+        .join(Campaign, Campaign.id == AdEvent.campaign_id)
+        .where(
+            Campaign.advertiser_id == advertiser_id,
+            AdEvent.event_time >= start_dt,
+            AdEvent.event_time <= end_dt,
+            AdEvent.is_test == False,
+            AdEvent.currency.isnot(None),
+        )
+    )
+    if campaign_id:
+        curr_query = curr_query.where(AdEvent.campaign_id == campaign_id)
+    if ad_set_id:
+        curr_query = curr_query.join(Creative, Creative.id == AdEvent.creative_id).where(Creative.ad_set_id == ad_set_id)
+
+    currs_res = await session.execute(curr_query)
+    distinct_currs = [c for c in currs_res.scalars().all() if c]
+    if len(set(distinct_currs)) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Incompatible currencies detected in reporting period: {sorted(list(set(distinct_currs)))}",
+        )
+    report_currency = distinct_currs[0] if distinct_currs else "INR"
     
     query = select(
         func.date(AdEvent.event_time).label('stat_date'),
         func.count().filter(AdEvent.event_type == 1).label('impressions'),
         func.count().filter(AdEvent.event_type == 2).label('clicks'),
-        func.count().filter(AdEvent.event_type == 3).label('conversions'),
-        func.sum(AdEvent.cost).label('spend'),
+        func.count().filter(AdEvent.event_type == 3).label('total_conversions'),
+        func.count().filter(and_(AdEvent.event_type == 3, AdEvent.is_attributed == True)).label('attributed_conversions'),
+        func.coalesce(func.sum(case((and_(AdEvent.event_type == 3, AdEvent.is_attributed == True), AdEvent.conversion_value), else_=0)), 0).label('conversion_value'),
+        func.coalesce(func.sum(AdEvent.cost), 0).label('spend'),
     ).join(Campaign, Campaign.id == AdEvent.campaign_id).where(
         Campaign.advertiser_id == advertiser_id,
         AdEvent.event_time >= start_dt,
         AdEvent.event_time <= end_dt,
+        AdEvent.is_test == False,
     )
     if campaign_id:
         query = query.where(AdEvent.campaign_id == campaign_id)
@@ -796,33 +828,47 @@ async def advertiser_reporting(
     total_impressions = 0
     total_clicks = 0
     total_conversions = 0
+    total_attributed_conversions = 0
+    total_conversion_value = Decimal("0")
     total_spend = Decimal("0")
     breakdown = []
     
     for row in result.all():
         d_impressions = int(row.impressions or 0)
         d_clicks = int(row.clicks or 0)
-        d_conversions = int(row.conversions or 0)
-        d_spend = Decimal(row.spend or 0)
+        d_total_conversions = int(row.total_conversions or 0)
+        d_attr_conversions = int(row.attributed_conversions or 0)
+        d_conv_value = Decimal(str(row.conversion_value or 0))
+        d_spend = Decimal(str(row.spend or 0))
         
-        # In SQLite func.date returns a string 'YYYY-MM-DD', we need a date object
         stat_date = datetime.strptime(str(row.stat_date), "%Y-%m-%d").date()
+        d_cpa = (d_spend / Decimal(d_attr_conversions)) if d_attr_conversions > 0 else None
+        d_roas = (d_conv_value / d_spend) if d_spend > Decimal("0") else None
         
         breakdown.append(DailyStatResponse(
             stat_date=stat_date,
             impressions=d_impressions,
             clicks=d_clicks,
-            conversions=d_conversions,
+            conversions=d_total_conversions,
+            total_conversions=d_total_conversions,
+            attributed_conversions=d_attr_conversions,
+            conversion_value=d_conv_value,
             spend=d_spend,
+            cpa=d_cpa,
+            roas=d_roas,
         ))
         
         total_impressions += d_impressions
         total_clicks += d_clicks
-        total_conversions += d_conversions
+        total_conversions += d_total_conversions
+        total_attributed_conversions += d_attr_conversions
+        total_conversion_value += d_conv_value
         total_spend += d_spend
         
     ctr_val = (Decimal(total_clicks) / Decimal(total_impressions) * Decimal(100)) if total_impressions else Decimal("0")
-    cvr_val = (Decimal(total_conversions) / Decimal(total_clicks) * Decimal(100)) if total_clicks else Decimal("0")
+    cvr_val = (Decimal(total_attributed_conversions) / Decimal(total_clicks) * Decimal(100)) if total_clicks else Decimal("0")
+    cpa_val = (total_spend / Decimal(total_attributed_conversions)) if total_attributed_conversions > 0 else None
+    roas_val = (total_conversion_value / total_spend) if total_spend > Decimal("0") else None
     
     return AdvertiserReportingResponse(
         advertiser_id=advertiser_id,
@@ -833,9 +879,15 @@ async def advertiser_reporting(
         impressions=total_impressions,
         clicks=total_clicks,
         conversions=total_conversions,
+        total_conversions=total_conversions,
+        attributed_conversions=total_attributed_conversions,
+        conversion_value=total_conversion_value,
         spend=total_spend,
+        currency=report_currency,
         ctr=ctr_val,
         cvr=cvr_val,
+        cpa=cpa_val,
+        roas=roas_val,
         daily_breakdown=breakdown,
     )
 
@@ -868,14 +920,17 @@ async def campaign_ad_set_reporting(
             Creative.ad_set_id,
             func.count().filter(AdEvent.event_type == 1).label('impressions'),
             func.count().filter(AdEvent.event_type == 2).label('clicks'),
-            func.count().filter(AdEvent.event_type == 3).label('conversions'),
-            func.sum(AdEvent.cost).label('spend'),
+            func.count().filter(AdEvent.event_type == 3).label('total_conversions'),
+            func.count().filter(and_(AdEvent.event_type == 3, AdEvent.is_attributed == True)).label('attributed_conversions'),
+            func.coalesce(func.sum(case((and_(AdEvent.event_type == 3, AdEvent.is_attributed == True), AdEvent.conversion_value), else_=0)), 0).label('conversion_value'),
+            func.coalesce(func.sum(AdEvent.cost), 0).label('spend'),
         )
         .join(Creative, Creative.id == AdEvent.creative_id)
         .where(
             AdEvent.campaign_id == campaign_id,
             AdEvent.event_time >= start_dt,
             AdEvent.event_time <= end_dt,
+            AdEvent.is_test == False,
             Creative.ad_set_id.isnot(None),
         )
         .group_by(Creative.ad_set_id)
@@ -887,17 +942,23 @@ async def campaign_ad_set_reporting(
     total_impressions = 0
     total_clicks = 0
     total_conversions = 0
+    total_attributed_conversions = 0
+    total_conversion_value = Decimal("0")
     total_spend = Decimal("0")
 
     for ad_set in ad_sets:
         row = ad_set_stats_map.get(ad_set.id)
         impr = int(row.impressions or 0) if row else 0
         clk = int(row.clicks or 0) if row else 0
-        conv = int(row.conversions or 0) if row else 0
-        sp = Decimal(row.spend or 0) if row else Decimal("0")
+        tot_conv = int(row.total_conversions or 0) if row else 0
+        attr_conv = int(row.attributed_conversions or 0) if row else 0
+        conv_val = Decimal(str(row.conversion_value or 0)) if row else Decimal("0")
+        sp = Decimal(str(row.spend or 0)) if row else Decimal("0")
 
         ctr = (Decimal(clk) / Decimal(impr) * Decimal(100)) if impr else Decimal("0")
-        cvr = (Decimal(conv) / Decimal(clk) * Decimal(100)) if clk else Decimal("0")
+        cvr = (Decimal(attr_conv) / Decimal(clk) * Decimal(100)) if clk else Decimal("0")
+        cpa = (sp / Decimal(attr_conv)) if attr_conv > 0 else None
+        roas = (conv_val / sp) if sp > Decimal("0") else None
 
         ad_set_items.append(
             AdSetReportingItem(
@@ -906,16 +967,29 @@ async def campaign_ad_set_reporting(
                 status=ad_set.status,
                 impressions=impr,
                 clicks=clk,
-                conversions=conv,
+                conversions=tot_conv,
+                total_conversions=tot_conv,
+                attributed_conversions=attr_conv,
+                conversion_value=conv_val,
                 spend=sp,
+                currency="INR",
                 ctr=ctr,
                 cvr=cvr,
+                cpa=cpa,
+                roas=roas,
             )
         )
         total_impressions += impr
         total_clicks += clk
-        total_conversions += conv
+        total_conversions += tot_conv
+        total_attributed_conversions += attr_conv
+        total_conversion_value += conv_val
         total_spend += sp
+
+    total_ctr = (Decimal(total_clicks) / Decimal(total_impressions) * Decimal(100)) if total_impressions else Decimal("0")
+    total_cvr = (Decimal(total_attributed_conversions) / Decimal(total_clicks) * Decimal(100)) if total_clicks else Decimal("0")
+    total_cpa = (total_spend / Decimal(total_attributed_conversions)) if total_attributed_conversions > 0 else None
+    total_roas = (total_conversion_value / total_spend) if total_spend > Decimal("0") else None
 
     return AdSetReportingResponse(
         campaign_id=campaign_id,
@@ -925,7 +999,14 @@ async def campaign_ad_set_reporting(
         total_impressions=total_impressions,
         total_clicks=total_clicks,
         total_conversions=total_conversions,
+        total_attributed_conversions=total_attributed_conversions,
+        total_conversion_value=total_conversion_value,
         total_spend=total_spend,
+        currency="INR",
+        ctr=total_ctr,
+        cvr=total_cvr,
+        cpa=total_cpa,
+        roas=total_roas,
     )
 
 
@@ -1106,11 +1187,53 @@ async def list_publisher_properties(
 async def create_publisher_property(
     publisher_id: int, payload: PublisherPropertyCreate, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)
 ) -> PublisherProperty:
+    from liteads.ad_server.services.publisher_verification import (
+        normalize_property_domain,
+        generate_property_verification_token,
+    )
+
     _assert_publisher_access(user, publisher_id)
     if await session.get(Publisher, publisher_id) is None:
         raise _not_found("Publisher", publisher_id)
+
+    try:
+        norm_domain = normalize_property_domain(payload.domain)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    # Reject if this domain is actively verified by a different publisher
+    other_ver_stmt = select(PublisherProperty).where(
+        PublisherProperty.domain == norm_domain,
+        PublisherProperty.verification_status == "VERIFIED",
+        PublisherProperty.publisher_id != publisher_id,
+    )
+    other_res = await session.execute(other_ver_stmt)
+    if other_res.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Domain is currently verified by another publisher account. Contact support to dispute ownership.",
+        )
+
+    # Check if this publisher already has this property registered
+    existing_stmt = select(PublisherProperty).where(
+        PublisherProperty.domain == norm_domain,
+        PublisherProperty.publisher_id == publisher_id,
+    )
+    existing_res = await session.execute(existing_stmt)
+    existing = existing_res.scalar_one_or_none()
+    if existing is not None:
+        return existing
+
     data = payload.model_dump()
     data["publisher_id"] = publisher_id
+    data["domain"] = norm_domain
+    data["verification_status"] = "PENDING"
+    data["verification_method"] = "DNS_TXT"
+    data["verification_token"] = generate_property_verification_token()
+    data["challenge_expires_at"] = datetime.now(timezone.utc) + timedelta(hours=48)
+    data["verified_at"] = None
+    data["last_error"] = None
+
     property_obj = PublisherProperty(**data)
     session.add(property_obj)
     await session.commit()
@@ -1133,15 +1256,114 @@ async def get_publisher_property(
 async def update_publisher_property(
     property_id: int, payload: PublisherPropertyUpdate, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)
 ) -> PublisherProperty:
+    from liteads.ad_server.services.publisher_verification import (
+        normalize_property_domain,
+        generate_property_verification_token,
+    )
+
     property_obj = await session.get(PublisherProperty, property_id)
     if property_obj is None:
         raise _not_found("PublisherProperty", property_id)
     _assert_publisher_access(user, property_obj.publisher_id)
-    for key, value in payload.model_dump(exclude_unset=True).items():
-        setattr(property_obj, key, value)
+
+    updates = payload.model_dump(exclude_unset=True)
+
+    # Strip client attempts to manipulate verification state
+    for forbidden_field in ("verification_status", "verified_at", "last_checked_at", "verification_token"):
+        updates.pop(forbidden_field, None)
+
+    if "domain" in updates and updates["domain"] is not None:
+        try:
+            norm_domain = normalize_property_domain(updates["domain"])
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+        if norm_domain != property_obj.domain:
+            # Check collision
+            other_ver_stmt = select(PublisherProperty).where(
+                PublisherProperty.domain == norm_domain,
+                PublisherProperty.verification_status == "VERIFIED",
+                PublisherProperty.publisher_id != property_obj.publisher_id,
+            )
+            other_res = await session.execute(other_ver_stmt)
+            if other_res.scalar_one_or_none() is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Domain is currently verified by another publisher account.",
+                )
+
+            property_obj.domain = norm_domain
+            property_obj.verification_status = "PENDING"
+            property_obj.verification_token = generate_property_verification_token()
+            property_obj.challenge_expires_at = datetime.now(timezone.utc) + timedelta(hours=48)
+            property_obj.verified_at = None
+            property_obj.last_error = None
+
+    if "name" in updates and updates["name"] is not None:
+        property_obj.name = updates["name"]
+    if "status" in updates and updates["status"] is not None:
+        property_obj.status = updates["status"]
+
     await session.commit()
     await session.refresh(property_obj)
     return property_obj
+
+
+@router.post("/publisher/property/{property_id}/challenge", response_model=PropertyChallengeResponse, dependencies=[Depends(require_roles("admin", "publisher"))])
+async def create_property_challenge(
+    property_id: int,
+    payload: PropertyChallengeRequest,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> PropertyChallengeResponse:
+    """Generate or renew an unpredictable verification challenge on a property."""
+    from liteads.ad_server.services.publisher_verification import PublisherVerificationService
+
+    property_obj = await session.get(PublisherProperty, property_id)
+    if property_obj is None:
+        raise _not_found("PublisherProperty", property_id)
+    _assert_publisher_access(user, property_obj.publisher_id)
+
+    service = PublisherVerificationService(session)
+    updated_prop = await service.create_challenge(property_obj, method=payload.method)
+
+    rec_name = f"_rivinity-challenge.{updated_prop.domain}"
+    meta_tag = f'<meta name="rivinity-site-verification" content="{updated_prop.verification_token}">'
+    if payload.method == "DNS_TXT":
+        instructions = f"Add a DNS TXT record for '{rec_name}' with value '{updated_prop.verification_token}'."
+    else:
+        instructions = f"Add the meta tag '{meta_tag}' into the <head> section of your website homepage."
+
+    return PropertyChallengeResponse(
+        property_id=updated_prop.id,
+        domain=updated_prop.domain,
+        verification_method=updated_prop.verification_method,
+        verification_token=updated_prop.verification_token or "",
+        dns_record_name=rec_name,
+        dns_record_value=updated_prop.verification_token or "",
+        html_meta_tag=meta_tag,
+        challenge_expires_at=updated_prop.challenge_expires_at or (datetime.now(timezone.utc) + timedelta(hours=48)),
+        instructions=instructions,
+    )
+
+
+@router.post("/publisher/property/{property_id}/verify", response_model=PublisherPropertyResponse, dependencies=[Depends(require_roles("admin", "publisher"))])
+async def verify_publisher_property(
+    property_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> PublisherProperty:
+    """Trigger server-side verification of domain ownership for a publisher property."""
+    from liteads.ad_server.services.publisher_verification import PublisherVerificationService
+
+    property_obj = await session.get(PublisherProperty, property_id)
+    if property_obj is None:
+        raise _not_found("PublisherProperty", property_id)
+    _assert_publisher_access(user, property_obj.publisher_id)
+
+    service = PublisherVerificationService(session)
+    result_prop = await service.verify_property(property_obj)
+    return result_prop
 
 
 @router.get("/slot/{slot_id}/tag", dependencies=[Depends(require_roles("admin", "publisher"))])
