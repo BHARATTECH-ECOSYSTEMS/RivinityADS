@@ -130,6 +130,8 @@ async def register(payload: RegisterRequest, response: Response, session: AsyncS
             subject=email_content.subject,
             text_content=email_content.text_content,
             html_content=email_content.html_content,
+            template_purpose="verification",
+            template_data={"token": token, "email": user.email, "name": user.name},
         )
     except EmailDeliveryError as exc:
         logger.error("Failed to send verification email on registration", user_id=user.id, error=str(exc))
@@ -240,6 +242,8 @@ async def resend_verification(
                 subject=email_content.subject,
                 text_content=email_content.text_content,
                 html_content=email_content.html_content,
+                template_purpose="verification",
+                template_data={"token": token, "email": user.email, "name": user.name},
             )
         except EmailDeliveryError as exc:
             logger.error("Failed to send verification email on resend", user_id=user.id, error=str(exc))
@@ -349,6 +353,8 @@ async def request_password_reset(
                 subject=email_content.subject,
                 text_content=email_content.text_content,
                 html_content=email_content.html_content,
+                template_purpose="password_reset",
+                template_data={"token": token, "email": user.email, "name": user.name},
             )
         except EmailDeliveryError as exc:
             logger.error("Failed to send password reset email", user_id=user.id, error=str(exc))

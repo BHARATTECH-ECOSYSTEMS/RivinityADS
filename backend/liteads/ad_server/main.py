@@ -21,10 +21,12 @@ from liteads.ad_server.routers import (
     chat,
     conversion,
     domain,
+    email_marketing,
     event,
     finance,
     health,
     management,
+    marketing,
     moderation,
     notifications,
     reference,
@@ -256,6 +258,8 @@ def create_app() -> FastAPI:
     app.include_router(notifications.router, prefix="/api/v1", tags=["notifications"])
     app.include_router(website.router, prefix="/api/v1/website", tags=["website"])
     app.include_router(conversion.router)
+    app.include_router(marketing.router, prefix="/api/v1", tags=["marketing"])
+    app.include_router(email_marketing.router, prefix="/api/v1", tags=["email-marketing"])
 
     # Mount JS SDK & static assets so rivinity.js and liteads.js are served at /static/
     static_dir = _STATIC_DIR if _STATIC_DIR.exists() else Path(os.path.join(os.path.dirname(__file__), "..", "static"))

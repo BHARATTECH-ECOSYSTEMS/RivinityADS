@@ -1,0 +1,47 @@
+# RivinityADS — Local Development Overrides
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up
+# Or copy to docker-compose.override.yml for automatic inclusion by docker compose:
+#   cp docker-compose.local.yml docker-compose.override.yml
+#
+# PURPOSE:
+#   Preserves local-only development convenience defaults (such as local database passwords)
+#   when running without an explicit .env file.
+#
+# SAFETY NOTICE:
+#   This file is strictly for local development and MUST NEVER be deployed to staging or production.
+
+services:
+  ad-server:
+    environment:
+      - LITEADS_ENV=dev
+      - LITEADS_DATABASE__PASSWORD=${LITEADS_DATABASE__PASSWORD:-liteads_password}
+
+  webhook-worker:
+    environment:
+      - LITEADS_ENV=dev
+      - LITEADS_DATABASE__PASSWORD=${LITEADS_DATABASE__PASSWORD:-liteads_password}
+
+  optimization-worker:
+    environment:
+      - LITEADS_ENV=dev
+      - LITEADS_DATABASE__PASSWORD=${LITEADS_DATABASE__PASSWORD:-liteads_password}
+
+  notification-worker:
+    environment:
+      - LITEADS_ENV=dev
+      - LITEADS_DATABASE__PASSWORD=${LITEADS_DATABASE__PASSWORD:-liteads_password}
+
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: ${LITEADS_DATABASE__PASSWORD:-liteads_password}
+
+  listmonk-db:
+    environment:
+      POSTGRES_PASSWORD: ${LISTMONK_DB__PASSWORD:-listmonk_password}
+
+  listmonk:
+    environment:
+      - LISTMONK_db__password=${LISTMONK_DB__PASSWORD:-listmonk_password}
+      - LISTMONK_ADMIN_PASSWORD=${LISTMONK_ADMIN__PASSWORD:-listmonk_admin_pass}

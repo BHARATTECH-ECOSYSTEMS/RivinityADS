@@ -1,3 +1,6 @@
+# Logs
+*.log
+
 # Node
 node_modules/
 
@@ -12,6 +15,7 @@ __pycache__/
 # Environment variables
 .env
 .env.*
+!.env.example
 
 # IDE
 .vscode/

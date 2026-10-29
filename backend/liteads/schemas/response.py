@@ -113,6 +113,38 @@ class HealthResponse(BaseModel):
     redis: bool = Field(..., description="Redis connection status")
 
 
+class DependencyStatus(BaseModel):
+    """Sanitized individual dependency status."""
+
+    status: str = Field(..., description="'ok' or 'unreachable'")
+    latency_ms: float | None = Field(None, description="Check round-trip latency in milliseconds")
+
+
+class DependenciesHealthResponse(BaseModel):
+    """Detailed dependencies health response."""
+
+    status: str = Field(..., description="Overall health: 'healthy', 'degraded', or 'unhealthy'")
+    dependencies: dict[str, DependencyStatus] = Field(..., description="Status breakdown per dependency")
+
+
+class OutboxQueueMetrics(BaseModel):
+    """Metrics for an individual outbox queue."""
+
+    pending_count: int = Field(0, description="Total pending jobs awaiting delivery")
+    delayed_count: int = Field(0, description="Pending jobs currently delayed in retry backoff")
+    ready_count: int = Field(0, description="Pending jobs ready for immediate delivery")
+    processing_count: int = Field(0, description="Jobs currently leased by active workers")
+    failed_count: int = Field(0, description="Permanently failed / dead-lettered jobs")
+    oldest_pending_age_seconds: float = Field(0.0, description="Age in seconds of the oldest pending job")
+
+
+class OutboxHealthResponse(BaseModel):
+    """Outbox and background processing health response."""
+
+    status: str = Field(..., description="Overall outbox status: 'healthy' or 'degraded'")
+    queues: dict[str, OutboxQueueMetrics] = Field(..., description="Metrics per outbox queue")
+
+
 class ErrorResponse(BaseModel):
     """Error response schema."""
 

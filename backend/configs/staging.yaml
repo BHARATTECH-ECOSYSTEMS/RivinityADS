@@ -1,0 +1,27 @@
+# LiteAds Staging Configuration
+# Inherits from base.yaml; overrides settings for staging environments.
+
+app:
+  debug: false
+
+server:
+  workers: 2
+  reload: false
+
+database:
+  pool_size: 15
+  max_overflow: 30
+
+redis:
+  pool_size: 15
+
+ad_serving:
+  timeout_ms: 40
+  enable_ml_prediction: true
+
+logging:
+  level: "INFO"
+  format: "json"
+
+monitoring:
+  enabled: true

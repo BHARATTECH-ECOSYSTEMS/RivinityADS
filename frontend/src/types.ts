@@ -236,6 +236,104 @@ export interface SlugCheckResponse {
   reason?: string | null;
 }
 
+// ── Email Marketing (Phase 6.1E) ─────────────────────────────────────────────
+
+export interface EmailMarketingList {
+  id: number;
+  tenant_type: string;
+  tenant_id: number;
+  name: string;
+  description?: string | null;
+  type: string;
+  optin: string;
+  contact_count: number;
+  created_at: string;
+}
+
+export interface CreateMailingListInput {
+  name: string;
+  description?: string;
+  type?: 'public' | 'private';
+  optin?: 'single' | 'double';
+}
+
+export interface EmailMarketingContact {
+  id: number;
+  list_id: number;
+  email: string;
+  name?: string | null;
+  status: string;
+  consent_source: string;
+  consent_at?: string | null;
+  created_at: string;
+}
+
+export interface CreateContactInput {
+  email: string;
+  name?: string;
+  consent_source: string;
+}
+
+export interface ImportContactsInput {
+  csv_content: string;
+  permission_source: string;
+}
+
+export interface ImportContactsResult {
+  total_rows: number;
+  valid_count: number;
+  duplicate_count: number;
+  error_count: number;
+  errors: string[];
+}
+
+export interface EmailMarketingCampaign {
+  id: number;
+  list_id: number;
+  name: string;
+  subject: string;
+  body: string;
+  content_type: string;
+  status: string;
+  total_recipients: number;
+  sent_at?: string | null;
+  created_at: string;
+}
+
+export interface CreateCampaignInput {
+  list_id: number;
+  name: string;
+  subject: string;
+  body: string;
+  content_type?: 'html' | 'markdown' | 'plain';
+}
+
+export interface UpdateCampaignInput {
+  name?: string;
+  subject?: string;
+  body?: string;
+  content_type?: 'html' | 'markdown' | 'plain';
+}
+
+export interface CampaignPreview {
+  id: number;
+  name: string;
+  subject: string;
+  rendered_body: string;
+  eligible_recipient_count: number;
+  has_unsubscribe_notice: boolean;
+}
+
+export interface CampaignAnalytics {
+  campaign_id: number;
+  status: string;
+  total_recipients: number;
+  views: number;
+  clicks: number;
+  unsubscribes: number;
+  bounces: number;
+}
+
 declare global {
   interface Window {
     Razorpay?: new (options: {

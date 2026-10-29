@@ -137,6 +137,63 @@ MODEL_VERSION = Gauge(
     ["model_name"],
 )
 
+# Outbox queue metrics
+OUTBOX_PENDING_TOTAL = Gauge(
+    "liteads_outbox_pending_count",
+    "Current pending outbox items awaiting delivery",
+    ["queue"],
+)
+
+OUTBOX_DELAYED_TOTAL = Gauge(
+    "liteads_outbox_delayed_count",
+    "Current pending outbox items delayed in retry backoff",
+    ["queue"],
+)
+
+OUTBOX_PROCESSING_TOTAL = Gauge(
+    "liteads_outbox_processing_count",
+    "Current outbox items claimed/leased by active workers",
+    ["queue"],
+)
+
+OUTBOX_FAILED_TOTAL = Gauge(
+    "liteads_outbox_failed_count",
+    "Total permanently failed / dead-lettered outbox items",
+    ["queue"],
+)
+
+OUTBOX_OLDEST_AGE_SECONDS = Gauge(
+    "liteads_outbox_oldest_age_seconds",
+    "Age in seconds of the oldest pending outbox item",
+    ["queue"],
+)
+
+# Laya dependency metrics
+LAYA_REQUESTS_TOTAL = Counter(
+    "liteads_laya_requests_total",
+    "Total outbound requests to Laya sidecar",
+    ["operation", "status"],
+)
+
+LAYA_REQUEST_DURATION = Histogram(
+    "liteads_laya_request_duration_seconds",
+    "Laya outbound request duration in seconds",
+    ["operation"],
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0),
+)
+
+LAYA_ERRORS_TOTAL = Counter(
+    "liteads_laya_errors_total",
+    "Total Laya outbound request errors by category",
+    ["operation", "error_category"],
+)
+
+# Financial integrity metrics
+LEDGER_UNBALANCED_TRANSACTIONS_TOTAL = Counter(
+    "liteads_ledger_unbalanced_transactions_total",
+    "Total unbalanced financial ledger transactions detected during reconciliation",
+)
+
 
 # =============================================================================
 # Metrics Middleware
@@ -298,3 +355,39 @@ def record_db_query_latency(query_type: str, duration: float) -> None:
 def set_model_version(model_name: str, version: float) -> None:
     """Set the current model version."""
     MODEL_VERSION.labels(model_name=model_name).set(version)
+
+
+def record_laya_request(operation: str, status: str) -> None:
+    """Record an outbound Laya request outcome."""
+    LAYA_REQUESTS_TOTAL.labels(operation=operation, status=status).inc()
+
+
+def record_laya_duration(operation: str, duration: float) -> None:
+    """Record Laya outbound call duration in seconds."""
+    LAYA_REQUEST_DURATION.labels(operation=operation).observe(duration)
+
+
+def record_laya_error(operation: str, error_category: str) -> None:
+    """Record a categorized Laya error (e.g. timeout, network_error, http_500)."""
+    LAYA_ERRORS_TOTAL.labels(operation=operation, error_category=error_category).inc()
+
+
+def update_outbox_gauge(
+    queue: str,
+    pending: int,
+    delayed: int,
+    processing: int,
+    failed: int,
+    oldest_age_seconds: float,
+) -> None:
+    """Update outbox queue gauges in Prometheus."""
+    OUTBOX_PENDING_TOTAL.labels(queue=queue).set(pending)
+    OUTBOX_DELAYED_TOTAL.labels(queue=queue).set(delayed)
+    OUTBOX_PROCESSING_TOTAL.labels(queue=queue).set(processing)
+    OUTBOX_FAILED_TOTAL.labels(queue=queue).set(failed)
+    OUTBOX_OLDEST_AGE_SECONDS.labels(queue=queue).set(oldest_age_seconds)
+
+
+def record_ledger_discrepancy(count: int = 1) -> None:
+    """Record an unbalanced financial ledger discrepancy."""
+    LEDGER_UNBALANCED_TRANSACTIONS_TOTAL.inc(count)

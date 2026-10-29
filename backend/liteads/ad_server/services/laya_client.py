@@ -5,11 +5,17 @@ Communicates with the Laya sidecar to retrieve optimization decisions.
 """
 
 import math
+import time
 from typing import Any, Literal
 from dataclasses import dataclass
 
 import httpx
 
+from liteads.ad_server.middleware.metrics import (
+    record_laya_duration,
+    record_laya_error,
+    record_laya_request,
+)
 from liteads.common.config import get_settings
 from liteads.common.logger import get_logger
 from liteads.common.exceptions import LiteAdsError
@@ -48,12 +54,18 @@ class LayaDecisionResult:
 
 
 class LayaDecisionClient:
-    """Client for the Laya /v1/systemone API."""
+    """Client for the Laya /v1/systemone API with bounded timeouts and observability."""
 
-    def __init__(self, client: httpx.AsyncClient | None = None):
+    def __init__(
+        self,
+        client: httpx.AsyncClient | None = None,
+        timeout: float | None = None,
+    ):
         self.settings = get_settings()
         self.base_url = self.settings.laya.base_url.rstrip("/")
-        self.timeout = self.settings.laya.timeout_ms / 1000.0
+        default_timeout = self.settings.laya.timeout_ms / 1000.0
+        # Enforce bounded timeout (between 0.1s and 60.0s)
+        self.timeout = max(0.1, min(float(timeout if timeout is not None else default_timeout), 60.0))
         self._client = client
 
     async def decide(self, state: str) -> LayaDecisionResult:
@@ -67,8 +79,8 @@ class LayaDecisionClient:
             LayaDecisionResult containing the choice and confidence.
             
         Raises:
-            LayaUnavailableError: If the Laya service is unreachable.
-            LayaMalformedResponseError: If the response is invalid.
+            LayaUnavailableError: If the Laya service is unreachable or times out.
+            LayaMalformedResponseError: If the response is invalid JSON or violates schema.
         """
         payload = {
             "state": state,
@@ -89,6 +101,7 @@ class LayaDecisionClient:
         }
         
         url = f"{self.base_url}/v1/systemone"
+        start_time = time.perf_counter()
         
         try:
             client = self._client or httpx.AsyncClient(timeout=self.timeout)
@@ -98,20 +111,36 @@ class LayaDecisionClient:
                 if self._client is None:
                     await client.aclose()
         except httpx.TimeoutException as e:
-            logger.error("Laya request timed out", error=str(e), url=url)
+            duration = time.perf_counter() - start_time
+            record_laya_duration("decision", duration)
+            record_laya_request("decision", "timeout")
+            record_laya_error("decision", "timeout")
+            logger.error("Laya decision request timed out", error=str(e), url=url, timeout=self.timeout)
             raise LayaUnavailableError("Laya request timed out") from e
         except httpx.RequestError as e:
-            logger.error("Laya request failed", error=str(e), url=url)
+            duration = time.perf_counter() - start_time
+            record_laya_duration("decision", duration)
+            record_laya_request("decision", "network_error")
+            record_laya_error("decision", "network_error")
+            logger.error("Laya decision request failed", error=str(e), url=url)
             raise LayaUnavailableError(f"Laya request failed: {e}") from e
 
+        duration = time.perf_counter() - start_time
+        record_laya_duration("decision", duration)
+
         if response.status_code != 200:
-            logger.error("Laya returned non-200 status", status_code=response.status_code, text=response.text)
+            error_cat = f"http_{response.status_code}"
+            record_laya_request("decision", error_cat)
+            record_laya_error("decision", error_cat)
+            logger.error("Laya decision returned non-200 status", status_code=response.status_code)
             raise LayaUnavailableError(f"Laya returned status {response.status_code}")
 
         try:
             data = response.json()
         except ValueError as e:
-            logger.error("Laya response is not valid JSON", text=response.text)
+            record_laya_request("decision", "malformed_response")
+            record_laya_error("decision", "malformed_response")
+            logger.error("Laya decision response is not valid JSON")
             raise LayaMalformedResponseError("Invalid JSON from Laya") from e
 
         # Extract choice, confidence, and target_payload safely
@@ -150,11 +179,14 @@ class LayaDecisionClient:
                 target_payload = raw_target
                 
         except (ValueError, TypeError, AttributeError) as e:
-            logger.error("Laya response malformed", error=str(e), data=data)
+            record_laya_request("decision", "malformed_response")
+            record_laya_error("decision", "malformed_response")
+            logger.error("Laya decision response malformed", error=str(e))
             raise LayaMalformedResponseError(f"Malformed Laya response: {e}") from e
 
+        record_laya_request("decision", "success")
         return LayaDecisionResult(
-            choice=choice, # type: ignore
+            choice=choice,  # type: ignore
             confidence=confidence,
             raw_response=data,
             target_payload=target_payload,

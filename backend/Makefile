@@ -45,6 +45,9 @@ test:
 test-fast:
 	pytest tests/ -v -x --tb=short
 
+quality-gate:
+	python ../scripts/run_quality_gate.py
+
 lint:
 	ruff check liteads tests
 	mypy liteads --ignore-missing-imports
@@ -59,6 +62,9 @@ format:
 
 docker-up:
 	docker compose up -d
+
+docker-up-local:
+	docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 
 docker-up-full:
 	docker compose --profile monitoring --profile production up -d

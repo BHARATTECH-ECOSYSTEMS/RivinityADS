@@ -31,6 +31,7 @@ import PlacementHealth from "./pages/publisher/PlacementHealth";
 import Notifications from "./pages/Notifications";
 import { WebsiteList } from "./pages/website/WebsiteList";
 import { WebsiteEditor } from "./pages/website/WebsiteEditor";
+import EmailMarketing from "./pages/email_marketing/EmailMarketing";
 
 
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -63,6 +64,7 @@ export default function App() {
                 <Route path="websites" element={<WebsiteList />} />
                 <Route path="websites/:id" element={<WebsiteEditor />} />
                 <Route path="finance" element={<FinanceReconciliation />} />
+                <Route path="email-marketing" element={<EmailMarketing workspace="platform" />} />
               </Route>
               <Route path="/advertiser" element={<RequireRole roles={["advertiser"]} />}>
                 <Route index element={<AdvertiserDashboard />} />
@@ -70,6 +72,7 @@ export default function App() {
                 <Route path="campaign-builder" element={<CampaignBuilder />} />
                 <Route path="campaigns/new" element={<NewCampaign />} />
                 <Route path="campaigns/:id" element={<CampaignDetail />} />
+                <Route path="email-marketing" element={<EmailMarketing workspace="advertiser" />} />
               </Route>
               <Route path="/publisher" element={<RequireRole roles={["publisher"]} />}>
                 <Route index element={<PublisherDashboard />} />

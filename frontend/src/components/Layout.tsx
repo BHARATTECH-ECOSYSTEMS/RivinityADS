@@ -13,12 +13,14 @@ const NAV: Record<Role, { to: string; label: string }[]> = {
     { to: "/admin/creatives", label: "Creative moderation" },
     { to: "/admin/publishers", label: "Publishers" },
     { to: "/admin/websites", label: "Websites" },
+    { to: "/admin/email-marketing", label: "Platform Marketing" },
     { to: "/admin/finance", label: "Financial reconciliation" },
   ],
   advertiser: [
     { to: "/advertiser", label: "Dashboard" },
     { to: "/advertiser/domains", label: "Domains" },
     { to: "/advertiser/campaigns/new", label: "New Campaign" },
+    { to: "/advertiser/email-marketing", label: "Email Marketing" },
   ],
   publisher: [
     { to: "/publisher", label: "Dashboard" },

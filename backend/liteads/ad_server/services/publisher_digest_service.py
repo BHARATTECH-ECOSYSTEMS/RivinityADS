@@ -447,6 +447,12 @@ h2 {{ font-size: 15px; text-transform: uppercase; letter-spacing: 0.05em; color:
                 subject=subject,
                 text_content=text_content,
                 html_content=html_content,
+                template_purpose="digest",
+                template_data={
+                    "publisher_id": publisher_id,
+                    "as_of_date": end_d.isoformat(),
+                    "placements_count": len(analyses),
+                },
             )
             logger.info(
                 "Publisher placement digest delivered successfully",

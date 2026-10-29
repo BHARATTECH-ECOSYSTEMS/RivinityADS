@@ -7,14 +7,15 @@ services:
     ports:
       - "${LITEADS_PORT_BINDING:-127.0.0.1:8000}:8000"
     environment:
-      - LITEADS_ENV=dev
-      - LITEADS_DATABASE__HOST=postgres
-      - LITEADS_DATABASE__PORT=5432
-      - LITEADS_DATABASE__NAME=liteads
-      - LITEADS_DATABASE__USER=liteads
-      - LITEADS_DATABASE__PASSWORD=liteads_password
-      - LITEADS_REDIS__HOST=redis
-      - LITEADS_REDIS__PORT=6379
+      - LITEADS_ENV=${LITEADS_ENV:-dev}
+      - LITEADS_DATABASE__HOST=${LITEADS_DATABASE__HOST:-postgres}
+      - LITEADS_DATABASE__PORT=${LITEADS_DATABASE__PORT:-5432}
+      - LITEADS_DATABASE__NAME=${LITEADS_DATABASE__NAME:-liteads}
+      - LITEADS_DATABASE__USER=${LITEADS_DATABASE__USER:-liteads}
+      - LITEADS_DATABASE__PASSWORD=${LITEADS_DATABASE__PASSWORD:?LITEADS_DATABASE__PASSWORD must be set}
+      - LITEADS_REDIS__HOST=${LITEADS_REDIS__HOST:-redis}
+      - LITEADS_REDIS__PORT=${LITEADS_REDIS__PORT:-6379}
+      - LITEADS_REDIS__PASSWORD=${LITEADS_REDIS__PASSWORD:-}
       - LITEADS_AUTH__JWT_SECRET=${LITEADS_AUTH__JWT_SECRET}
       - LITEADS_TRACKING__SECRET=${LITEADS_TRACKING__SECRET}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -57,6 +58,7 @@ services:
     networks:
       - liteads-network
 
+
   # Webhook Outbox Worker (dedicated worker process)
   webhook-worker:
     build:
@@ -64,14 +66,15 @@ services:
       dockerfile: deployment/docker/Dockerfile
     command: ["python", "-m", "liteads.ad_server.services.webhook_worker"]
     environment:
-      - LITEADS_ENV=dev
-      - LITEADS_DATABASE__HOST=postgres
-      - LITEADS_DATABASE__PORT=5432
-      - LITEADS_DATABASE__NAME=liteads
-      - LITEADS_DATABASE__USER=liteads
-      - LITEADS_DATABASE__PASSWORD=liteads_password
-      - LITEADS_REDIS__HOST=redis
-      - LITEADS_REDIS__PORT=6379
+      - LITEADS_ENV=${LITEADS_ENV:-dev}
+      - LITEADS_DATABASE__HOST=${LITEADS_DATABASE__HOST:-postgres}
+      - LITEADS_DATABASE__PORT=${LITEADS_DATABASE__PORT:-5432}
+      - LITEADS_DATABASE__NAME=${LITEADS_DATABASE__NAME:-liteads}
+      - LITEADS_DATABASE__USER=${LITEADS_DATABASE__USER:-liteads}
+      - LITEADS_DATABASE__PASSWORD=${LITEADS_DATABASE__PASSWORD:?LITEADS_DATABASE__PASSWORD must be set}
+      - LITEADS_REDIS__HOST=${LITEADS_REDIS__HOST:-redis}
+      - LITEADS_REDIS__PORT=${LITEADS_REDIS__PORT:-6379}
+      - LITEADS_REDIS__PASSWORD=${LITEADS_REDIS__PASSWORD:-}
       - LITEADS_AUTH__JWT_SECRET=${LITEADS_AUTH__JWT_SECRET}
       - LITEADS_TRACKING__SECRET=${LITEADS_TRACKING__SECRET}
     depends_on:
@@ -85,6 +88,7 @@ services:
     profiles:
       - worker
 
+
   # Campaign Optimization Worker (dedicated worker process)
   optimization-worker:
     build:
@@ -92,14 +96,15 @@ services:
       dockerfile: deployment/docker/Dockerfile
     command: ["python", "-m", "liteads.ad_server.services.optimization_worker"]
     environment:
-      - LITEADS_ENV=dev
-      - LITEADS_DATABASE__HOST=postgres
-      - LITEADS_DATABASE__PORT=5432
-      - LITEADS_DATABASE__NAME=liteads
-      - LITEADS_DATABASE__USER=liteads
-      - LITEADS_DATABASE__PASSWORD=liteads_password
-      - LITEADS_REDIS__HOST=redis
-      - LITEADS_REDIS__PORT=6379
+      - LITEADS_ENV=${LITEADS_ENV:-dev}
+      - LITEADS_DATABASE__HOST=${LITEADS_DATABASE__HOST:-postgres}
+      - LITEADS_DATABASE__PORT=${LITEADS_DATABASE__PORT:-5432}
+      - LITEADS_DATABASE__NAME=${LITEADS_DATABASE__NAME:-liteads}
+      - LITEADS_DATABASE__USER=${LITEADS_DATABASE__USER:-liteads}
+      - LITEADS_DATABASE__PASSWORD=${LITEADS_DATABASE__PASSWORD:?LITEADS_DATABASE__PASSWORD must be set}
+      - LITEADS_REDIS__HOST=${LITEADS_REDIS__HOST:-redis}
+      - LITEADS_REDIS__PORT=${LITEADS_REDIS__PORT:-6379}
+      - LITEADS_REDIS__PASSWORD=${LITEADS_REDIS__PASSWORD:-}
       - LITEADS_AUTH__JWT_SECRET=${LITEADS_AUTH__JWT_SECRET}
       - LITEADS_TRACKING__SECRET=${LITEADS_TRACKING__SECRET}
       - LAYA_BASE_URL=http://laya:8000
@@ -117,6 +122,7 @@ services:
     profiles:
       - worker
 
+
   # Notification Delivery Worker (dedicated worker process)
   notification-worker:
     build:
@@ -124,14 +130,15 @@ services:
       dockerfile: deployment/docker/Dockerfile
     command: ["python", "-m", "liteads.ad_server.services.notification_worker"]
     environment:
-      - LITEADS_ENV=dev
-      - LITEADS_DATABASE__HOST=postgres
-      - LITEADS_DATABASE__PORT=5432
-      - LITEADS_DATABASE__NAME=liteads
-      - LITEADS_DATABASE__USER=liteads
-      - LITEADS_DATABASE__PASSWORD=liteads_password
-      - LITEADS_REDIS__HOST=redis
-      - LITEADS_REDIS__PORT=6379
+      - LITEADS_ENV=${LITEADS_ENV:-dev}
+      - LITEADS_DATABASE__HOST=${LITEADS_DATABASE__HOST:-postgres}
+      - LITEADS_DATABASE__PORT=${LITEADS_DATABASE__PORT:-5432}
+      - LITEADS_DATABASE__NAME=${LITEADS_DATABASE__NAME:-liteads}
+      - LITEADS_DATABASE__USER=${LITEADS_DATABASE__USER:-liteads}
+      - LITEADS_DATABASE__PASSWORD=${LITEADS_DATABASE__PASSWORD:?LITEADS_DATABASE__PASSWORD must be set}
+      - LITEADS_REDIS__HOST=${LITEADS_REDIS__HOST:-redis}
+      - LITEADS_REDIS__PORT=${LITEADS_REDIS__PORT:-6379}
+      - LITEADS_REDIS__PASSWORD=${LITEADS_REDIS__PASSWORD:-}
       - LITEADS_AUTH__JWT_SECRET=${LITEADS_AUTH__JWT_SECRET}
       - LITEADS_TRACKING__SECRET=${LITEADS_TRACKING__SECRET}
       - LITEADS_EMAIL__HOST=mailpit
@@ -150,20 +157,21 @@ services:
     profiles:
       - worker
 
+
   # PostgreSQL Database
   postgres:
     image: postgres:15-alpine
     environment:
-      POSTGRES_USER: liteads
-      POSTGRES_PASSWORD: liteads_password
-      POSTGRES_DB: liteads
+      POSTGRES_USER: ${LITEADS_DATABASE__USER:-${POSTGRES_USER:-liteads}}
+      POSTGRES_PASSWORD: ${LITEADS_DATABASE__PASSWORD:?LITEADS_DATABASE__PASSWORD or POSTGRES_PASSWORD must be set and non-empty}
+      POSTGRES_DB: ${LITEADS_DATABASE__NAME:-${POSTGRES_DB:-liteads}}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT_BINDING:-127.0.0.1:5432}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U liteads -d liteads"]
+      test: ["CMD-SHELL", "pg_isready -U ${LITEADS_DATABASE__USER:-liteads} -d ${LITEADS_DATABASE__NAME:-liteads}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -171,22 +179,33 @@ services:
     networks:
       - liteads-network
 
+
   # Redis Cache
   redis:
     image: redis:7-alpine
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    command: >
+      sh -c '
+        if [ -n "$$LITEADS_REDIS__PASSWORD" ]; then
+          exec redis-server --requirepass "$$LITEADS_REDIS__PASSWORD" --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+        else
+          exec redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+        fi
+      '
+    environment:
+      - LITEADS_REDIS__PASSWORD=${LITEADS_REDIS__PASSWORD:-}
     volumes:
       - redis_data:/data
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT_BINDING:-127.0.0.1:6379}:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "if [ -n \"$LITEADS_REDIS__PASSWORD\" ]; then redis-cli -a \"$LITEADS_REDIS__PASSWORD\" ping; else redis-cli ping; fi"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
     networks:
       - liteads-network
+
 
   # Mailpit for local email capture
   mailpit:
@@ -197,6 +216,7 @@ services:
     restart: unless-stopped
     networks:
       - liteads-network
+
 
   # Nginx Load Balancer (optional, for production)
   nginx:
@@ -213,11 +233,13 @@ services:
     profiles:
       - production
 
+
   # Prometheus Monitoring (optional)
   prometheus:
     image: prom/prometheus:latest
     volumes:
       - ./deployment/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deployment/prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
       - prometheus_data:/prometheus
     ports:
       - "9090:9090"
@@ -227,6 +249,7 @@ services:
     restart: unless-stopped
     networks:
       - liteads-network
+
 
   # Laya optimization sidecar
   laya:
@@ -243,6 +266,7 @@ services:
     networks:
       - liteads-network
     restart: unless-stopped
+
 
   # Grafana Dashboard (optional)
   grafana:
@@ -267,12 +291,85 @@ services:
     profiles:
       - monitoring
 
+
+  # ---------------------------------------------------------------------------
+  # Optional Profile: email-marketing (Phase 6.1A)
+  # ---------------------------------------------------------------------------
+
+
+  # Listmonk Dedicated PostgreSQL Database
+  listmonk-db:
+    image: postgres:15-alpine
+    container_name: liteads-listmonk-db
+    environment:
+      POSTGRES_USER: ${LISTMONK_DB__USER:-listmonk}
+      POSTGRES_PASSWORD: ${LISTMONK_DB__PASSWORD:-}
+      POSTGRES_DB: ${LISTMONK_DB__NAME:-listmonk}
+    volumes:
+      - listmonk_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${LISTMONK_DB__USER:-listmonk} -d ${LISTMONK_DB__NAME:-listmonk}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - listmonk-internal
+    profiles:
+      - email-marketing
+
+
+  # Listmonk Application Service
+  listmonk:
+    image: listmonk/listmonk:v4.1.0
+    container_name: liteads-listmonk
+    command: ["sh", "-c", "yes | ./listmonk --install --idempotent --yes --config '' && ./listmonk --upgrade --yes --config '' && ./listmonk --config ''"]
+    environment:
+      - LISTMONK_app__address=0.0.0.0:9000
+      - LISTMONK_db__host=listmonk-db
+      - LISTMONK_db__port=5432
+      - LISTMONK_db__user=${LISTMONK_DB__USER:-listmonk}
+      - LISTMONK_db__password=${LISTMONK_DB__PASSWORD:-}
+      - LISTMONK_db__database=${LISTMONK_DB__NAME:-listmonk}
+      - LISTMONK_db__ssl_mode=disable
+      - LISTMONK_ADMIN_USER=${LISTMONK_ADMIN__USERNAME:-admin}
+      - LISTMONK_ADMIN_PASSWORD=${LISTMONK_ADMIN__PASSWORD:-}
+      - LISTMONK_smtp__0__host=${LISTMONK_SMTP__HOST:-mailpit}
+      - LISTMONK_smtp__0__port=${LISTMONK_SMTP__PORT:-1025}
+      - LISTMONK_smtp__0__auth_protocol=none
+      - LISTMONK_smtp__0__tls_type=none
+    volumes:
+      - listmonk_data:/listmonk/data
+    ports:
+      - "${LISTMONK_PORT_BINDING:-127.0.0.1:9000}:9000"
+    depends_on:
+      listmonk-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:9000/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - liteads-network
+      - listmonk-internal
+    profiles:
+      - email-marketing
+
+
 volumes:
   postgres_data:
   redis_data:
   prometheus_data:
   grafana_data:
+  listmonk_db_data:
+  listmonk_data:
+
 
 networks:
   liteads-network:
     driver: bridge
+  listmonk-internal:
+    driver: bridge
+    internal: true

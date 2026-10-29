@@ -1,0 +1,104 @@
+# Prometheus Alert Rules for RivinityADS (Phase 12C)
+# Operational monitoring and alert definitions for Ad Server, dependencies, and outbox.
+#
+# Rules conform to standard Prometheus v2 alert rule schema.
+# All expressions reference real metrics emitted by liteads or standard probes.
+
+groups:
+  - name: rivinity_ads_operational_alerts
+    rules:
+      # Alert 1: High HTTP 5xx Error Rate
+      - alert: AdServerElevated5xxRate
+        expr: (sum(rate(liteads_http_requests_total{status=~"5.."}[5m])) / sum(rate(liteads_http_requests_total[5m]))) * 100 > 2.0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ad Server 5xx error rate is above 2% (current: {{ $value }}%)"
+          description: "Elevated HTTP 5xx responses observed across API endpoints over the last 5 minutes."
+          runbook_url: "backend/docs/PHASE_12B_OPERATIONAL_READINESS_REPORT.md#runbook-1"
+          threshold_status: "provisional_baseline"
+
+      # Alert 2: Database Connection Failure
+      - alert: DatabaseDependencyUnreachable
+        expr: liteads_db_query_latency_seconds_count == 0 or probe_success{instance="ad-server:8000/health/ready"} == 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "PostgreSQL database connection is unreachable by the Ad Server"
+          description: "Ad Server readiness probe indicates PostgreSQL database dependency is down or unreachable."
+          runbook_url: "backend/docs/PHASE_12B_OPERATIONAL_READINESS_REPORT.md#runbook-2"
+          threshold_status: "deterministic_invariant"
+
+      # Alert 3: Redis Connection Failure
+      - alert: RedisDependencyUnreachable
+        expr: probe_success{instance="redis:6379"} == 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Redis cache/rate-limiting instance is unreachable"
+          description: "Blackbox health check failed to ping Redis instance on port 6379."
+          runbook_url: "backend/docs/PHASE_12B_OPERATIONAL_READINESS_REPORT.md#runbook-2"
+          threshold_status: "deterministic_invariant"
+
+      # Alert 4: Outbox Backlog Age Exceeded
+      - alert: OutboxProcessingBacklogHigh
+        expr: liteads_outbox_oldest_age_seconds > 600
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox queue {{ $labels.queue }} oldest pending item age is {{ $value }}s (>10m)"
+          description: "Durable webhook or notification outbox queue is falling behind; events are not being processed within 10 minutes."
+          runbook_url: "backend/docs/PHASE_12B_OPERATIONAL_READINESS_REPORT.md#runbook-3"
+          threshold_status: "operational_slo"
+
+      # Alert 5: Outbox Dead-Letter Failure Spike
+      - alert: OutboxDeadLetterSpike
+        expr: increase(liteads_outbox_failed_count[15m]) > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Over 50 outbox jobs permanently dead-lettered in queue {{ $labels.queue }} over 15m"
+          description: "Spike in permanent delivery failures due to destination 4xx rejections, SSRF blocks, or retry exhaustion."
+          runbook_url: "backend/docs/PHASE_12B_OPERATIONAL_READINESS_REPORT.md#runbook-3"
+          threshold_status: "provisional_baseline"
+
+      # Alert 6: Laya Sidecar High Timeout Rate
+      - alert: LayaSidecarElevatedTimeouts
+        expr: (sum(rate(liteads_laya_errors_total{error_category="timeout"}[10m])) / sum(rate(liteads_laya_requests_total[10m]))) * 100 > 5.0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Laya sidecar timeout rate is above 5% over 10 minutes"
+          description: "Laya AI decision sidecar is failing to respond within bounded timeout threshold during campaign optimization cycles."
+          runbook_url: "backend/docs/PHASE_12B_OPERATIONAL_READINESS_REPORT.md#runbook-4"
+          threshold_status: "provisional_baseline"
+
+      # Alert 7: Conversion Postback Validation Failure Spike
+      - alert: ConversionSignatureFailureSpike
+        expr: increase(liteads_http_requests_total{endpoint=~".*conversion.*", status="403"}[5m]) > 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Spike in rejected conversion postbacks due to invalid attribution signatures"
+          description: "More than 20 conversion postback requests rejected with HTTP 403 Forbidden in a 5-minute window."
+          runbook_url: "backend/docs/PHASE_12B_OPERATIONAL_READINESS_REPORT.md#runbook-5"
+          threshold_status: "provisional_anomaly"
+
+      # Alert 8: Ledger Double-Entry Drift
+      - alert: FinancialLedgerDiscrepancy
+        expr: liteads_ledger_unbalanced_transactions_total > 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Unbalanced financial ledger entry detected! Debit and credit sums must match."
+          description: "Critical double-entry bookkeeping violation detected by ledger audit reconciliation."
+          runbook_url: "backend/docs/PHASE_12B_OPERATIONAL_READINESS_REPORT.md#runbook-6"
+          threshold_status: "zero_tolerance_invariant"

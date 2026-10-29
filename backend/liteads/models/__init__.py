@@ -30,6 +30,17 @@ from liteads.models.notification import (
     NotificationCategory,
     NotificationType,
 )
+from liteads.models.consent import (
+    MarketingConsent,
+    ConsentCategory,
+    ConsentStatus,
+    ConsentSource,
+)
+from liteads.models.email_marketing import (
+    EmailMarketingList,
+    EmailMarketingContact,
+    EmailMarketingCampaign,
+)
 from liteads.models.website import (
     WebsiteProject,
     WebsitePage,
@@ -107,4 +118,11 @@ __all__ = [
     "NotificationSeverity",
     "NotificationCategory",
     "NotificationType",
+    "MarketingConsent",
+    "ConsentCategory",
+    "ConsentStatus",
+    "ConsentSource",
+    "EmailMarketingList",
+    "EmailMarketingContact",
+    "EmailMarketingCampaign",
 ]

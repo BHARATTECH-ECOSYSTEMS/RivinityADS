@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -238,6 +238,57 @@ class EmailSettings(BaseSettings):
     mock_delivery: bool = False  # Set to True in test environments
 
 
+class ListmonkSettings(BaseSettings):
+    """Listmonk API and transactional email delivery configuration (Phase 6.1B)."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="LISTMONK_",
+        extra="ignore",
+    )
+
+    enabled: bool = False
+    url: str = "http://localhost:9000"
+    user: str = "admin"
+    token: str = ""
+    request_timeout: float = 10.0
+    connect_timeout: float = 3.0
+
+    # Pinned transactional template IDs mapped via environment variables
+    template_verification_id: int | None = None
+    template_password_reset_id: int | None = None
+    template_security_notice_id: int | None = None
+    template_digest_id: int | None = None
+    template_generic_id: int | None = None
+
+    # Phase 6.1C: Marketing list mappings & consent settings
+    list_newsletter_id: int | None = None
+    list_advertiser_education_id: int | None = None
+    list_publisher_education_id: int | None = None
+    marketing_policy_version: str = "2026.1"
+
+    # Phase 6.1D: Email marketing guards and limits
+    allow_publisher_access: bool = False
+    max_csv_import_rows: int = 1000
+
+    def __repr__(self) -> str:
+        """Ensure API token is strictly redacted in string representations and logs."""
+        return (
+            f"ListmonkSettings(enabled={self.enabled}, url={self.url!r}, user={self.user!r}, "
+            f"token='[REDACTED]', request_timeout={self.request_timeout}, connect_timeout={self.connect_timeout})"
+        )
+
+    def validate_if_enabled(self) -> None:
+        """Fail closed when Listmonk is enabled but required configuration is missing."""
+        if not self.enabled:
+            return
+        if not self.url or not (self.url.startswith("http://") or self.url.startswith("https://")):
+            raise ValueError("LISTMONK_URL must be a valid http/https URL when LISTMONK_ENABLED is true")
+        if not self.user:
+            raise ValueError("LISTMONK_USER must be non-empty when LISTMONK_ENABLED is true")
+        if not self.token:
+            raise ValueError("LISTMONK_TOKEN must be non-empty when LISTMONK_ENABLED is true")
+
+
 class PaymentSettings(BaseSettings):
     """Payment integration configuration."""
 
@@ -315,7 +366,7 @@ class Settings(BaseSettings):
     app_name: str = "LiteAds"
     app_version: str = "0.1.0"
     debug: bool = False
-    env: Literal["dev", "prod", "test"] = "dev"
+    env: Literal["dev", "prod", "test", "staging"] = "dev"
     enable_webhook_worker: bool = Field(
         default=True,
         description="Whether to run the durable webhook outbox worker in-process within the API server. "
@@ -343,6 +394,7 @@ class Settings(BaseSettings):
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
     email: EmailSettings = Field(default_factory=EmailSettings)
+    listmonk: ListmonkSettings = Field(default_factory=ListmonkSettings)
     tracking: TrackingSettings = Field(default_factory=TrackingSettings)
     geo: GeoSettings = Field(default_factory=GeoSettings)
     laya: LayaSettings = Field(default_factory=LayaSettings)
@@ -357,9 +409,40 @@ class Settings(BaseSettings):
     @field_validator("env")
     @classmethod
     def validate_env(cls, v: str) -> str:
-        if v not in ("dev", "prod", "test"):
+        if v not in ("dev", "prod", "test", "staging"):
             raise ValueError(f"Invalid environment: {v}")
         return v
+
+    @model_validator(mode="after")
+    def validate_staging_prod_credentials(self) -> "Settings":
+        if self.env in ("staging", "prod"):
+            # 1. Database password must not be empty or known dev default
+            db_pwd = self.database.password
+            if not db_pwd:
+                raise ValueError(
+                    "LITEADS_DATABASE__PASSWORD must be set and non-empty in staging/prod environment"
+                )
+            if db_pwd.lower() in ("liteads_password", "postgres", "password", "admin", "root"):
+                raise ValueError(
+                    "Insecure default database password detected. "
+                    "LITEADS_DATABASE__PASSWORD must not use known default values in staging/prod environment"
+                )
+
+            # 2. JWT & Tracking secrets cannot use example placeholder values
+            jwt = self.auth.jwt_secret
+            if jwt in ("your_jwt_secret_min_32_characters_here", "your_jwt_secret_here"):
+                raise ValueError(
+                    "LITEADS_AUTH__JWT_SECRET cannot use example placeholder string in staging/prod environment"
+                )
+
+            trk = self.tracking.secret
+            if trk in ("your_tracking_secret_min_32_characters_here", "your_tracking_secret_here"):
+                raise ValueError(
+                    "LITEADS_TRACKING__SECRET cannot use example placeholder string in staging/prod environment"
+                )
+        if self.listmonk.enabled:
+            self.listmonk.validate_if_enabled()
+        return self
 
 
 def load_yaml_config(config_path: Path) -> dict:
@@ -405,6 +488,8 @@ def get_settings() -> Settings:
 
     # Load environment-specific config
     env_config = load_yaml_config(config_dir / f"{env}.yaml")
+    if not env_config and env == "staging":
+        env_config = load_yaml_config(config_dir / "prod.yaml")
 
     # Merge configurations
     merged = merge_configs(base_config, env_config)
@@ -439,6 +524,8 @@ def get_settings() -> Settings:
         flat_config["auth"] = AuthSettings(**merged["auth"])
     if "email" in merged:
         flat_config["email"] = EmailSettings(**merged["email"])
+    if "listmonk" in merged:
+        flat_config["listmonk"] = ListmonkSettings(**merged["listmonk"])
     if "tracking" in merged:
         flat_config["tracking"] = TrackingSettings(**merged["tracking"])
     if "laya" in merged:
@@ -472,6 +559,8 @@ def get_settings() -> Settings:
     server = flat_config.get("server", ServerSettings())
     flat_config["server"] = server.model_copy(
         update={
+            "host": os.getenv("LITEADS_SERVER__HOST", server.host),
+            "port": int(os.getenv("LITEADS_SERVER__PORT", server.port)),
             "frontend_url": os.getenv("LITEADS_SERVER__FRONTEND_URL", server.frontend_url),
         }
     )
@@ -497,6 +586,50 @@ def get_settings() -> Settings:
             "mock_delivery": os.getenv("LITEADS_EMAIL__MOCK_DELIVERY", str(email.mock_delivery)).lower() in ("true", "1", "yes"),
         }
     )
+
+    listmonk = flat_config.get("listmonk", ListmonkSettings())
+    listmonk_updates = {}
+    lm_enabled = os.getenv("LISTMONK_ENABLED")
+    if lm_enabled is not None:
+        listmonk_updates["enabled"] = lm_enabled.lower() in ("true", "1", "yes", "on")
+    if os.getenv("LISTMONK_URL"):
+        listmonk_updates["url"] = os.getenv("LISTMONK_URL")
+    if os.getenv("LISTMONK_USER"):
+        listmonk_updates["user"] = os.getenv("LISTMONK_USER")
+    if os.getenv("LISTMONK_TOKEN"):
+        listmonk_updates["token"] = os.getenv("LISTMONK_TOKEN")
+    if os.getenv("LISTMONK_REQUEST_TIMEOUT"):
+        try:
+            listmonk_updates["request_timeout"] = float(os.getenv("LISTMONK_REQUEST_TIMEOUT"))
+        except ValueError:
+            pass
+    if os.getenv("LISTMONK_CONNECT_TIMEOUT"):
+        try:
+            listmonk_updates["connect_timeout"] = float(os.getenv("LISTMONK_CONNECT_TIMEOUT"))
+        except ValueError:
+            pass
+    for tmpl_field, env_var in [
+        ("template_verification_id", "LISTMONK_TEMPLATE_VERIFICATION_ID"),
+        ("template_password_reset_id", "LISTMONK_TEMPLATE_PASSWORD_RESET_ID"),
+        ("template_security_notice_id", "LISTMONK_TEMPLATE_SECURITY_NOTICE_ID"),
+        ("template_digest_id", "LISTMONK_TEMPLATE_DIGEST_ID"),
+        ("template_generic_id", "LISTMONK_TEMPLATE_GENERIC_ID"),
+        ("list_newsletter_id", "LISTMONK_LIST_NEWSLETTER_ID"),
+        ("list_advertiser_education_id", "LISTMONK_LIST_ADVERTISER_EDUCATION_ID"),
+        ("list_publisher_education_id", "LISTMONK_LIST_PUBLISHER_EDUCATION_ID"),
+    ]:
+        val = os.getenv(env_var)
+        if val is not None and val.strip().isdigit():
+            listmonk_updates[tmpl_field] = int(val.strip())
+
+    if os.getenv("MARKETING_POLICY_VERSION"):
+        listmonk_updates["marketing_policy_version"] = os.getenv("MARKETING_POLICY_VERSION")
+    if os.getenv("LISTMONK_ALLOW_PUBLISHER_ACCESS") is not None:
+        listmonk_updates["allow_publisher_access"] = os.getenv("LISTMONK_ALLOW_PUBLISHER_ACCESS", "").lower() in ("true", "1", "yes", "on")
+    if os.getenv("LISTMONK_MAX_CSV_IMPORT_ROWS") and os.getenv("LISTMONK_MAX_CSV_IMPORT_ROWS").strip().isdigit():
+        listmonk_updates["max_csv_import_rows"] = int(os.getenv("LISTMONK_MAX_CSV_IMPORT_ROWS").strip())
+
+    flat_config["listmonk"] = listmonk.model_copy(update=listmonk_updates)
 
     openai = flat_config.get("openai", OpenAISettings())
     flat_config["openai"] = openai.model_copy(

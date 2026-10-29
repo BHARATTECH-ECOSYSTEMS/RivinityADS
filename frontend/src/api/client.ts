@@ -41,9 +41,31 @@ import type {
   VersionSummary,
   PreviewTokenResponse,
   SlugCheckResponse,
+  EmailMarketingList,
+  CreateMailingListInput,
+  EmailMarketingContact,
+  CreateContactInput,
+  ImportContactsInput,
+  ImportContactsResult,
+  EmailMarketingCampaign,
+  CreateCampaignInput,
+  UpdateCampaignInput,
+  CampaignPreview,
+  CampaignAnalytics,
 } from "../types";
 
 export type {
+  EmailMarketingList,
+  CreateMailingListInput,
+  EmailMarketingContact,
+  CreateContactInput,
+  ImportContactsInput,
+  ImportContactsResult,
+  EmailMarketingCampaign,
+  CreateCampaignInput,
+  UpdateCampaignInput,
+  CampaignPreview,
+  CampaignAnalytics,
   UserContextPayload,
   MessageResponse,
   VerifyEmailResponse,
@@ -711,3 +733,93 @@ export const generateWebsitePreviewToken = (projectId: number): Promise<PreviewT
     method: "POST",
   });
 
+// ── Email Marketing (Phase 6.1E) ─────────────────────────────────────────────
+
+export const getMailingLists = (): Promise<EmailMarketingList[]> =>
+  apiFetch<EmailMarketingList[]>("/api/v1/email-marketing/lists");
+
+export const createMailingList = (input: CreateMailingListInput): Promise<EmailMarketingList> =>
+  apiFetch<EmailMarketingList>("/api/v1/email-marketing/lists", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+
+export const getMailingList = (listId: number): Promise<EmailMarketingList> =>
+  apiFetch<EmailMarketingList>(`/api/v1/email-marketing/lists/${listId}`);
+
+export const deleteMailingList = (listId: number): Promise<MessageResponse> =>
+  apiFetch<MessageResponse>(`/api/v1/email-marketing/lists/${listId}`, {
+    method: "DELETE",
+  });
+
+export const getListContacts = (
+  listId: number,
+  options?: { limit?: number; offset?: number; query?: string }
+): Promise<EmailMarketingContact[]> => {
+  const params = new URLSearchParams();
+  if (options?.limit !== undefined) params.set("limit", String(options.limit));
+  if (options?.offset !== undefined) params.set("offset", String(options.offset));
+  if (options?.query) params.set("query", options.query);
+  const qs = params.toString();
+  return apiFetch<EmailMarketingContact[]>(`/api/v1/email-marketing/lists/${listId}/contacts${qs ? `?${qs}` : ""}`);
+};
+
+export const addContact = (listId: number, input: CreateContactInput): Promise<EmailMarketingContact> =>
+  apiFetch<EmailMarketingContact>(`/api/v1/email-marketing/lists/${listId}/contacts`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+
+export const importContactsCsv = (listId: number, input: ImportContactsInput): Promise<ImportContactsResult> =>
+  apiFetch<ImportContactsResult>(`/api/v1/email-marketing/lists/${listId}/import`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+
+export const deleteContact = (listId: number, contactId: number): Promise<MessageResponse> =>
+  apiFetch<MessageResponse>(`/api/v1/email-marketing/lists/${listId}/contacts/${contactId}`, {
+    method: "DELETE",
+  });
+
+export const getMarketingCampaigns = (options?: { limit?: number; offset?: number }): Promise<EmailMarketingCampaign[]> => {
+  const params = new URLSearchParams();
+  if (options?.limit !== undefined) params.set("limit", String(options.limit));
+  if (options?.offset !== undefined) params.set("offset", String(options.offset));
+  const qs = params.toString();
+  return apiFetch<EmailMarketingCampaign[]>(`/api/v1/email-marketing/campaigns${qs ? `?${qs}` : ""}`);
+};
+
+export const createMarketingCampaign = (input: CreateCampaignInput): Promise<EmailMarketingCampaign> =>
+  apiFetch<EmailMarketingCampaign>("/api/v1/email-marketing/campaigns", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+
+export const getMarketingCampaign = (campaignId: number): Promise<EmailMarketingCampaign> =>
+  apiFetch<EmailMarketingCampaign>(`/api/v1/email-marketing/campaigns/${campaignId}`);
+
+export const updateMarketingCampaign = (campaignId: number, input: UpdateCampaignInput): Promise<EmailMarketingCampaign> =>
+  apiFetch<EmailMarketingCampaign>(`/api/v1/email-marketing/campaigns/${campaignId}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+
+export const previewMarketingCampaign = (campaignId: number): Promise<CampaignPreview> =>
+  apiFetch<CampaignPreview>(`/api/v1/email-marketing/campaigns/${campaignId}/preview`, {
+    method: "POST",
+  });
+
+export const testSendMarketingCampaign = (campaignId: number, testEmails: string[]): Promise<MessageResponse> =>
+  apiFetch<MessageResponse>(`/api/v1/email-marketing/campaigns/${campaignId}/test-send`, {
+    method: "POST",
+    body: JSON.stringify({ test_emails: testEmails }),
+  });
+
+export const launchMarketingCampaign = (campaignId: number, confirmed: boolean): Promise<EmailMarketingCampaign> =>
+  apiFetch<EmailMarketingCampaign>(`/api/v1/email-marketing/campaigns/${campaignId}/launch`, {
+    method: "POST",
+    body: JSON.stringify({ confirmed }),
+  });
+
+export const getCampaignAnalytics = (campaignId: number): Promise<CampaignAnalytics> =>
+  apiFetch<CampaignAnalytics>(`/api/v1/email-marketing/campaigns/${campaignId}/analytics`);

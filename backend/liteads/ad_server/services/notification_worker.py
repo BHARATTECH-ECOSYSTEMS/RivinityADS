@@ -56,6 +56,8 @@ def is_permanent_email_error(error: Exception | str) -> bool:
     - Invalid recipient email syntax (RFC violation, no @)
     - SMTP permanent 5xx status codes (500-504, 550-554)
     - smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused with 5xx
+    - Listmonk authentication, configuration, or not-found errors
+    - Listmonk ambiguous read timeouts (delivery uncertain; blind retries stopped to prevent duplicates)
     """
     err_str = str(error).lower()
 
@@ -83,6 +85,23 @@ def is_permanent_email_error(error: Exception | str) -> bool:
     )
     if any(phrase in err_str for phrase in permanent_phrases):
         return True
+
+    # Listmonk provider error classification
+    from liteads.common.listmonk_client import (
+        ListmonkAmbiguousTimeoutError,
+        ListmonkAuthError,
+        ListmonkConfigError,
+        ListmonkNotFoundError,
+    )
+
+    err_obj = error if isinstance(error, Exception) else None
+    cause = getattr(err_obj, "__cause__", None)
+    for target in (err_obj, cause):
+        if target is not None and isinstance(
+            target,
+            (ListmonkAuthError, ListmonkConfigError, ListmonkNotFoundError, ListmonkAmbiguousTimeoutError),
+        ):
+            return True
 
     return False
 
@@ -222,19 +241,33 @@ class NotificationDeliveryWorker:
             return True
         except Exception as e:
             is_perm = is_permanent_email_error(e)
+            from liteads.common.listmonk_client import ListmonkAmbiguousTimeoutError
+            err_obj = e if isinstance(e, Exception) else None
+            cause = getattr(err_obj, "__cause__", None)
+            is_ambiguous = any(isinstance(t, ListmonkAmbiguousTimeoutError) for t in (err_obj, cause) if t is not None)
+
+            if is_ambiguous:
+                logger.warning(
+                    "Ambiguous timeout encountered; delivery uncertain - blind retries halted to prevent duplicate sends",
+                    extra={"delivery_id": job.id},
+                )
+                err_msg = f"[AMBIGUOUS_TIMEOUT] {str(e)}"
+            else:
+                err_msg = str(e)
+
             logger.error(
                 "Email delivery error in worker",
                 extra={
                     "delivery_id": job.id,
                     "is_permanent": is_perm,
                     "attempts": job.attempts,
-                    "error": sanitize_error(e),
+                    "error": sanitize_error(err_msg),
                 },
             )
             await self._persist_delivery_outcome(
                 delivery_id=job.id,
                 success=False,
-                error_msg=str(e),
+                error_msg=err_msg,
                 is_permanent_err=is_perm,
                 claim_token=claim_token,
                 session_factory=session_factory,

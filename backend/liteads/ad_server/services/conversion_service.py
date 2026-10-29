@@ -16,6 +16,7 @@ from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import select, and_, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from liteads.ad_server.services.billing import BillingService
@@ -346,8 +347,42 @@ class ConversionService:
             is_test=is_test,
         )
 
-        self.session.add(conversion_event)
-        await self.session.flush()
+        try:
+            self.session.add(conversion_event)
+            await self.session.flush()
+        except IntegrityError:
+            await self.session.rollback()
+            if clean_order_id and resolved_campaign_id:
+                dedup_res = await self.session.execute(
+                    select(AdEvent).where(
+                        AdEvent.campaign_id == resolved_campaign_id,
+                        AdEvent.external_order_id == clean_order_id,
+                        AdEvent.event_type == EventType.CONVERSION,
+                        AdEvent.is_test == False,
+                    )
+                )
+                existing_conversion = dedup_res.scalar_one_or_none()
+                if existing_conversion:
+                    logger.info(
+                        "Concurrent duplicate conversion postback deduplicated via constraint",
+                        campaign_id=resolved_campaign_id,
+                        order_id=clean_order_id,
+                        existing_event_id=existing_conversion.id,
+                    )
+                    return ConversionResult(
+                        success=True,
+                        event_id=existing_conversion.id,
+                        is_attributed=existing_conversion.is_attributed,
+                        attribution_reason="deduplicated_existing",
+                        campaign_id=existing_conversion.campaign_id,
+                        creative_id=existing_conversion.creative_id,
+                        conversion_value=existing_conversion.conversion_value,
+                        currency=existing_conversion.currency or currency_clean,
+                        is_test=False,
+                        is_duplicate=True,
+                        message="Duplicate order conversion deduplicated idempotently (concurrent race resolved)",
+                    )
+            raise
 
         # 9. Update campaign stats only if non-test
         if not is_test and campaign:

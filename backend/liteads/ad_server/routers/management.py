@@ -767,7 +767,7 @@ async def advertiser_reporting(
         if campaign_id and ad_set.campaign_id != campaign_id:
             raise HTTPException(status_code=400, detail="AdSet does not belong to specified campaign")
     
-    today = date.today()
+    today = datetime.now(timezone.utc).date()
     start = start_date or today
     end = end_date or today
     if end < start:
@@ -901,7 +901,7 @@ async def campaign_ad_set_reporting(
     session: AsyncSession = Depends(get_session),
 ) -> AdSetReportingResponse:
     campaign = await _assert_campaign_access(user, campaign_id, session)
-    today = date.today()
+    today = datetime.now(timezone.utc).date()
     start = start_date or today
     end = end_date or today
     if end < start:
@@ -909,6 +909,27 @@ async def campaign_ad_set_reporting(
 
     start_dt = datetime.combine(start, datetime.min.time())
     end_dt = datetime.combine(end, datetime.max.time())
+
+    # Check currency consistency
+    curr_query = (
+        select(AdEvent.currency)
+        .distinct()
+        .where(
+            AdEvent.campaign_id == campaign_id,
+            AdEvent.event_time >= start_dt,
+            AdEvent.event_time <= end_dt,
+            AdEvent.is_test == False,
+            AdEvent.currency.isnot(None),
+        )
+    )
+    currs_res = await session.execute(curr_query)
+    distinct_currs = [c for c in currs_res.scalars().all() if c]
+    if len(set(distinct_currs)) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Incompatible currencies detected in reporting period: {sorted(list(set(distinct_currs)))}",
+        )
+    report_currency = distinct_currs[0] if distinct_currs else "INR"
 
     ad_sets_result = await session.execute(
         select(AdSet).where(AdSet.campaign_id == campaign_id).order_by(AdSet.id)
@@ -972,7 +993,7 @@ async def campaign_ad_set_reporting(
                 attributed_conversions=attr_conv,
                 conversion_value=conv_val,
                 spend=sp,
-                currency="INR",
+                currency=report_currency,
                 ctr=ctr,
                 cvr=cvr,
                 cpa=cpa,
@@ -1002,7 +1023,7 @@ async def campaign_ad_set_reporting(
         total_attributed_conversions=total_attributed_conversions,
         total_conversion_value=total_conversion_value,
         total_spend=total_spend,
-        currency="INR",
+        currency=report_currency,
         ctr=total_ctr,
         cvr=total_cvr,
         cpa=total_cpa,
