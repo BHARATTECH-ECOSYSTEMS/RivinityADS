@@ -18,6 +18,7 @@ from liteads.ad_server.middleware.metrics import MetricsMiddleware, metrics_endp
 from liteads.ad_server.routers import (
     ad,
     auth,
+    channels,
     chat,
     conversion,
     domain,
@@ -68,44 +69,59 @@ async def lifespan(app: FastAPI):
     # Initialize Redis
     await redis_client.connect()
 
-    if settings.enable_optimization_worker and settings.optimization.enabled:
+    # Schedulers & Background Workers Topology:
+    # - Monolith mode (dev/test): settings.enable_in_process_schedulers is True
+    # - Dedicated worker mode (prod): settings.enable_in_process_schedulers is False
+    schedulers_active = bool(settings.enable_in_process_schedulers)
+
+    if schedulers_active and settings.enable_optimization_worker and settings.optimization.enabled:
         from liteads.ad_server.services.optimization_scheduler import optimization_loop
         optimization_loop.start()
-        logger.info(
-            "In-process optimization loop scheduler started (monolith mode). "
-            "Set LITEADS_ENABLE_OPTIMIZATION_WORKER=false if running dedicated worker containers (--profile worker)."
-        )
+        logger.info("In-process optimization scheduler started.")
+    elif not schedulers_active:
+        logger.info("In-process optimization scheduler disabled (dedicated worker topology).")
 
-    from liteads.ad_server.services.digest_scheduler import weekly_digest_loop
-    weekly_digest_loop.start()
+    if schedulers_active and settings.enable_digest_worker:
+        from liteads.ad_server.services.digest_scheduler import weekly_digest_loop
+        weekly_digest_loop.start()
+        logger.info("In-process weekly digest scheduler started.")
+    elif not schedulers_active:
+        logger.info("In-process weekly digest scheduler disabled (dedicated worker topology).")
 
-    if settings.enable_webhook_worker:
+    if schedulers_active and settings.enable_webhook_worker:
         from liteads.ad_server.services.webhook_worker import webhook_worker_task
         webhook_worker_task.start()
+        logger.info("In-process webhook worker started.")
+    elif not schedulers_active:
+        logger.info("In-process webhook worker disabled (dedicated worker topology).")
 
-    if settings.enable_notification_worker:
+    if schedulers_active and settings.enable_notification_worker:
         from liteads.ad_server.services.notification_worker import notification_worker_task
         notification_worker_task.start()
+        logger.info("In-process notification worker started.")
+    elif not schedulers_active:
+        logger.info("In-process notification worker disabled (dedicated worker topology).")
 
-    logger.info("LiteAds server started successfully")
+    logger.info("LiteAds server started successfully", topology="in-process" if schedulers_active else "dedicated-workers")
 
     yield
 
     # Shutdown
     logger.info("Shutting down LiteAds server")
 
-    if settings.enable_notification_worker:
+    if schedulers_active and settings.enable_notification_worker:
         from liteads.ad_server.services.notification_worker import notification_worker_task
         await notification_worker_task.stop()
 
-    if settings.enable_webhook_worker:
+    if schedulers_active and settings.enable_webhook_worker:
         from liteads.ad_server.services.webhook_worker import webhook_worker_task
         await webhook_worker_task.stop()
 
-    from liteads.ad_server.services.digest_scheduler import weekly_digest_loop
-    await weekly_digest_loop.stop()
+    if schedulers_active and settings.enable_digest_worker:
+        from liteads.ad_server.services.digest_scheduler import weekly_digest_loop
+        await weekly_digest_loop.stop()
 
-    if settings.enable_optimization_worker and settings.optimization.enabled:
+    if schedulers_active and settings.enable_optimization_worker and settings.optimization.enabled:
         from liteads.ad_server.services.optimization_scheduler import optimization_loop
         await optimization_loop.stop()
     
@@ -133,9 +149,12 @@ def create_app() -> FastAPI:
 
     import os
 
-    cors_env = os.getenv("LITEADS_CORS_ORIGINS")
+    cors_env = os.getenv("LITEADS_CORS_ORIGINS") or os.getenv("LITEADS_SERVER__CORS_ORIGINS")
     if cors_env:
         allowed = [o.strip() for o in cors_env.split(",") if o.strip()]
+        allow_credentials = True
+    elif settings.server.cors_origins:
+        allowed = list(settings.server.cors_origins)
         allow_credentials = True
     elif settings.debug or settings.env == "dev":
         allowed = [
@@ -147,8 +166,9 @@ def create_app() -> FastAPI:
         allowed = list(dict.fromkeys([o for o in allowed if o]))
         allow_credentials = True
     else:
-        allowed = ["*"]
-        allow_credentials = False
+        # In production / staging, fail-closed: allow only configured frontend_url
+        allowed = [settings.server.frontend_url] if settings.server.frontend_url else []
+        allow_credentials = True
 
     # CORS middleware — allows the JS SDK to call from allowed origins
     app.add_middleware(
@@ -165,12 +185,16 @@ def create_app() -> FastAPI:
     # Prometheus metrics endpoint
     app.add_api_route("/metrics", metrics_endpoint, methods=["GET"], tags=["monitoring"])
 
-    # Request logging middleware
+    # Request logging & correlation middleware
     @app.middleware("http")
     async def logging_middleware(request: Request, call_next: Any) -> Any:
-        """Log all requests with timing."""
-        request_id = generate_request_id()
-        log_context(request_id=request_id)
+        """Log all requests with timing and correlation ID propagation."""
+        correlation_id = (
+            request.headers.get("X-Correlation-ID")
+            or request.headers.get("X-Request-ID")
+            or generate_request_id()
+        )
+        log_context(request_id=correlation_id, correlation_id=correlation_id)
 
         start_time = time.perf_counter()
 
@@ -188,10 +212,12 @@ def create_app() -> FastAPI:
             path=log_path,
             status_code=response.status_code,
             duration_ms=round(duration_ms, 2),
+            correlation_id=correlation_id,
         )
 
-        # Add headers
-        response.headers["X-Request-ID"] = request_id
+        # Add correlation headers
+        response.headers["X-Request-ID"] = correlation_id
+        response.headers["X-Correlation-ID"] = correlation_id
         response.headers["X-Response-Time"] = f"{duration_ms:.2f}ms"
         response.headers.setdefault("Referrer-Policy", "no-referrer")
 
@@ -260,6 +286,7 @@ def create_app() -> FastAPI:
     app.include_router(conversion.router)
     app.include_router(marketing.router, prefix="/api/v1", tags=["marketing"])
     app.include_router(email_marketing.router, prefix="/api/v1", tags=["email-marketing"])
+    app.include_router(channels.router, prefix="/api/v1/channels", tags=["channels"])
 
     # Mount JS SDK & static assets so rivinity.js and liteads.js are served at /static/
     static_dir = _STATIC_DIR if _STATIC_DIR.exists() else Path(os.path.join(os.path.dirname(__file__), "..", "static"))

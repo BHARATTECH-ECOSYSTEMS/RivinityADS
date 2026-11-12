@@ -28,6 +28,10 @@ from liteads.ad_server.services.conversion_service import ConversionService
 from liteads.common.tracking_sig import sign_click_token
 
 TEST_DB_NAME = "liteads_phase11_pg_audit_db"
+EXPECTED_HEAD = "r0a1b2c3d4e5"
+PRE_CHANGE_REVISION = "09062f9ba9c2"
+GEO_TARGET_CONSTRAINT = ("uq_geo_location_full", ("country", "state_code", "city", "pincode"))
+GEO_LEGACY_CONSTRAINT = ("uq_country_pincode", ("country", "pincode"))
 
 
 def redact(text: str) -> str:
@@ -55,6 +59,70 @@ def find_alembic_ini() -> str:
     raise FileNotFoundError("Could not locate alembic.ini")
 
 
+def find_baseline_sql() -> str:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base_dir, "init_db.sql")
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Could not locate baseline schema: {path}")
+    return path
+
+
+async def run_alembic(alembic_ini: str, database_name: str, *arguments: str) -> str:
+    env = os.environ.copy()
+    env["LITEADS_DATABASE__NAME"] = database_name
+    working_dir = os.path.dirname(alembic_ini)
+    res = subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", alembic_ini, *arguments],
+        env=env,
+        capture_output=True,
+        text=True,
+        cwd=working_dir,
+    )
+    output = redact(res.stdout + "\n" + res.stderr).strip()
+    if res.returncode != 0:
+        raise RuntimeError(f"Alembic {' '.join(arguments)} failed:\n{output}")
+    return output
+
+
+async def assert_geo_constraint(
+    conn: asyncpg.Connection,
+    expected: tuple[str, tuple[str, ...]],
+    absent: str,
+) -> None:
+    name, columns = expected
+    row = await conn.fetchrow(
+        """
+        SELECT c.conname,
+               array_agg(a.attname ORDER BY key.ord) AS columns
+        FROM pg_constraint AS c
+        JOIN unnest(c.conkey) WITH ORDINALITY AS key(attnum, ord) ON TRUE
+        JOIN pg_attribute AS a
+          ON a.attrelid = c.conrelid AND a.attnum = key.attnum
+        WHERE c.conrelid = 'geo_locations'::regclass
+          AND c.contype = 'u'
+          AND c.conname = $1
+        GROUP BY c.conname
+        """,
+        name,
+    )
+    assert row is not None, f"Missing unique constraint {name}"
+    assert tuple(row["columns"]) == columns, (
+        f"Unexpected columns for {name}: {tuple(row['columns'])!r}; "
+        f"expected {columns!r}"
+    )
+    assert not await conn.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conrelid = 'geo_locations'::regclass
+              AND conname = $1
+        )
+        """,
+        absent,
+    ), f"Unexpected legacy constraint {absent}"
+
+
 async def main():
     settings = get_settings()
     host = settings.database.host
@@ -70,39 +138,102 @@ async def main():
         return 0
 
     print("=== Step 1: Setting up isolated PostgreSQL test database ===")
+    alembic_ini = find_alembic_ini()
+    baseline_sql = open(find_baseline_sql(), encoding="utf-8").read()
+
     try:
         await admin_conn.execute(f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='{TEST_DB_NAME}' AND pid <> pg_backend_pid();")
         await admin_conn.execute(f"DROP DATABASE IF EXISTS {TEST_DB_NAME};")
-        
-        # Check if template liteads exists; otherwise create blank DB
-        has_template = await admin_conn.fetchval("SELECT 1 FROM pg_database WHERE datname='liteads';")
-        if has_template:
-            await admin_conn.execute(f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='liteads' AND pid <> pg_backend_pid();")
-            await admin_conn.execute(f"CREATE DATABASE {TEST_DB_NAME} TEMPLATE liteads;")
-        else:
-            await admin_conn.execute(f"CREATE DATABASE {TEST_DB_NAME};")
+        await admin_conn.execute(f"CREATE DATABASE {TEST_DB_NAME};")
         print(f"PASS: Isolated test database '{TEST_DB_NAME}' created.")
     finally:
         await admin_conn.close()
 
     try:
-        print("\n=== Step 2: Running Alembic upgrade head on PostgreSQL ===")
-        alembic_ini = find_alembic_ini()
-        working_dir = os.path.dirname(alembic_ini)
-        env = os.environ.copy()
-        env["LITEADS_DATABASE__NAME"] = TEST_DB_NAME
-        res = subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", alembic_ini, "upgrade", "head"],
-            env=env,
-            capture_output=True,
-            text=True,
-            cwd=working_dir,
+        print("\n=== Step 2: Loading the supported pre-Alembic baseline ===")
+        baseline_conn = await asyncpg.connect(
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            database=TEST_DB_NAME,
         )
-        print(redact(res.stdout + "\n" + res.stderr).strip())
-        if res.returncode != 0:
-            print("FAIL: Alembic upgrade head failed on PostgreSQL")
-            return 1
-        print("PASS: Migration head n6f7a8b9c0d1 reached successfully on PostgreSQL.")
+        try:
+            await baseline_conn.execute(baseline_sql)
+        finally:
+            await baseline_conn.close()
+        print("PASS: Baseline schema loaded into an empty PostgreSQL database.")
+
+        print("\n=== Step 3: Running clean Alembic upgrade to head ===")
+        print(await run_alembic(alembic_ini, TEST_DB_NAME, "upgrade", "head"))
+        print(await run_alembic(alembic_ini, TEST_DB_NAME, "current"))
+        assert EXPECTED_HEAD in await run_alembic(alembic_ini, TEST_DB_NAME, "current")
+        geo_conn = await asyncpg.connect(
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            database=TEST_DB_NAME,
+        )
+        try:
+            await assert_geo_constraint(geo_conn, GEO_TARGET_CONSTRAINT, GEO_LEGACY_CONSTRAINT[0])
+            print(
+                "PASS: Clean PostgreSQL upgrade reached "
+                f"{EXPECTED_HEAD} with {GEO_TARGET_CONSTRAINT[0]} on "
+                f"{GEO_TARGET_CONSTRAINT[1]}."
+            )
+        finally:
+            await geo_conn.close()
+
+        print("\n=== Step 4: Verifying the prior schema upgrade path ===")
+        print(await run_alembic(alembic_ini, TEST_DB_NAME, "downgrade", PRE_CHANGE_REVISION))
+        geo_conn = await asyncpg.connect(
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            database=TEST_DB_NAME,
+        )
+        try:
+            await assert_geo_constraint(geo_conn, GEO_LEGACY_CONSTRAINT, GEO_TARGET_CONSTRAINT[0])
+            await geo_conn.execute(
+                """
+                INSERT INTO geo_locations (country, state_code, city, pincode)
+                VALUES ('IN', 'KA', 'Bengaluru', '560001')
+                """
+            )
+            print(
+                "PASS: Pre-change schema contains "
+                f"{GEO_LEGACY_CONSTRAINT[0]} on {GEO_LEGACY_CONSTRAINT[1]}."
+            )
+        finally:
+            await geo_conn.close()
+
+        print(await run_alembic(alembic_ini, TEST_DB_NAME, "upgrade", "head"))
+        print(await run_alembic(alembic_ini, TEST_DB_NAME, "upgrade", "head"))
+        geo_conn = await asyncpg.connect(
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            database=TEST_DB_NAME,
+        )
+        try:
+            await assert_geo_constraint(geo_conn, GEO_TARGET_CONSTRAINT, GEO_LEGACY_CONSTRAINT[0])
+            assert await geo_conn.fetchval(
+                """
+                SELECT count(*)
+                FROM geo_locations
+                WHERE country = 'IN' AND state_code = 'KA'
+                  AND city = 'Bengaluru' AND pincode = '560001'
+                """
+            ) == 1
+            print(
+                "PASS: Prior schema upgraded without data loss and repeated upgrade "
+                "did not duplicate the geo constraint."
+            )
+        finally:
+            await geo_conn.close()
 
         # Create async engine connected to isolated DB
         db_url = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{TEST_DB_NAME}"
@@ -318,7 +449,7 @@ async def main():
             print("PASS: Repeated request deduplicated idempotently with strictly zero duplicate charge!")
 
         await engine.dispose()
-        print("\nALL POSTGRESQL CONCURRENCY & LEDGER AUDIT TESTS PASSED (PASS)!")
+        print(f"\nALL POSTGRESQL CONCURRENCY & LEDGER AUDIT TESTS PASSED (HEAD {EXPECTED_HEAD})!")
         return 0
 
     finally:

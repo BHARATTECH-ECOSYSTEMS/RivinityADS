@@ -7,6 +7,8 @@ import {
   BlockItem,
   ThemeConfig,
   WebsiteStatusMap,
+  BoundSlot,
+  AdPlacementLocation,
 } from "../../types";
 import {
   getWebsiteProject,
@@ -21,14 +23,29 @@ import {
   unpublishWebsiteProject,
   rollbackWebsiteVersion,
   generateWebsitePreviewToken,
+  listWebsiteProjectSlots,
 } from "../../api/client";
 import { CanvasBlockRenderer } from "../../components/website/CanvasBlockRenderer";
 import { BlockPropertyForm } from "../../components/website/BlockPropertyForm";
 import { BlockPickerModal } from "../../components/website/BlockPickerModal";
+import { AISectionGeneratorModal } from "../../components/website/AISectionGeneratorModal";
 import { PageSettingsForm } from "../../components/website/PageSettingsForm";
 import { ThemeSettingsForm } from "../../components/website/ThemeSettingsForm";
 import { PublishModal } from "../../components/website/PublishModal";
 import { VersionHistoryDrawer } from "../../components/website/VersionHistoryDrawer";
+import { AdSlotPalette } from "../../components/website/AdSlotPalette";
+import { WebsiteMonetizationModal } from "../../components/website/WebsiteMonetizationModal";
+import { BusinessQuestionnaireModal } from "../../components/website/BusinessQuestionnaireModal";
+import {
+  WebsiteBridgeClient,
+  BridgeStatus,
+  validateSelectionAgainstDraft,
+  validateProposedPatchAgainstDraft,
+  applyPatchToBlock,
+  extractAuthoritativeValue,
+  syncBlockChangesToPreview,
+} from "../../services/websiteBridge";
+import { validateGeneratedBlockItem } from "../../services/openDesignPatcher";
 
 const BASE_URL = (import.meta.env?.VITE_API_BASE_URL as string | undefined) ?? "";
 
@@ -49,10 +66,15 @@ export const WebsiteEditor: React.FC = () => {
   const baselineProjectRef = useRef<string>("");
 
   // Editor UI View States
-  const [activeTabLeft, setActiveTabLeft] = useState<"pages" | "blocks">("blocks");
+  const [activeTabLeft, setActiveTabLeft] = useState<"pages" | "blocks" | "adSlots">("blocks");
   const [activeTabRight, setActiveTabRight] = useState<"inspector" | "pageSettings" | "themeSettings">("inspector");
   const [viewMode, setViewMode] = useState<"canvas" | "preview">("canvas");
   const [previewViewport, setPreviewViewport] = useState<"desktop" | "tablet" | "mobile">("desktop");
+
+  // Authorized Ad Slots State (Phase 5 Stage 5.3)
+  const [availableSlots, setAvailableSlots] = useState<BoundSlot[]>([]);
+  const [isLoadingSlots, setIsLoadingSlots] = useState(false);
+  const [slotsError, setSlotsError] = useState<string | null>(null);
 
   // Save & Loading States
   const [isLoading, setIsLoading] = useState(true);
@@ -67,14 +89,68 @@ export const WebsiteEditor: React.FC = () => {
   const [previewTokenExpiry, setPreviewTokenExpiry] = useState<number | null>(null);
   const [isLoadingPreview, setIsLoadingPreview] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [isQuestionnaireOpen, setIsQuestionnaireOpen] = useState(false);
+
+  // Phase 3.1: Visual Editing Bridge MessageChannel Foundation
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const bridgeClientRef = useRef<WebsiteBridgeClient | null>(null);
+  const [bridgeStatus, setBridgeStatus] = useState<BridgeStatus>("uninitialized");
+
+  // Stage 3.3C: Inspector Field Autofocus State
+  const [focusedField, setFocusedField] = useState<string | null>(null);
+  const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
+  const [focusKey, setFocusKey] = useState<number>(0);
+
+  // Stage 3.3B: Refs to avoid stale closures in bridge callbacks
+  const activePageRef = useRef<PageData | null>(activePage);
+  activePageRef.current = activePage;
+  const selectedBlockIdRef = useRef<string | null>(selectedBlockId);
+  selectedBlockIdRef.current = selectedBlockId;
+
+  // Stage 3.4B: Active text inline edit session tracking
+  const activeEditSessionRef = useRef<{
+    sessionId: string;
+    pageId: number;
+    blockId: string;
+    field: string | null;
+    itemIndex: number | null;
+  } | null>(null);
+
+  // Stage 3.4D: Completed/closed session IDs to reject stale or duplicate proposals
+  const completedSessionIdsRef = useRef<Set<string>>(new Set());
+
+  // Stage 3.3B & 3.3C: Synchronize selectedBlockId from parent editor into preview iframe
+  useEffect(() => {
+    if (viewMode === "preview" && bridgeClientRef.current?.getStatus() === "connected") {
+      if (selectedBlockId) {
+        bridgeClientRef.current.selectBlock(selectedBlockId, {
+          field: focusedField,
+          itemIndex: focusedIndex,
+          scrollIntoView: true,
+        });
+      } else {
+        bridgeClientRef.current.clearSelection();
+      }
+    }
+  }, [selectedBlockId, viewMode]);
+
+  useEffect(() => {
+    return () => {
+      bridgeClientRef.current?.disconnect();
+    };
+  }, []);
 
   // Modal States
   const [isBlockPickerOpen, setIsBlockPickerOpen] = useState(false);
+  const [isAIGeneratorOpen, setIsAIGeneratorOpen] = useState(false);
+  const [aiQuotaMeta, setAiQuotaMeta] = useState<{ quotaRemaining: number; dailyLimit: number; resetTimestampUtc: string } | null>(null);
+  const [aiNoticeMessage, setAiNoticeMessage] = useState<string | null>(null);
   const [isPublishModalOpen, setIsPublishModalOpen] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
   const [isUnpublishing, setIsUnpublishing] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
   const [isVersionHistoryOpen, setIsVersionHistoryOpen] = useState(false);
+  const [isMonetizationModalOpen, setIsMonetizationModalOpen] = useState(false);
 
   // Add Page Modal State
   const [isAddPageOpen, setIsAddPageOpen] = useState(false);
@@ -95,6 +171,21 @@ export const WebsiteEditor: React.FC = () => {
     }
   }, [projectId]);
 
+  const loadBoundSlots = async () => {
+    if (!projectId || projectId <= 0) return;
+    setIsLoadingSlots(true);
+    setSlotsError(null);
+    try {
+      const slots = await listWebsiteProjectSlots(projectId);
+      setAvailableSlots(slots);
+    } catch (err: any) {
+      console.error("WebsiteEditor: failed to load bound slots", err);
+      setSlotsError(err?.message || "Failed to load authorized ad slots");
+    } finally {
+      setIsLoadingSlots(false);
+    }
+  };
+
   const loadProjectAndPages = async (preservePageId?: number) => {
     setIsLoading(true);
     setLoadError(null);
@@ -106,6 +197,9 @@ export const WebsiteEditor: React.FC = () => {
         theme_config: proj.theme_config,
       });
 
+      // Concurrently load project-bound ad slots for palette and inspector
+      loadBoundSlots();
+
       const pagesList = await listWebsitePages(projectId);
       setPages(pagesList);
 
@@ -114,6 +208,8 @@ export const WebsiteEditor: React.FC = () => {
         const fullPage = await getWebsitePage(projectId, targetPageId);
         setActivePage(fullPage);
         baselinePageRef.current = JSON.stringify(fullPage);
+        setFocusedField(null);
+        setFocusedIndex(null);
         if (fullPage.blocks?.blocks?.length > 0) {
           setSelectedBlockId(fullPage.blocks.blocks[0].id);
         } else {
@@ -161,7 +257,7 @@ export const WebsiteEditor: React.FC = () => {
       try {
         const basePage = JSON.parse(baselinePageRef.current);
         setActivePage(basePage);
-      } catch {}
+      } catch { }
     }
     if (baselineProjectRef.current && project) {
       try {
@@ -169,10 +265,17 @@ export const WebsiteEditor: React.FC = () => {
         setProject((prev) =>
           prev ? { ...prev, name: baseProj.name, theme_config: baseProj.theme_config } : null
         );
-      } catch {}
+      } catch { }
     }
     setIsDirty(false);
     setSaveError(null);
+    setFocusedField(null);
+    setFocusedIndex(null);
+    if (activeEditSessionRef.current) {
+      bridgeClientRef.current?.finishActiveEdit(false);
+      completedSessionIdsRef.current.add(activeEditSessionRef.current.sessionId);
+      activeEditSessionRef.current = null;
+    }
   };
 
   // 3. Switch Page Handler with Dirty Check
@@ -196,12 +299,19 @@ export const WebsiteEditor: React.FC = () => {
           setProject((prev) =>
             prev ? { ...prev, name: baseProj.name, theme_config: baseProj.theme_config } : null
           );
-        } catch {}
+        } catch { }
       }
       const pageData = await getWebsitePage(projectId, pageId);
       setActivePage(pageData);
       baselinePageRef.current = JSON.stringify(pageData);
       setIsDirty(false);
+      setFocusedField(null);
+      setFocusedIndex(null);
+      if (activeEditSessionRef.current) {
+        bridgeClientRef.current?.finishActiveEdit(false);
+        completedSessionIdsRef.current.add(activeEditSessionRef.current.sessionId);
+        activeEditSessionRef.current = null;
+      }
       if (pageData.blocks?.blocks?.length > 0) {
         setSelectedBlockId(pageData.blocks.blocks[0].id);
       } else {
@@ -256,6 +366,11 @@ export const WebsiteEditor: React.FC = () => {
 
       setIsDirty(false);
       setSaveSuccess(true);
+      if (activeEditSessionRef.current) {
+        bridgeClientRef.current?.finishActiveEdit(true);
+        completedSessionIdsRef.current.add(activeEditSessionRef.current.sessionId);
+        activeEditSessionRef.current = null;
+      }
       setTimeout(() => setSaveSuccess(false), 3000);
 
       // If we are currently in preview mode, refresh preview token
@@ -314,12 +429,148 @@ export const WebsiteEditor: React.FC = () => {
     });
     setSelectedBlockId(newBlock.id);
     setActiveTabRight("inspector");
+    setFocusedField(null);
+    setFocusedIndex(null);
     setIsDirty(true);
+  };
+
+  const handlePlaceSlot = (slot: BoundSlot, location: AdPlacementLocation = "in_article") => {
+    if (!activePage) return;
+
+    // SEC-5.3-01 Remediation: Untrusted input payload validation
+    if (!slot || typeof slot !== "object" || typeof slot.slot_id !== "string") {
+      console.warn("WebsiteEditor: rejected invalid ad slot payload", slot);
+      return;
+    }
+
+    // Verify against authoritative project-bound slot list
+    const authoritativeSlot = availableSlots.find((s) => s.slot_id === slot.slot_id);
+    if (!authoritativeSlot) {
+      console.warn("WebsiteEditor: rejected unverified or foreign ad slot:", slot.slot_id);
+      alert("Selected ad slot is not authorized for this project.");
+      return;
+    }
+
+    if (authoritativeSlot.status !== 1) {
+      alert("Cannot place an inactive ad slot.");
+      return;
+    }
+
+    const allowedLocations: AdPlacementLocation[] = ["header_banner", "in_article", "sidebar", "footer"];
+    const validatedLocation: AdPlacementLocation = allowedLocations.includes(location) ? location : "in_article";
+
+    if (authoritativeSlot.format !== 1 && authoritativeSlot.format !== 2) {
+      console.warn("WebsiteEditor: unsupported slot format:", authoritativeSlot.format);
+      return;
+    }
+
+    const newBlock: BlockItem = {
+      id: `blk_ad_${Date.now().toString(36).slice(-5)}`,
+      type: "ad_placement",
+      is_visible: true,
+      content: {
+        placement_location: validatedLocation,
+        format: authoritativeSlot.format,
+        ad_slot_id: authoritativeSlot.slot_id,
+      },
+    };
+
+    const currentBlocks = activePage.blocks?.blocks || [];
+    let nextBlocks: BlockItem[];
+
+    if (validatedLocation === "header_banner") {
+      const heroIdx = currentBlocks.findIndex((b) => b.type === "hero");
+      if (heroIdx >= 0) {
+        nextBlocks = [
+          ...currentBlocks.slice(0, heroIdx + 1),
+          newBlock,
+          ...currentBlocks.slice(heroIdx + 1),
+        ];
+      } else {
+        nextBlocks = [newBlock, ...currentBlocks];
+      }
+    } else if (validatedLocation === "footer") {
+      const footerIdx = currentBlocks.findIndex((b) => b.type === "footer");
+      if (footerIdx >= 0) {
+        nextBlocks = [
+          ...currentBlocks.slice(0, footerIdx),
+          newBlock,
+          ...currentBlocks.slice(footerIdx),
+        ];
+      } else {
+        nextBlocks = [...currentBlocks, newBlock];
+      }
+    } else {
+      nextBlocks = [...currentBlocks, newBlock];
+    }
+
+    setActivePage({
+      ...activePage,
+      blocks: {
+        ...activePage.blocks,
+        schema_version: activePage.blocks?.schema_version || 1,
+        blocks: nextBlocks,
+      },
+    });
+    setSelectedBlockId(newBlock.id);
+    setActiveTabRight("inspector");
+    setFocusedField(null);
+    setFocusedIndex(null);
+    setIsDirty(true);
+  };
+
+  const handleSectionGenerated = (
+    newBlock: BlockItem,
+    meta?: { quotaRemaining: number; dailyLimit: number; resetTimestampUtc: string }
+  ) => {
+    // 1. Strict comprehensive validation of AI generated block against Schema v2 rules
+    const validation = validateGeneratedBlockItem(newBlock);
+    if (!validation.isValid || !validation.validatedBlock) {
+      console.error("WebsiteEditor: rejected invalid AI block payload", validation.error, newBlock);
+      return;
+    }
+    const validatedBlock = validation.validatedBlock;
+    if (!activePage) return;
+
+    // 2. Add immutably to existing page draft & promote schema_version to 2
+    const currentBlocks = activePage.blocks?.blocks || [];
+    const nextBlocks = [...currentBlocks, validatedBlock];
+    const nextSchemaVersion = Math.max(activePage.blocks?.schema_version || 1, 2);
+
+    setActivePage({
+      ...activePage,
+      blocks: {
+        ...activePage.blocks,
+        schema_version: nextSchemaVersion,
+        blocks: nextBlocks,
+      },
+    });
+
+    // 3. Mark dirty state & select block for immediate inspection
+    setSelectedBlockId(validatedBlock.id);
+    setActiveTabRight("inspector");
+    setFocusedField(null);
+    setFocusedIndex(null);
+    setIsDirty(true);
+
+    if (meta) {
+      setAiQuotaMeta(meta);
+    }
+
+    setAiNoticeMessage("✨ AI Section generated and added to draft. Click Save Draft to persist.");
+    setTimeout(() => setAiNoticeMessage(null), 5000);
+
+    // 4. Synchronize with preview bridge if active
+    if (viewMode === "preview" && bridgeClientRef.current?.getStatus() === "connected") {
+      bridgeClientRef.current.selectBlock(validatedBlock.id, { scrollIntoView: true });
+    }
   };
 
   const handleUpdateBlock = (updatedBlock: BlockItem) => {
     if (!activePage) return;
-    const nextBlocks = (activePage.blocks?.blocks || []).map((b) =>
+    const currentBlocks = activePage.blocks?.blocks || [];
+    const prevBlock = currentBlocks.find((b) => b.id === updatedBlock.id);
+    const nextBlocks = currentBlocks.map((b) =>
       b.id === updatedBlock.id ? updatedBlock : b
     );
     setActivePage({
@@ -331,6 +582,11 @@ export const WebsiteEditor: React.FC = () => {
       },
     });
     setIsDirty(true);
+
+    // Stage 3.4D: Two-way sync - update preview DOM in real time when inspector inputs change
+    if (viewMode === "preview" && bridgeClientRef.current?.getStatus() === "connected" && prevBlock) {
+      syncBlockChangesToPreview(bridgeClientRef.current, prevBlock, updatedBlock);
+    }
   };
 
   const handleDeleteBlock = (blockId: string) => {
@@ -346,6 +602,13 @@ export const WebsiteEditor: React.FC = () => {
     });
     if (selectedBlockId === blockId) {
       setSelectedBlockId(nextBlocks[0]?.id || null);
+      setFocusedField(null);
+      setFocusedIndex(null);
+    }
+    if (activeEditSessionRef.current?.blockId === blockId) {
+      bridgeClientRef.current?.finishActiveEdit(false);
+      completedSessionIdsRef.current.add(activeEditSessionRef.current.sessionId);
+      activeEditSessionRef.current = null;
     }
     setIsDirty(true);
   };
@@ -465,8 +728,8 @@ export const WebsiteEditor: React.FC = () => {
         const saved = await handleSave();
         if (!saved) return;
       }
-      const updatedProj = await publishWebsiteProject(projectId, changelogNotes);
-      setProject(updatedProj);
+      await publishWebsiteProject(projectId, changelogNotes);
+      await loadProjectAndPages();
     } catch (err: any) {
       setPublishError(err?.response?.data?.detail || err.message || "Publication failed");
     } finally {
@@ -478,8 +741,8 @@ export const WebsiteEditor: React.FC = () => {
     setIsUnpublishing(true);
     setPublishError(null);
     try {
-      const updatedProj = await unpublishWebsiteProject(projectId);
-      setProject(updatedProj);
+      await unpublishWebsiteProject(projectId);
+      await loadProjectAndPages();
       setIsPublishModalOpen(false);
     } catch (err: any) {
       setPublishError(err?.response?.data?.detail || err.message || "Unpublish failed");
@@ -522,7 +785,7 @@ export const WebsiteEditor: React.FC = () => {
 
   const previewPagePath = activePage?.is_home ? "/" : `/${activePage?.slug || ""}`;
   const previewIframeSrc = previewToken
-    ? `${BASE_URL}/api/v1/public/website/preview/${previewToken}?path=${encodeURIComponent(previewPagePath)}`
+    ? `${BASE_URL}/api/v1/public/website/preview/${previewToken}?path=${encodeURIComponent(previewPagePath)}&edit_mode=1`
     : "";
 
   return (
@@ -667,6 +930,28 @@ export const WebsiteEditor: React.FC = () => {
 
           <button
             type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => setIsQuestionnaireOpen(true)}
+            style={{ fontSize: "0.8125rem" }}
+            data-testid="business-profile-intake-btn"
+            title="Setup or update business profile, NAP details, hours, and offerings"
+          >
+            📋 Business Profile
+          </button>
+
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => setIsMonetizationModalOpen(true)}
+            style={{ fontSize: "0.8125rem" }}
+            data-testid="editor-monetization-btn"
+            title="Publisher property linking, domain verification, and monetization settings"
+          >
+            💰 Monetization
+          </button>
+
+          <button
+            type="button"
             className="btn btn-primary btn-sm"
             onClick={() => setIsPublishModalOpen(true)}
             style={{ fontSize: "0.8125rem" }}
@@ -703,6 +988,33 @@ export const WebsiteEditor: React.FC = () => {
         </div>
       )}
 
+      {/* AI Notification Banner */}
+      {aiNoticeMessage && (
+        <div
+          style={{
+            padding: "0.5rem 1rem",
+            backgroundColor: "rgba(124, 58, 237, 0.1)",
+            borderBottom: "1px solid rgba(124, 58, 237, 0.3)",
+            color: "var(--primary)",
+            fontSize: "0.8125rem",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+          data-testid="ai-notice-banner"
+        >
+          <span>{aiNoticeMessage}</span>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => setAiNoticeMessage(null)}
+            style={{ fontSize: "0.6875rem", padding: "0.1rem 0.4rem" }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* ── WORKSPACE BODY ───────────────────────────────────────────────────── */}
       <div className="wb-layout">
         {/* ── LEFT PANEL (Pages & Blocks) ──────────────────────────────────── */}
@@ -716,7 +1028,7 @@ export const WebsiteEditor: React.FC = () => {
               style={{
                 flex: 1,
                 fontSize: "0.8125rem",
-                padding: "0.5rem",
+                padding: "0.5rem 0.25rem",
                 borderRadius: 0,
                 borderBottom: activeTabLeft === "pages" ? "2px solid var(--primary)" : "none",
                 fontWeight: activeTabLeft === "pages" ? 700 : 500,
@@ -734,7 +1046,7 @@ export const WebsiteEditor: React.FC = () => {
               style={{
                 flex: 1,
                 fontSize: "0.8125rem",
-                padding: "0.5rem",
+                padding: "0.5rem 0.25rem",
                 borderRadius: 0,
                 borderBottom: activeTabLeft === "blocks" ? "2px solid var(--primary)" : "none",
                 fontWeight: activeTabLeft === "blocks" ? 700 : 500,
@@ -744,6 +1056,24 @@ export const WebsiteEditor: React.FC = () => {
               data-testid="tab-left-blocks"
             >
               Blocks ({currentBlocks.length})
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setActiveTabLeft("adSlots")}
+              style={{
+                flex: 1,
+                fontSize: "0.8125rem",
+                padding: "0.5rem 0.25rem",
+                borderRadius: 0,
+                borderBottom: activeTabLeft === "adSlots" ? "2px solid var(--primary)" : "none",
+                fontWeight: activeTabLeft === "adSlots" ? 700 : 500,
+                color: activeTabLeft === "adSlots" ? "var(--primary)" : "var(--text-secondary)",
+                background: "transparent",
+              }}
+              data-testid="tab-left-ad-slots"
+            >
+              Ad Slots ({availableSlots.length})
             </button>
           </div>
 
@@ -841,15 +1171,27 @@ export const WebsiteEditor: React.FC = () => {
                 <span style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase" }}>
                   Current Page Blocks
                 </span>
-                <button
-                  type="button"
-                  className="btn btn-primary btn-sm"
-                  onClick={() => setIsBlockPickerOpen(true)}
-                  style={{ fontSize: "0.75rem", padding: "0.2rem 0.5rem" }}
-                  data-testid="open-block-picker-btn"
-                >
-                  + Add Block
-                </button>
+                <div style={{ display: "flex", gap: "0.25rem" }}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setIsAIGeneratorOpen(true)}
+                    style={{ fontSize: "0.75rem", padding: "0.2rem 0.4rem" }}
+                    data-testid="left-open-ai-generator-btn"
+                    title="Generate Section with AI"
+                  >
+                    ✨ AI
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={() => setIsBlockPickerOpen(true)}
+                    style={{ fontSize: "0.75rem", padding: "0.2rem 0.5rem" }}
+                    data-testid="open-block-picker-btn"
+                  >
+                    + Add Block
+                  </button>
+                </div>
               </div>
 
               {currentBlocks.length === 0 ? (
@@ -867,6 +1209,8 @@ export const WebsiteEditor: React.FC = () => {
                         onClick={() => {
                           setSelectedBlockId(blk.id);
                           setActiveTabRight("inspector");
+                          setFocusedField(null);
+                          setFocusedIndex(null);
                         }}
                         style={{
                           opacity: blk.is_visible ? 1 : 0.6,
@@ -921,6 +1265,20 @@ export const WebsiteEditor: React.FC = () => {
               )}
             </div>
           )}
+
+          {/* Left Tab: Ad Slots Palette (Phase 5 Stage 5.3) */}
+          {activeTabLeft === "adSlots" && (
+            <AdSlotPalette
+              projectId={projectId}
+              availableSlots={availableSlots}
+              isLoading={isLoadingSlots}
+              error={slotsError}
+              onRefresh={loadBoundSlots}
+              onPlaceSlot={handlePlaceSlot}
+              currentBlocks={currentBlocks}
+              onOpenMonetization={() => setIsMonetizationModalOpen(true)}
+            />
+          )}
         </aside>
 
         {/* ── CENTER STAGE (Canvas / Iframe Preview) ────────────────────────── */}
@@ -954,6 +1312,20 @@ export const WebsiteEditor: React.FC = () => {
                   <button
                     type="button"
                     className="btn btn-secondary btn-sm"
+                    onClick={() => setIsAIGeneratorOpen(true)}
+                    style={{
+                      fontSize: "0.75rem",
+                      background: "linear-gradient(135deg, rgba(37, 99, 235, 0.08) 0%, rgba(124, 58, 237, 0.08) 100%)",
+                      borderColor: "rgba(124, 58, 237, 0.3)",
+                      fontWeight: 600,
+                    }}
+                    data-testid="canvas-open-ai-generator-btn"
+                  >
+                    ✨ Generate with AI
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
                     onClick={() => {
                       setActiveTabRight("pageSettings");
                     }}
@@ -983,6 +1355,26 @@ export const WebsiteEditor: React.FC = () => {
                     border: "2px dashed var(--border)",
                     backgroundColor: "transparent",
                   }}
+                  onDragOver={(e) => {
+                    if (e.dataTransfer.types.includes("application/json")) {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "copy";
+                    }
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    try {
+                      const dataStr = e.dataTransfer.getData("application/json");
+                      if (!dataStr) return;
+                      const data = JSON.parse(dataStr);
+                      if (data && typeof data === "object" && data.type === "ad_slot" && data.slot && typeof data.slot === "object") {
+                        handlePlaceSlot(data.slot, "in_article");
+                      }
+                    } catch (err) {
+                      console.error("Drop handler error:", err);
+                    }
+                  }}
+                  data-testid="canvas-drop-zone-empty"
                 >
                   <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>🧱</div>
                   <h3 style={{ fontSize: "1.125rem", fontWeight: 700, margin: "0 0 0.5rem" }}>
@@ -1000,7 +1392,29 @@ export const WebsiteEditor: React.FC = () => {
                   </button>
                 </div>
               ) : (
-                <div className="space-y-4">
+                <div
+                  className="space-y-4"
+                  onDragOver={(e) => {
+                    if (e.dataTransfer.types.includes("application/json")) {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "copy";
+                    }
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    try {
+                      const dataStr = e.dataTransfer.getData("application/json");
+                      if (!dataStr) return;
+                      const data = JSON.parse(dataStr);
+                      if (data && typeof data === "object" && data.type === "ad_slot" && data.slot && typeof data.slot === "object") {
+                        handlePlaceSlot(data.slot, "in_article");
+                      }
+                    } catch (err) {
+                      console.error("Drop handler error:", err);
+                    }
+                  }}
+                  data-testid="canvas-drop-zone"
+                >
                   {currentBlocks.map((blk, idx) => (
                     <CanvasBlockRenderer
                       key={blk.id}
@@ -1010,6 +1424,8 @@ export const WebsiteEditor: React.FC = () => {
                       onSelect={() => {
                         setSelectedBlockId(blk.id);
                         setActiveTabRight("inspector");
+                        setFocusedField(null);
+                        setFocusedIndex(null);
                       }}
                       onMoveUp={() => handleMoveBlock(blk.id, "up")}
                       onMoveDown={() => handleMoveBlock(blk.id, "down")}
@@ -1087,16 +1503,243 @@ export const WebsiteEditor: React.FC = () => {
                   }}
                 >
                   <iframe
+                    ref={iframeRef}
                     src={previewIframeSrc}
                     title="Website Draft Preview"
-                    sandbox="allow-same-origin allow-forms"
+                    sandbox="allow-scripts allow-forms"
+                    onLoad={() => {
+                      if (!iframeRef.current) return;
+                      if (bridgeClientRef.current) {
+                        bridgeClientRef.current.disconnect();
+                      }
+                      const client = new WebsiteBridgeClient({
+                        iframe: iframeRef.current,
+                        onStatusChange: setBridgeStatus,
+                        onConnected: () => {
+                          console.info("Visual editing bridge handshake established");
+                          if (selectedBlockIdRef.current) {
+                            client.selectBlock(selectedBlockIdRef.current, { scrollIntoView: true });
+                          }
+                        },
+                        onElementSelect: (payload) => {
+                          // Stage 3.3B: Validate selection strictly against current active draft blocks
+                          const validation = validateSelectionAgainstDraft(
+                            payload,
+                            activePageRef.current?.blocks?.blocks
+                          );
+                          if (!validation.isValid) {
+                            console.warn("WebsiteEditor: dropped invalid selection from iframe", validation.error, payload);
+                            return;
+                          }
+                          // Update selected block in parent editor state
+                          setSelectedBlockId(payload.blockId);
+
+                          // Stage 3.3C: Open inspector & set field focus according to classification
+                          if (validation.classification === "protected") {
+                            // Protected element (e.g. ad_placement): Never open editable inspector controls
+                            setFocusedField(null);
+                            setFocusedIndex(null);
+                          } else if (validation.validatedBlock?.type === "open_design_section") {
+                            // Custom section: Open section-level inspector only, no inner field autofocus
+                            setActiveTabRight("inspector");
+                            setFocusedField(null);
+                            setFocusedIndex(null);
+                            setFocusKey((k) => k + 1);
+                          } else if (validation.classification === "read_only") {
+                            // Read-only element (e.g. items.icon): open inspector, but do NOT trigger autofocus
+                            setActiveTabRight("inspector");
+                            setFocusedField(null);
+                            setFocusedIndex(null);
+                          } else {
+                            // Editable selection: open inspector and autofocus target field
+                            setActiveTabRight("inspector");
+                            setFocusedField(payload.field ?? null);
+                            setFocusedIndex(payload.itemIndex ?? null);
+                            setFocusKey((k) => k + 1);
+                          }
+                        },
+                        onBackgroundClick: () => {
+                          setSelectedBlockId(null);
+                          setFocusedField(null);
+                          setFocusedIndex(null);
+                        },
+                        onEditSessionStart: (payload) => {
+                          const targetBlock = activePageRef.current?.blocks?.blocks?.find(
+                            (b) => b && b.id === payload.blockId
+                          );
+                          if (!targetBlock) {
+                            console.warn("WebsiteEditor: dropped edit session start for unknown block:", payload.blockId);
+                            return;
+                          }
+                          // Idempotent duplicate check
+                          if (activeEditSessionRef.current?.sessionId === payload.sessionId) {
+                            return;
+                          }
+                          // If another session was active, record previous as completed
+                          if (activeEditSessionRef.current && activeEditSessionRef.current.sessionId !== payload.sessionId) {
+                            completedSessionIdsRef.current.add(activeEditSessionRef.current.sessionId);
+                          }
+                          activeEditSessionRef.current = {
+                            sessionId: payload.sessionId,
+                            pageId: activePageRef.current?.id || 0,
+                            blockId: payload.blockId,
+                            field: payload.field,
+                            itemIndex: payload.itemIndex,
+                          };
+                          // Update parent selection and inspector focus
+                          setSelectedBlockId(payload.blockId);
+                          setActiveTabRight("inspector");
+                          setFocusedField(payload.field);
+                          setFocusedIndex(payload.itemIndex);
+                          setFocusKey((k) => k + 1);
+                        },
+                        onEditProposePatch: (payload) => {
+                          // A. Duplicate proposal check: reject if session has already been completed/closed
+                          if (completedSessionIdsRef.current.has(payload.sessionId)) {
+                            console.warn("WebsiteEditor: rejected duplicate proposal for completed session:", payload.sessionId);
+                            client.rejectPatch({
+                              sessionId: payload.sessionId,
+                              blockId: payload.blockId,
+                              field: payload.field,
+                              itemIndex: payload.itemIndex,
+                              error: "Proposal rejected: session has already been processed or closed",
+                              rollbackValue: "",
+                              targetSelector: payload.targetSelector,
+                              targetOdId: payload.targetOdId,
+                            });
+                            return;
+                          }
+
+                          // B. Active edit session check
+                          const expectedSession = activeEditSessionRef.current;
+                          if (!expectedSession || expectedSession.sessionId !== payload.sessionId) {
+                            console.warn("WebsiteEditor: rejected proposal with no active matching session:", payload.sessionId);
+                            client.rejectPatch({
+                              sessionId: payload.sessionId,
+                              blockId: payload.blockId,
+                              field: payload.field,
+                              itemIndex: payload.itemIndex,
+                              error: "Proposal rejected: no active matching editing session",
+                              rollbackValue: "",
+                              targetSelector: payload.targetSelector,
+                              targetOdId: payload.targetOdId,
+                            });
+                            return;
+                          }
+
+                          // C. Active page context verification
+                          const currentPage = activePageRef.current;
+                          if (!currentPage || expectedSession.pageId !== currentPage.id) {
+                            const currentBlocks = currentPage?.blocks?.blocks || [];
+                            const targetBlock = currentBlocks.find((b) => b && b.id === payload.blockId);
+                            const rollback = targetBlock
+                              ? extractAuthoritativeValue(targetBlock, payload.field, payload.itemIndex)
+                              : "";
+                            client.rejectPatch({
+                              sessionId: payload.sessionId,
+                              blockId: payload.blockId,
+                              field: payload.field,
+                              itemIndex: payload.itemIndex,
+                              error: "Active page mismatch with editing session",
+                              rollbackValue: rollback,
+                              targetSelector: payload.targetSelector,
+                              targetOdId: payload.targetOdId,
+                            });
+                            activeEditSessionRef.current = null;
+                            completedSessionIdsRef.current.add(payload.sessionId);
+                            return;
+                          }
+
+                          // Mark session completed to prevent duplicate proposal processing
+                          completedSessionIdsRef.current.add(payload.sessionId);
+                          if (completedSessionIdsRef.current.size > 200) {
+                            const first = completedSessionIdsRef.current.values().next().value;
+                            if (first) completedSessionIdsRef.current.delete(first);
+                          }
+
+                          // 2. Authoritative parent validation
+                          const currentBlocks = currentPage.blocks?.blocks || [];
+                          const validation = validateProposedPatchAgainstDraft(
+                            payload,
+                            currentBlocks,
+                            expectedSession?.sessionId || null
+                          );
+
+                          if (!validation.isValid) {
+                            console.warn("WebsiteEditor: rejected inline edit proposal:", validation.error, payload);
+                            client.rejectPatch({
+                              sessionId: payload.sessionId,
+                              blockId: payload.blockId,
+                              field: payload.field,
+                              itemIndex: payload.itemIndex,
+                              error: validation.error || "Proposed edit validation failed",
+                              rollbackValue: validation.currentValue ?? "",
+                              targetSelector: payload.targetSelector,
+                              targetOdId: payload.targetOdId,
+                            });
+                            activeEditSessionRef.current = null;
+                            return;
+                          }
+
+                          // 3. Immutable staging into React draft state
+                          const updatedBlock = applyPatchToBlock(
+                            validation.targetBlock,
+                            validation.normalizedField!,
+                            payload.itemIndex,
+                            payload.proposedValue,
+                            validation.patchedHtml
+                          );
+                          const nextBlocks = currentBlocks.map((b) => (b.id === updatedBlock.id ? updatedBlock : b));
+
+                          setActivePage({
+                            ...currentPage,
+                            blocks: {
+                              ...currentPage.blocks,
+                              schema_version: currentPage.blocks?.schema_version || 1,
+                              blocks: nextBlocks,
+                            },
+                          });
+                          setIsDirty(true);
+
+                          // 4. Send confirmation message through MessageChannel
+                          client.confirmPatchApplied({
+                            sessionId: payload.sessionId,
+                            blockId: payload.blockId,
+                            field: payload.field,
+                            itemIndex: payload.itemIndex,
+                            appliedValue: payload.proposedValue,
+                            targetSelector: payload.targetSelector,
+                            targetOdId: payload.targetOdId,
+                          });
+
+                          // 5. Keep parent selection & inspector synchronized
+                          setSelectedBlockId(payload.blockId);
+                          setFocusedField(payload.field);
+                          setFocusedIndex(payload.itemIndex);
+
+                          activeEditSessionRef.current = null;
+                        },
+                        onEditCancel: (payload) => {
+                          if (payload && payload.sessionId) {
+                            completedSessionIdsRef.current.add(payload.sessionId);
+                          }
+                          activeEditSessionRef.current = null;
+                          console.info("WebsiteEditor: inline editing session cancelled:", payload.sessionId);
+                        },
+                        onError: (err) => {
+                          console.warn("Visual editing bridge error:", err.message);
+                        },
+                      });
+                      bridgeClientRef.current = client;
+                      client.connect().catch(() => { });
+                    }}
                     style={{
                       width:
                         previewViewport === "mobile"
                           ? "375px"
                           : previewViewport === "tablet"
-                          ? "768px"
-                          : "100%",
+                            ? "768px"
+                            : "100%",
                       height: "100%",
                       border: "1px solid var(--border)",
                       borderRadius: previewViewport !== "desktop" ? "var(--radius-md)" : "0",
@@ -1179,7 +1822,26 @@ export const WebsiteEditor: React.FC = () => {
                   block={selectedBlock}
                   onChange={handleUpdateBlock}
                   onDelete={handleDeleteBlock}
-                  onClose={() => setSelectedBlockId(null)}
+                  onClose={() => {
+                    setSelectedBlockId(null);
+                    setFocusedField(null);
+                    setFocusedIndex(null);
+                  }}
+                  focusedField={focusedField}
+                  focusedIndex={focusedIndex}
+                  focusKey={focusKey}
+                  onFieldFocus={(field, index) => {
+                    setFocusedField(field);
+                    setFocusedIndex(index ?? null);
+                    if (bridgeClientRef.current && selectedBlockId) {
+                      bridgeClientRef.current.selectBlock(selectedBlockId, {
+                        field,
+                        itemIndex: index,
+                        scrollIntoView: true,
+                      });
+                    }
+                  }}
+                  availableSlots={availableSlots}
                 />
               ) : (
                 <div style={{ textAlign: "center", padding: "3rem 1rem", color: "var(--text-muted)" }}>
@@ -1221,6 +1883,16 @@ export const WebsiteEditor: React.FC = () => {
         isOpen={isBlockPickerOpen}
         onClose={() => setIsBlockPickerOpen(false)}
         onAddBlock={handleAddBlock}
+        onOpenAIGenerator={() => setIsAIGeneratorOpen(true)}
+      />
+
+      {/* AI Section Generator Modal */}
+      <AISectionGeneratorModal
+        isOpen={isAIGeneratorOpen}
+        projectId={projectId}
+        onClose={() => setIsAIGeneratorOpen(false)}
+        onSectionGenerated={handleSectionGenerated}
+        initialQuota={aiQuotaMeta}
       />
 
       {/* Add Page Modal */}
@@ -1372,6 +2044,18 @@ export const WebsiteEditor: React.FC = () => {
         onRollback={handleRollback}
       />
 
+      {/* Website Monetization & Linking Modal (Phase 5 Stage 5.4) */}
+      <WebsiteMonetizationModal
+        isOpen={isMonetizationModalOpen}
+        onClose={() => setIsMonetizationModalOpen(false)}
+        project={project}
+        publisherId={project.publisher_id}
+        onProjectUpdated={(updated) => {
+          setProject(updated);
+        }}
+        onSlotsUpdated={loadBoundSlots}
+      />
+
       {/* Unsaved Changes Page Switch Warning */}
       {showUnsavedPrompt && (
         <div
@@ -1441,6 +2125,21 @@ export const WebsiteEditor: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+      {/* Business Profile Questionnaire Modal */}
+      {project && (
+        <BusinessQuestionnaireModal
+          isOpen={isQuestionnaireOpen}
+          projectId={project.id}
+          projectName={project.name}
+          onClose={() => setIsQuestionnaireOpen(false)}
+          onComplete={(audit, count) => {
+            setAiNoticeMessage(
+              `Business website draft generated (${count} pages). Factual completeness score: ${audit.completeness_score}%.`
+            );
+            loadProjectAndPages();
+          }}
+        />
       )}
     </div>
   );

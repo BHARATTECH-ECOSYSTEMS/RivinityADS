@@ -9,6 +9,7 @@ This module provides:
 """
 
 from liteads.ml_engine.data import AdDataModule, AdDataset
+from liteads.ml_engine.evaluation import EvaluationReport, evaluate_predictions
 from liteads.ml_engine.features import FeatureBuilder, FeatureConfig, FeaturePipeline
 from liteads.ml_engine.models import DeepFM
 from liteads.ml_engine.serving import ModelPredictor, PredictionResult
@@ -30,4 +31,7 @@ __all__ = [
     # Serving
     "ModelPredictor",
     "PredictionResult",
+    # Evaluation
+    "EvaluationReport",
+    "evaluate_predictions",
 ]

@@ -1,9 +1,12 @@
 """Website builder management endpoints under /api/v1/website."""
 
+import base64
+import copy
 from datetime import datetime, timezone
+import secrets
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -12,21 +15,50 @@ from sqlalchemy.orm import selectinload
 
 from liteads.ad_server.routers.website_public import create_preview_token
 from liteads.ad_server.services.website_cache import website_cache
+from liteads.ad_server.services.rate_limit_service import RateLimitService
+from liteads.ad_server.services.website_ai_service import (
+    WebsiteAIService,
+    WebsiteAIConfigError,
+    WebsiteAIUnavailableError,
+    WebsiteAIMalformedResponseError,
+    WebsiteAISecurityError,
+)
+from liteads.ad_server.services.website_storage import (
+    website_storage,
+    InvalidFileTypeError,
+    PathTraversalError,
+    StorageFileNotFoundError,
+    StorageQuotaExceededError,
+    SymlinkEscapeError,
+)
 from liteads.common.config import get_settings
 from liteads.common.database import get_session
+from liteads.common.logger import get_logger
 from liteads.common.security import current_user, require_roles, verified_user
 from liteads.ad_server.services.monetization_eligibility import evaluate_monetization_eligibility
 from liteads.models.auth import User
 from liteads.models.base import Status
 from liteads.models.publisher import AdSlot, Publisher, PublisherProperty
 from liteads.models.website import (
+    CustomDomainStatus,
     WebsiteConsentLog,
     WebsiteMonetizationStatus,
     WebsitePage,
     WebsiteProject,
     WebsiteStatus,
+    WebsiteTemplate,
     WebsiteVersion,
 )
+from liteads.schemas.business_profile import (
+    BusinessProfileAudit,
+    BusinessProfileIntake,
+    CustomDomainConfigureRequest,
+    CustomDomainStatusResponse,
+    GeoReadinessReport,
+    WebmasterToolsConfig,
+)
+from liteads.ad_server.services.business_profile_service import business_profile_service
+from liteads.ad_server.services.domain_verification import verify_dns_txt
 from liteads.schemas.website import (
     BoundSlotResponse,
     MonetizationConsentRequest,
@@ -44,10 +76,20 @@ from liteads.schemas.website import (
     PublishRequest,
     RollbackRequest,
     SlugCheckResponse,
+    StorageFileUploadRequest,
+    StorageUsageResponse,
+    StoredFileResponse,
     VersionSummaryResponse,
+    WebsiteAIGenerateSectionRequest,
+    WebsiteAIGenerateSectionResponse,
+    WebsiteTemplateDetailResponse,
+    WebsiteTemplateSummaryResponse,
     RESERVED_SLUGS,
     SLUG_PATTERN,
 )
+from liteads.ad_server.services.website_templates_catalog import seed_website_templates_if_empty
+
+logger = get_logger(__name__)
 
 router = APIRouter(
     tags=["website"],
@@ -87,6 +129,7 @@ async def _get_project_with_access(
 # ── Project Endpoints ──────────────────────────────────────────────────────
 
 @router.get("/slug/check", response_model=SlugCheckResponse)
+@router.get("/check-slug", response_model=SlugCheckResponse)
 async def check_slug_availability(
     slug: Annotated[str, Query(min_length=1, max_length=63)],
     session: AsyncSession = Depends(get_session),
@@ -120,13 +163,60 @@ async def check_slug_availability(
     return SlugCheckResponse(slug=clean_slug, available=True, reason=None)
 
 
+# ── Template Catalog Endpoints (Phase 2) ───────────────────────────────────
+
+@router.get("/templates", response_model=list[WebsiteTemplateSummaryResponse])
+async def list_templates(
+    category: str | None = Query(default=None, description="Filter by category"),
+    search: str | None = Query(default=None, description="Search by name or description"),
+    session: AsyncSession = Depends(get_session),
+) -> list[WebsiteTemplateSummaryResponse]:
+    """List active website templates available for website creation."""
+    await seed_website_templates_if_empty(session)
+
+    stmt = select(WebsiteTemplate).where(WebsiteTemplate.is_active.is_(True))
+    if category and category.strip() and category.strip().lower() != "all":
+        stmt = stmt.where(func.lower(WebsiteTemplate.category) == category.strip().lower())
+    if search and search.strip():
+        term = f"%{search.strip().lower()}%"
+        stmt = stmt.where(
+            func.lower(WebsiteTemplate.name).ilike(term)
+            | func.lower(WebsiteTemplate.description).ilike(term)
+        )
+    stmt = stmt.order_by(WebsiteTemplate.order_index, WebsiteTemplate.id)
+    res = await session.execute(stmt)
+    return list(res.scalars().all())
+
+
+@router.get("/templates/{template_id}", response_model=WebsiteTemplateDetailResponse)
+async def get_template(
+    template_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> WebsiteTemplateDetailResponse:
+    """Retrieve full details of an active website template."""
+    await seed_website_templates_if_empty(session)
+
+    stmt = select(WebsiteTemplate).where(
+        WebsiteTemplate.id == template_id.strip(),
+        WebsiteTemplate.is_active.is_(True),
+    )
+    res = await session.execute(stmt)
+    tmpl = res.scalar_one_or_none()
+    if tmpl is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Website template '{template_id}' not found.",
+        )
+    return tmpl
+
+
 @router.post("/projects", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 async def create_project(
     payload: ProjectCreate,
     user: User = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> ProjectResponse:
-    """Create a new website project and initialize a default Home page."""
+    """Create a new website project and initialize default pages from the chosen template."""
     # 1. Authoritative check for slug uniqueness
     stmt = select(WebsiteProject.id).where(
         WebsiteProject.slug == payload.slug, WebsiteProject.is_deleted.is_(False)
@@ -138,39 +228,90 @@ async def create_project(
             detail=f"Subdomain slug '{payload.slug}' is already taken.",
         )
 
-    # 2. Create project
+    # 2. Validate template_id from catalog (idempotent seeding if empty)
+    await seed_website_templates_if_empty(session)
+    stmt_tmpl = select(WebsiteTemplate).where(
+        WebsiteTemplate.id == payload.template_id,
+        WebsiteTemplate.is_active.is_(True),
+    )
+    res_tmpl = await session.execute(stmt_tmpl)
+    template = res_tmpl.scalar_one_or_none()
+    if template is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid or inactive template_id '{payload.template_id}'. Please select a valid template from the catalog.",
+        )
+
+    # 3. Apply theme config (merging template defaults with any user-provided overrides)
+    theme_data = dict(template.default_theme_config)
+    payload_theme = payload.theme_config.model_dump()
+    for k, v in payload_theme.items():
+        if v:
+            theme_data[k] = v
+
     project = WebsiteProject(
         owner_user_id=user.id,
         name=payload.name,
         slug=payload.slug,
-        template_id=payload.template_id,
-        theme_config=payload.theme_config.model_dump(),
+        template_id=template.id,
+        theme_config=theme_data,
         status=WebsiteStatus.DRAFT,
     )
     session.add(project)
     await session.flush()
 
-    # 3. Initialize default Home page with a welcoming hero section
-    default_hero_block = {
-        "id": "blk_hero_init",
-        "type": "hero",
-        "is_visible": True,
-        "content": {
-            "headline": f"Welcome to {payload.name}",
-            "subheadline": "We provide exceptional services to our valued clients.",
-            "alignment": "center",
-        },
-    }
-    home_page = WebsitePage(
-        project_id=project.id,
-        title="Home",
-        slug="",
-        is_home=True,
-        order_index=0,
-        seo_meta={"meta_title": payload.name, "meta_description": f"Welcome to {payload.name}"},
-        blocks={"schema_version": 1, "blocks": [default_hero_block]},
-    )
-    session.add(home_page)
+    # 4. Deep-copy default pages and blocks from template
+    default_pages = template.default_pages or []
+    if not default_pages:
+        # Fallback default home page
+        default_hero_block = {
+            "id": "blk_hero_init",
+            "type": "hero",
+            "is_visible": True,
+            "content": {
+                "headline": f"Welcome to {payload.name}",
+                "subheadline": "We provide exceptional services to our valued clients.",
+                "alignment": "center",
+            },
+        }
+        home_page = WebsitePage(
+            project_id=project.id,
+            title="Home",
+            slug="",
+            is_home=True,
+            order_index=0,
+            seo_meta={"meta_title": payload.name, "meta_description": f"Welcome to {payload.name}"},
+            blocks={"schema_version": 2, "blocks": [default_hero_block]},
+        )
+        session.add(home_page)
+    else:
+        for idx, page_def in enumerate(default_pages):
+            p_is_home = page_def.get("is_home", idx == 0)
+            p_slug = "" if p_is_home else page_def.get("slug", f"page-{idx}")
+            p_title = page_def.get("title", "Home" if p_is_home else f"Page {idx}")
+            p_blocks = copy.deepcopy(page_def.get("blocks", {"schema_version": 2, "blocks": []}))
+            if template.id == "business_services" and p_is_home:
+                for block in p_blocks.get("blocks", []):
+                    if block.get("type") == "hero":
+                        block.setdefault("content", {})["headline"] = f"Welcome to {payload.name}"
+                        break
+            p_seo = copy.deepcopy(page_def.get("seo_meta", {}))
+            if not p_seo.get("meta_title"):
+                p_seo["meta_title"] = payload.name
+            if not p_seo.get("meta_description"):
+                p_seo["meta_description"] = f"Welcome to {payload.name}"
+
+            page = WebsitePage(
+                project_id=project.id,
+                title=p_title,
+                slug=p_slug,
+                is_home=p_is_home,
+                order_index=page_def.get("order_index", idx),
+                seo_meta=p_seo,
+                blocks=p_blocks,
+            )
+            session.add(page)
+
     try:
         await session.commit()
     except IntegrityError:
@@ -199,14 +340,15 @@ async def create_project(
         updated_at=project.updated_at,
         pages=[
             PageSummaryResponse(
-                id=home_page.id,
-                project_id=home_page.project_id,
-                title=home_page.title,
-                slug=home_page.slug,
-                is_home=home_page.is_home,
-                order_index=home_page.order_index,
-                updated_at=home_page.updated_at,
+                id=p.id,
+                project_id=p.project_id,
+                title=p.title,
+                slug=p.slug,
+                is_home=p.is_home,
+                order_index=p.order_index,
+                updated_at=p.updated_at,
             )
+            for p in sorted(project.pages, key=lambda x: x.order_index)
         ],
     )
 
@@ -289,6 +431,7 @@ async def get_project(
 
 
 @router.patch("/projects/{id}", response_model=ProjectResponse)
+@router.put("/projects/{id}", response_model=ProjectResponse)
 async def update_project(
     id: int,
     payload: ProjectUpdate,
@@ -505,6 +648,7 @@ async def update_page(
 
 
 @router.patch("/projects/{id}/pages/reorder", response_model=list[PageSummaryResponse])
+@router.post("/projects/{id}/pages/reorder", response_model=list[PageSummaryResponse])
 async def reorder_pages(
     id: int,
     payload: PageReorderRequest,
@@ -614,50 +758,96 @@ async def publish_project(
             detail="Cannot publish a website project without a home page (is_home=True or slug='').",
         )
 
-    # Phase 10E: Validate all ad placement blocks and bound ad slots
+    # Phase 5.1A: Authoritative fail-closed validation of all ad placement blocks and bound ad slots
     bound_slots_meta: list[dict[str, Any]] = []
-    slot_ids_in_pages: set[str] = set()
+    ad_placements_found: list[dict[str, Any]] = []
     for page in project.pages:
         raw_b = page.blocks or {}
         if isinstance(raw_b, dict):
             for blk in raw_b.get("blocks", []):
                 if isinstance(blk, dict) and blk.get("type") == "ad_placement":
-                    sid = (blk.get("content") or {}).get("ad_slot_id")
-                    if sid:
-                        slot_ids_in_pages.add(str(sid).strip())
+                    ad_placements_found.append(blk)
 
-    if slot_ids_in_pages:
-        for sid in sorted(slot_ids_in_pages):
-            s_stmt = select(AdSlot).where(AdSlot.slot_id == sid)
-            s_res = await session.execute(s_stmt)
-            slot_obj = s_res.scalar_one_or_none()
-            if slot_obj is not None:
+    if ad_placements_found:
+        has_bound_slots = any(
+            bool((blk.get("content") or {}).get("ad_slot_id"))
+            for blk in ad_placements_found
+        )
+        if has_bound_slots or project.monetization_status == WebsiteMonetizationStatus.ACTIVE_MONETIZED:
+            if not project.publisher_id or not project.property_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot publish a website with ad placement blocks: project must be linked to a publisher and property first.",
+                )
+
+            # Property must exist, be active, and be verified
+            prop_stmt = select(PublisherProperty).where(PublisherProperty.id == project.property_id)
+            prop_res = await session.execute(prop_stmt)
+            prop = prop_res.scalar_one_or_none()
+            if prop is None or prop.status != Status.ACTIVE or prop.verification_status != "VERIFIED":
+                ver_status = prop.verification_status if prop else "NONE"
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Publisher property for this website is not active or verified (verification status: {ver_status}).",
+                )
+
+        validated_slots: dict[str, AdSlot] = {}
+        for blk in ad_placements_found:
+            content = blk.get("content") or {}
+            sid = content.get("ad_slot_id")
+            if not sid:
+                continue
+            sid_str = str(sid).strip()
+            if not sid_str:
+                continue
+
+            if sid_str not in validated_slots:
+                s_stmt = select(AdSlot).where(AdSlot.slot_id == sid_str)
+                s_res = await session.execute(s_stmt)
+                slot_obj = s_res.scalar_one_or_none()
+
+                if slot_obj is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"AdSlot '{sid_str}' does not exist.",
+                    )
                 if not project.publisher_id or not project.property_id:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="Cannot publish a website with ad placement blocks: project must be linked to a publisher and property first.",
                     )
+                if slot_obj.property_id is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"AdSlot '{sid_str}' is not associated with any publisher property.",
+                    )
                 if slot_obj.publisher_id != project.publisher_id or slot_obj.property_id != project.property_id:
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
-                        detail=f"AdSlot '{sid}' does not belong to this website's publisher property.",
+                        detail=f"AdSlot '{sid_str}' does not belong to this website's publisher property.",
                     )
                 if slot_obj.status != Status.ACTIVE:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"AdSlot '{sid}' is not active.",
+                        detail=f"AdSlot '{sid_str}' is not active.",
                     )
+
+                validated_slots[sid_str] = slot_obj
                 bound_slots_meta.append({
                     "id": slot_obj.id,
                     "slot_id": slot_obj.slot_id,
                     "name": slot_obj.name,
                     "format": slot_obj.format,
                 })
-        if project.monetization_status == WebsiteMonetizationStatus.ACTIVE_MONETIZED:
-            if not project.publisher_id or not project.property_id:
+            else:
+                slot_obj = validated_slots[sid_str]
+
+            # Format check: placement format must match authoritative slot format
+            placement_format = content.get("format")
+            if placement_format is not None and int(placement_format) != int(slot_obj.format):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Cannot publish a website with ad placement blocks: project must be linked to a publisher and property first.",
+                    detail=f"Format mismatch for AdSlot '{sid_str}': placement requires format {placement_format}, but slot is configured as format {slot_obj.format}.",
                 )
 
     # Calculate next version number atomically
@@ -679,6 +869,10 @@ async def publish_project(
             "publisher_id": project.publisher_id,
             "property_id": project.property_id,
             "monetization_status": project.monetization_status,
+            "business_profile": project.business_profile,
+            "webmaster_tools": project.webmaster_tools,
+            "primary_language": project.primary_language,
+            "custom_domain": project.custom_domain,
         },
         "pages": [
             {
@@ -689,6 +883,8 @@ async def publish_project(
                 "order_index": page.order_index,
                 "seo_meta": page.seo_meta,
                 "blocks": page.blocks,
+                "language": getattr(page, "language", "en"),
+                "translation_group_id": getattr(page, "translation_group_id", None),
             }
             for page in project.pages
         ],
@@ -1198,6 +1394,16 @@ async def disable_monetization(
     project = await _get_project_with_access(id, user, session, for_update=True)
 
     project.monetization_status = WebsiteMonetizationStatus.DISABLED
+    project.monetization_consent = None
+
+    # Clean out any ad_placement blocks from project draft pages (Task J: informed consent)
+    for page in project.pages:
+        blocks_data = page.blocks or {}
+        if isinstance(blocks_data, dict):
+            raw_blocks = blocks_data.get("blocks", [])
+            filtered = [b for b in raw_blocks if b.get("type") != "ad_placement"]
+            blocks_data["blocks"] = filtered
+            page.blocks = blocks_data
 
     log = WebsiteConsentLog(
         project_id=project.id,
@@ -1223,4 +1429,560 @@ async def disable_monetization(
         slot_count=eligibility.slot_count,
         consent=project.monetization_consent,
     )
+
+
+# ── Tenant-Scoped Storage Endpoints ────────────────────────────────────────
+
+@router.post(
+    "/projects/{id}/storage/files",
+    response_model=StoredFileResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_project_file(
+    id: int,
+    payload: StorageFileUploadRequest,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> StoredFileResponse:
+    """Upload a file to the tenant's isolated website storage directory."""
+    project = await _get_project_with_access(id, user, session)
+
+    if payload.content_base64:
+        try:
+            content_bytes = base64.b64decode(payload.content_base64)
+        except Exception:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid base64 payload")
+    elif payload.content_text is not None:
+        content_bytes = payload.content_text.encode("utf-8")
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Either content_base64 or content_text must be provided",
+        )
+
+    try:
+        meta = website_storage.save_file(
+            owner_user_id=project.owner_user_id,
+            project_id=project.id,
+            relative_path=payload.relative_path,
+            content=content_bytes,
+        )
+    except PathTraversalError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except SymlinkEscapeError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except InvalidFileTypeError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except StorageQuotaExceededError as e:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(e))
+
+    return StoredFileResponse(**meta)
+
+
+@router.get(
+    "/projects/{id}/storage/files",
+    response_model=list[StoredFileResponse],
+)
+async def list_project_files(
+    id: int,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[StoredFileResponse]:
+    """List all stored assets belonging strictly to this project."""
+    project = await _get_project_with_access(id, user, session)
+    files = website_storage.list_files(project.owner_user_id, project.id)
+    return [StoredFileResponse(**f) for f in files]
+
+
+@router.get(
+    "/projects/{id}/storage/files/{file_path:path}",
+)
+async def get_project_file(
+    id: int,
+    file_path: str,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Retrieve a stored asset from the tenant's isolated directory."""
+    project = await _get_project_with_access(id, user, session)
+    try:
+        content_bytes, media_type = website_storage.read_file(
+            project.owner_user_id, project.id, file_path
+        )
+    except StorageFileNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    except PathTraversalError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except SymlinkEscapeError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except InvalidFileTypeError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    return Response(content=content_bytes, media_type=media_type)
+
+
+@router.delete(
+    "/projects/{id}/storage/files/{file_path:path}",
+)
+async def delete_project_file(
+    id: int,
+    file_path: str,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, str]:
+    """Delete a stored asset from the project directory."""
+    project = await _get_project_with_access(id, user, session)
+    try:
+        deleted = website_storage.delete_file(project.owner_user_id, project.id, file_path)
+    except PathTraversalError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except SymlinkEscapeError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except InvalidFileTypeError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    return {"message": "File deleted successfully"}
+
+
+@router.get(
+    "/projects/{id}/storage/usage",
+    response_model=StorageUsageResponse,
+)
+async def get_project_storage_usage(
+    id: int,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> StorageUsageResponse:
+    """Retrieve storage quota and byte usage for the website project."""
+    project = await _get_project_with_access(id, user, session)
+    usage = website_storage.get_project_usage(project.owner_user_id, project.id)
+    return StorageUsageResponse(**usage)
+
+
+# ── AI Generation Proxy ──────────────────────────────────────────────────────
+
+@router.post(
+    "/projects/{id}/ai/generate-section",
+    response_model=WebsiteAIGenerateSectionResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def generate_ai_section(
+    id: int,
+    payload: WebsiteAIGenerateSectionRequest,
+    response: Response,
+    user: User = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> WebsiteAIGenerateSectionResponse:
+    """Generate an Open Design website section using the server-side AI provider proxy.
+
+    Execution and Authorization Order:
+    1. Authenticate user via JWT session dependency (verified_user + require_roles).
+    2. Authorize project access via _get_project_with_access(id, user, session).
+       Returns 404 for unauthorized or non-owned projects to prevent ID enumeration.
+       CRITICAL: Unauthorized attempts terminate immediately with 0 quota consumption
+       and 0 AI provider requests.
+    3. Assert project is in valid editable state (not archived or suspended).
+    4. Retrieve authoritative project theme_config (brand colors, fonts, radius) server-side.
+    5. Check and reserve publisher AI quota using the authenticated user.id.
+       Enforces burst limit (5 req/min) followed by daily quota (50 req/day, resets 00:00 UTC).
+       Note on partial reservation: burst admission records an entry in the rolling window
+       even if daily quota subsequently rejects the request.
+    6. Call WebsiteAIService.generate_section with craft prompt compilation and Schema v2 sanitization.
+    7. Return the validated BlockItem in memory without database persistence or live billing calls.
+    """
+    # Step 1, 2: Verify tenant ownership / access
+    project = await _get_project_with_access(id, user, session)
+
+    # Step 3: Project lifecycle checks
+    if project.status == WebsiteStatus.SUSPENDED:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot generate content for a suspended website project. Please contact support.",
+        )
+    if project.status == WebsiteStatus.ARCHIVED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot generate content for an archived website project.",
+        )
+
+    # Step 4: Authoritative theme config
+    theme_config = project.theme_config or {}
+
+    # Step 5: Quota & Rate Limit Reservation using authenticated user.id
+    reservation = await RateLimitService.reserve_publisher_ai_quota(user_id=user.id)
+    if not reservation.allowed:
+        if reservation.reason == "burst_limit_exceeded" and reservation.burst:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="AI generation burst limit exceeded. Maximum 5 requests per minute allowed.",
+                headers={
+                    "Retry-After": str(reservation.burst.retry_after_seconds),
+                    "X-RateLimit-Limit": str(reservation.burst.limit),
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": str(reservation.burst.retry_after_seconds),
+                },
+            )
+        elif reservation.reason == "daily_quota_exceeded" and reservation.quota:
+            burst_limit = reservation.burst.limit if reservation.burst else 5
+            burst_rem = reservation.burst.remaining if reservation.burst else 0
+            burst_reset = reservation.burst.retry_after_seconds if reservation.burst else 60
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Daily AI generation quota exceeded. Limit is 50 requests per day (resets at 00:00 UTC).",
+                headers={
+                    "Retry-After": str(reservation.quota.reset_seconds),
+                    "X-RateLimit-Limit": str(burst_limit),
+                    "X-RateLimit-Remaining": str(burst_rem),
+                    "X-RateLimit-Reset": str(burst_reset),
+                    "X-Quota-Limit": str(reservation.quota.limit),
+                    "X-Quota-Remaining": "0",
+                    "X-Quota-Reset": reservation.quota.reset_timestamp_utc,
+                },
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="AI generation quota or rate limit exceeded.",
+            )
+
+    # Attach rate limit & quota headers to successful response
+    if reservation.burst:
+        response.headers["X-RateLimit-Limit"] = str(reservation.burst.limit)
+        response.headers["X-RateLimit-Remaining"] = str(reservation.burst.remaining)
+        response.headers["X-RateLimit-Reset"] = str(reservation.burst.retry_after_seconds)
+    if reservation.quota:
+        response.headers["X-Quota-Limit"] = str(reservation.quota.limit)
+        response.headers["X-Quota-Remaining"] = str(reservation.quota.remaining)
+        response.headers["X-Quota-Reset"] = str(reservation.quota.reset_timestamp_utc)
+
+    # Step 6: Dispatch AI Generation with Craft Prompts & Schema v2 Sanitization
+    ai_service = WebsiteAIService()
+    try:
+        gen_result = await ai_service.generate_section(
+            prompt=payload.prompt,
+            section_type=payload.section_type,
+            theme_config=theme_config,
+            context={"project_id": project.id, "project_name": project.name},
+        )
+    except WebsiteAIConfigError as exc:
+        logger.error("website_ai_config_error", project_id=project.id, user_id=user.id, error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI generation service is not properly configured.",
+        ) from exc
+    except WebsiteAIUnavailableError as exc:
+        logger.warning("website_ai_unavailable", project_id=project.id, user_id=user.id, error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI generation service temporarily unavailable. Please try again.",
+        ) from exc
+    except (WebsiteAIMalformedResponseError, WebsiteAISecurityError) as exc:
+        logger.warning("website_ai_output_rejected", project_id=project.id, user_id=user.id, error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="AI provider generated invalid or unsafe section content. Please try again with different instructions.",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    # Step 7: Return in-memory generation result without database persistence
+    return WebsiteAIGenerateSectionResponse(
+        block=gen_result.block,
+        section_id=gen_result.section_id,
+        section_type=gen_result.section_type,
+        quota_remaining=reservation.quota.remaining if reservation.quota else 0,
+        daily_limit=reservation.quota.limit if reservation.quota else 50,
+        reset_timestamp_utc=reservation.quota.reset_timestamp_utc if reservation.quota else "",
+    )
+
+
+# ── Phase 6: Business Profile Questionnaire, Custom Domain, & Audits ──
+
+@router.post(
+    "/projects/{project_id}/business-intake",
+    status_code=status.HTTP_200_OK,
+    summary="Submit guided business questionnaire, audit claims, and generate draft site",
+)
+async def submit_business_intake(
+    project_id: int,
+    payload: BusinessProfileIntake,
+    generate_draft: bool = Query(default=True, description="Generate complete editable draft pages from verified facts"),
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """
+    Intake business profile facts (NAP, hours, offerings, etc.).
+    Runs completeness audit and anti-fabrication check.
+    Generates editable draft website (Home, About, Services, Contact, etc.) with 0 default ads.
+    """
+    project = await _get_project_with_access(project_id, user, session)
+    audit = business_profile_service.audit_business_profile(payload)
+
+    if generate_draft:
+        pages = await business_profile_service.generate_draft_website_from_intake(project, payload, session)
+        page_count = len(pages)
+    else:
+        project.business_profile = payload.model_dump()
+        project.primary_language = payload.languages[0] if payload.languages else "en"
+        await session.commit()
+        await session.refresh(project)
+        page_count = len(project.pages)
+
+    return {
+        "project_id": project.id,
+        "audit": audit.model_dump(),
+        "page_count": page_count,
+        "message": "Business profile intake recorded and draft pages generated successfully.",
+    }
+
+
+@router.get(
+    "/projects/{project_id}/business-profile",
+    summary="Retrieve current business profile and audit report",
+)
+async def get_business_profile(
+    project_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    project = await _get_project_with_access(project_id, user, session)
+    bp = project.business_profile
+    audit = None
+    if bp:
+        audit = business_profile_service.audit_business_profile(BusinessProfileIntake(**bp)).model_dump()
+
+    return {
+        "project_id": project.id,
+        "business_profile": bp,
+        "audit": audit,
+    }
+
+
+@router.get(
+    "/projects/{project_id}/accessibility-audit",
+    summary="Run accessibility and Core Web Vitals readiness audit",
+)
+async def get_accessibility_audit(
+    project_id: int,
+    page_id: int | None = Query(default=None, description="Optional page ID to audit single page"),
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    project = await _get_project_with_access(project_id, user, session)
+    pages = project.pages
+
+    if page_id:
+        pages = [p for p in pages if p.id == page_id]
+        if not pages:
+            raise HTTPException(status_code=404, detail="Page not found in this project.")
+
+    audits = []
+    total_score = 0
+    all_recommendations = set()
+
+    for p in pages:
+        p_audit = business_profile_service.audit_page_accessibility(p, project.theme_config)
+        audits.append({
+            "page_id": p.id,
+            "page_title": p.title,
+            "slug": p.slug,
+            "report": p_audit.model_dump(),
+        })
+        total_score += p_audit.score
+        all_recommendations.update(p_audit.recommendations)
+
+    overall_score = round(total_score / len(pages)) if pages else 100
+
+    return {
+        "project_id": project.id,
+        "overall_score": overall_score,
+        "page_count": len(pages),
+        "pages": audits,
+        "consolidated_recommendations": sorted(list(all_recommendations)),
+    }
+
+
+@router.get(
+    "/projects/{project_id}/geo-readiness",
+    response_model=GeoReadinessReport,
+    summary="Evaluate factual entity data and GEO / AI Search readiness",
+)
+async def get_geo_readiness(
+    project_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> GeoReadinessReport:
+    project = await _get_project_with_access(project_id, user, session)
+    return business_profile_service.evaluate_geo_readiness(project)
+
+
+@router.post(
+    "/projects/{project_id}/custom-domain",
+    response_model=CustomDomainStatusResponse,
+    summary="Configure custom domain and issue cryptographic DNS verification challenge",
+)
+async def configure_custom_domain(
+    project_id: int,
+    payload: CustomDomainConfigureRequest,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> CustomDomainStatusResponse:
+    project = await _get_project_with_access(project_id, user, session)
+    settings = get_settings()
+
+    domain = payload.custom_domain.lower()
+    platform_domain = settings.website.platform_domain.lower()
+
+    if domain == platform_domain or domain.endswith(f".{platform_domain}"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Domain cannot be a subdomain of the platform root ({platform_domain}). Use project slug for platform subdomains.",
+        )
+
+    # Check uniqueness across projects
+    dup_stmt = select(WebsiteProject).where(
+        WebsiteProject.custom_domain == domain,
+        WebsiteProject.id != project.id,
+        WebsiteProject.is_deleted == False,
+    )
+    dup_res = await session.execute(dup_stmt)
+    if dup_res.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Custom domain '{domain}' is already registered to another website project.",
+        )
+
+    # Generate cryptographic challenge token
+    challenge_token = secrets.token_urlsafe(24)
+    project.custom_domain = domain
+    project.custom_domain_token = challenge_token
+    project.custom_domain_status = CustomDomainStatus.PENDING_VERIFICATION
+    project.custom_domain_verified_at = None
+
+    await session.commit()
+    await session.refresh(project)
+
+    dns_record_name = f"_rivinity-challenge.{domain}"
+    expected_txt = f"rivinity-verify={challenge_token}"
+
+    return CustomDomainStatusResponse(
+        project_id=project.id,
+        custom_domain=domain,
+        status=CustomDomainStatus.PENDING_VERIFICATION,
+        status_label="pending_verification",
+        verification_token=challenge_token,
+        dns_record_name=dns_record_name,
+        expected_txt_value=expected_txt,
+        verified_at=None,
+        instructions=f"Add a DNS TXT record for '{dns_record_name}' with value '{expected_txt}', then call verify.",
+    )
+
+
+@router.post(
+    "/projects/{project_id}/custom-domain/verify",
+    response_model=CustomDomainStatusResponse,
+    summary="Verify custom domain ownership via DNS TXT lookup",
+)
+async def verify_custom_domain(
+    project_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> CustomDomainStatusResponse:
+    project = await _get_project_with_access(project_id, user, session)
+    if not project.custom_domain or not project.custom_domain_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No custom domain configured on this project.",
+        )
+
+    domain = project.custom_domain
+    token = project.custom_domain_token
+    expected_txt = f"rivinity-verify={token}"
+    dns_record_name = f"_rivinity-challenge.{domain}"
+
+    # Perform DNS verification
+    verified, error_msg = await verify_dns_txt(domain, expected_txt)
+
+    if verified:
+        project.custom_domain_status = CustomDomainStatus.VERIFIED
+        project.custom_domain_verified_at = datetime.now(timezone.utc)
+        await session.commit()
+        await session.refresh(project)
+
+        return CustomDomainStatusResponse(
+            project_id=project.id,
+            custom_domain=domain,
+            status=CustomDomainStatus.VERIFIED,
+            status_label="verified",
+            verification_token=token,
+            dns_record_name=dns_record_name,
+            expected_txt_value=expected_txt,
+            verified_at=project.custom_domain_verified_at,
+            instructions="Domain ownership verified successfully. Traffic to this domain will now serve your website.",
+        )
+    else:
+        project.custom_domain_status = CustomDomainStatus.FAILED
+        await session.commit()
+        await session.refresh(project)
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Domain verification failed: {error_msg or 'DNS TXT challenge record not found'}. Expected '{expected_txt}' at '{dns_record_name}'.",
+        )
+
+
+@router.delete(
+    "/projects/{project_id}/custom-domain",
+    summary="Remove custom domain binding",
+)
+async def remove_custom_domain(
+    project_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    project = await _get_project_with_access(project_id, user, session)
+    project.custom_domain = None
+    project.custom_domain_token = None
+    project.custom_domain_status = CustomDomainStatus.UNCONFIGURED
+    project.custom_domain_verified_at = None
+    await session.commit()
+    return {"success": True, "message": "Custom domain removed successfully."}
+
+
+@router.get(
+    "/projects/{project_id}/webmaster-tools",
+    response_model=WebmasterToolsConfig,
+    summary="Get webmaster tools verification settings",
+)
+async def get_webmaster_tools(
+    project_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> WebmasterToolsConfig:
+    project = await _get_project_with_access(project_id, user, session)
+    return WebmasterToolsConfig(**(project.webmaster_tools or {}))
+
+
+@router.put(
+    "/projects/{project_id}/webmaster-tools",
+    response_model=WebmasterToolsConfig,
+    summary="Update owner-authorized webmaster verification tokens (Google, Bing, IndexNow)",
+)
+async def update_webmaster_tools(
+    project_id: int,
+    payload: WebmasterToolsConfig,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> WebmasterToolsConfig:
+    project = await _get_project_with_access(project_id, user, session)
+    project.webmaster_tools = payload.model_dump(exclude_none=True)
+    await session.commit()
+    await session.refresh(project)
+    return WebmasterToolsConfig(**(project.webmaster_tools or {}))
+
 

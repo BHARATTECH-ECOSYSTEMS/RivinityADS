@@ -10,7 +10,7 @@ Includes:
 import hashlib
 import html as html_lib
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse
@@ -120,6 +120,73 @@ def _classify_text(text: str) -> tuple[list[str], dict[str, float]]:
     return list(scores.keys()), scores
 
 
+def _extract_and_normalize_host(url_or_origin: str | None) -> str | None:
+    """Extract and normalize hostname from Origin or Referer header."""
+    if not url_or_origin or not isinstance(url_or_origin, str):
+        return None
+    clean = url_or_origin.strip().lower()
+    if not clean:
+        return None
+
+    # Handle userinfo if present
+    if "@" in clean:
+        clean = clean.split("@")[-1]
+
+    # Parse using urllib.parse
+    try:
+        if "://" in clean:
+            parsed = urlparse(clean)
+            host = parsed.hostname or parsed.netloc
+        else:
+            parsed = urlparse(f"https://{clean}")
+            host = parsed.hostname or parsed.netloc
+    except Exception:
+        host = clean.split("://", 1)[-1]
+
+    if not host:
+        return None
+
+    # Strip port if present
+    if host.startswith("[") and "]" in host:
+        bracket_end = host.find("]")
+        host = host[1:bracket_end]
+    elif ":" in host:
+        host = host.split(":", 1)[0]
+
+    for sep in ("/", "?", "#"):
+        if sep in host:
+            host = host.split(sep, 1)[0]
+
+    host = host.strip().rstrip(".")
+    if not host:
+        return None
+
+    # IDN punycode normalization
+    try:
+        host = host.encode("idna").decode("ascii")
+    except Exception:
+        pass
+
+    return host
+
+
+def _is_domain_match(request_host: str, authorized_domain: str) -> bool:
+    """Check if request_host matches authorized_domain via exact normalized hostname match.
+
+    Enforces:
+    - Exact normalized hostname matching (e.g. example.com == example.com).
+    - example.com authorizes ONLY example.com.
+    - www.example.com authorizes ONLY www.example.com.
+    - No implicit bidirectional www alias authorization.
+    - Subdomains, attacker hosts, and aliases require separate registration and verification.
+    """
+    norm_req = _extract_and_normalize_host(request_host)
+    norm_auth = _extract_and_normalize_host(authorized_domain)
+    if not norm_req or not norm_auth:
+        return False
+    return norm_req == norm_auth
+
+
 def get_ad_service(session: AsyncSession = Depends(get_session)) -> AdService:
     """Dependency to get ad service."""
     return AdService(session)
@@ -160,6 +227,19 @@ async def request_ads(
     """
     request_id = generate_request_id()
     settings = get_settings()
+
+    # Identify sandbox mode for publisher keys
+    is_sandbox = False
+    if caller.is_authenticated and caller.auth_type == "api_key" and caller.api_key:
+        db_key = caller.api_key
+        is_sandbox = bool(
+            db_key.get("is_sandbox", False)
+            if isinstance(db_key, dict)
+            else getattr(db_key, "is_sandbox", False)
+        )
+    if is_sandbox:
+        request_id = f"test_{request_id}"
+    setattr(ad_request, "is_sandbox", is_sandbox)
 
     publisher_id = caller.publisher_id
 
@@ -277,35 +357,132 @@ async def request_ads(
     if ad_request.geo and not ad_request.geo.ip:
         ad_request.geo.ip = client_ip
 
-    # Slot authorization and restrictions
+    # Phase 5.1B: Slot authorization, verified property enforcement, and domain matching
     from sqlalchemy import select
+    from liteads.models.publisher import Publisher, PublisherProperty
+
     slot_res = await session.execute(select(AdSlot).where(AdSlot.slot_id == ad_request.slot_id))
     slot = slot_res.scalar_one_or_none()
 
-    if slot:
-        if slot.status != Status.ACTIVE:
-            raise HTTPException(status_code=400, detail="Ad slot is not active")
-        if slot.property_id:
-            from liteads.models.publisher import PublisherProperty
-            prop_res = await session.execute(
-                select(PublisherProperty).where(PublisherProperty.id == slot.property_id)
+    if slot is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ad slot not found")
+
+    if slot.status != Status.ACTIVE:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ad slot is not active")
+
+    # Slot publisher ownership authorization (must precede property checks to ensure cross-publisher
+    # access attempts receive HTTP 403 Forbidden consistently)
+    if caller.is_authenticated:
+        if publisher_id is not None and slot.publisher_id != publisher_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for this slot")
+    else:
+        # Anonymous callers are prohibited from private / chat surface slots
+        if slot.is_chat_surface:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required for chat surface slots")
+
+    # Task J: Chat/AI Surface Opt-In at Slot Level
+    # Ordinary web slots must not be treated as permission to appear in conversational assistants.
+    is_chat_request = (
+        ad_request.is_chat_surface is True
+        or (ad_request.surface and ad_request.surface.lower() in ("chat", "ai", "conversation", "assistant"))
+        or (ad_request.context and getattr(ad_request.context, "surface", None) and str(ad_request.context.surface).lower() in ("chat", "ai", "conversation", "assistant"))
+    )
+    if is_chat_request:
+        if not slot.is_chat_surface:
+            logger.warning(
+                "chat_surface_opt_in_required",
+                slot_id=ad_request.slot_id,
+                publisher_id=slot.publisher_id,
             )
-            prop = prop_res.scalar_one_or_none()
-            if prop:
-                if prop.status != Status.ACTIVE:
-                    raise HTTPException(status_code=400, detail="Publisher property is not active")
-                if prop.verification_status != "VERIFIED":
-                    raise HTTPException(status_code=403, detail="Publisher property is not verified")
-        if caller.is_authenticated:
-            if publisher_id is not None and slot.publisher_id != publisher_id:
-                raise HTTPException(status_code=403, detail="Not authorized for this slot")
-        else:
-            # Anonymous callers are prohibited from private / chat surface slots
-            if slot.is_chat_surface:
-                raise HTTPException(status_code=401, detail="Authentication required for chat surface slots")
-    elif caller.is_authenticated:
-        # Authenticated caller requesting a non-existent slot
-        raise HTTPException(status_code=404, detail="Ad slot not found")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Ad slot is not configured for conversational or chat surfaces. Explicit publisher opt-in required.",
+            )
+
+    # Verify publisher is active
+    pub_res = await session.execute(
+        select(Publisher).where(Publisher.id == slot.publisher_id)
+    )
+    pub = pub_res.scalar_one_or_none()
+    if pub is None or pub.status != Status.ACTIVE:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Publisher is not active")
+
+    # Determine if caller is an authenticated S2S partner
+    is_trusted_s2s = caller.is_authenticated and caller.auth_type == "api_key"
+
+    # Origin and Referer validation against the verified publisher property domain
+    origin_header = request.headers.get("origin") if request else None
+    referer_header = request.headers.get("referer") if request else None
+
+    # VULN-5.1-01: Headerless request remediation
+    if not origin_header and not referer_header:
+        if not is_trusted_s2s:
+            logger.warning(
+                "ad_request_headerless_rejected",
+                slot_id=ad_request.slot_id,
+                auth_type=caller.auth_type,
+                authenticated=caller.is_authenticated,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Ad request missing Origin or Referer header. Unauthenticated or non-S2S headerless requests are not permitted.",
+            )
+        # Permitted for authenticated S2S integrations (without logging credentials/signatures)
+        logger.info(
+            "ad_request_s2s_headerless_admitted",
+            slot_id=ad_request.slot_id,
+            publisher_id=caller.publisher_id,
+        )
+
+    # Property resolution and verification:
+    # Website / anonymous / non-S2S callers strictly require an associated, verified publisher property.
+    # Authenticated S2S callers may call slots without a property_id (e.g. backend S2S slots),
+    # but if property_id is configured, the property must be active and verified.
+    prop = None
+    if slot.property_id:
+        prop_res = await session.execute(
+            select(PublisherProperty).where(PublisherProperty.id == slot.property_id)
+        )
+        prop = prop_res.scalar_one_or_none()
+        if prop is None or prop.status != Status.ACTIVE:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Publisher property is not active")
+        if prop.verification_status != "VERIFIED":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Publisher property is not verified")
+    elif not is_trusted_s2s:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ad slot is not associated with a publisher property",
+        )
+
+    # Validate Origin domain if present and property is bound
+    if origin_header and prop:
+        origin_host = _extract_and_normalize_host(origin_header)
+        if not origin_host or not _is_domain_match(origin_host, prop.domain):
+            logger.warning(
+                "ad_request_origin_mismatch",
+                origin_host=origin_host,
+                prop_domain=prop.domain,
+                slot_id=ad_request.slot_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Origin '{origin_host or origin_header}' is not authorized for this ad slot.",
+            )
+
+    # Validate Referer domain if present and property is bound
+    if referer_header and prop:
+        referer_host = _extract_and_normalize_host(referer_header)
+        if not referer_host or not _is_domain_match(referer_host, prop.domain):
+            logger.warning(
+                "ad_request_referer_mismatch",
+                referer_host=referer_host,
+                prop_domain=prop.domain,
+                slot_id=ad_request.slot_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Referer '{referer_host or referer_header}' is not authorized for this ad slot.",
+            )
 
     # Serve ads
     candidates = await ad_service.serve_ads(
@@ -329,14 +506,15 @@ async def request_ads(
         except Exception:
             pass
 
+        sandbox_param = "&sandbox=1" if is_sandbox else ""
         tracking = TrackingUrls(
             impression_url=(
                 f"{base_url}/api/v1/event/track?type=impression"
-                f"&req={request_id}&ad={ad_id}&slot={slot_q}{sig_param}"
+                f"&req={request_id}&ad={ad_id}&slot={slot_q}{sig_param}{sandbox_param}"
             ),
             click_url=(
                 f"{base_url}/api/v1/event/track?type=click"
-                f"&req={request_id}&ad={ad_id}&slot={slot_q}{sig_param}"
+                f"&req={request_id}&ad={ad_id}&slot={slot_q}{sig_param}{sandbox_param}"
             ),
             conversion_url=(
                 f"{base_url}/api/v1/event/conversion"
@@ -344,15 +522,24 @@ async def request_ads(
             click_token=click_token,
         )
 
+        format_label = _get_creative_type_name(candidate.creative_type)
+        if candidate.width and candidate.height:
+            format_descriptor = f"{format_label}_{candidate.width}x{candidate.height}"
+        else:
+            format_descriptor = format_label
+
         creative = CreativeResponse(
             title=candidate.title,
             description=candidate.description,
             image_url=candidate.image_url,
             video_url=candidate.video_url,
+            asset_url=candidate.image_url or candidate.video_url,
             landing_url=candidate.landing_url,
             width=candidate.width,
             height=candidate.height,
-            creative_type=_get_creative_type_name(candidate.creative_type),
+            creative_type=format_label,
+            format=format_descriptor,
+            cta_text="Learn More",
         )
 
         ad = AdResponse(
@@ -360,15 +547,19 @@ async def request_ads(
             campaign_id=candidate.campaign_id,
             creative_id=candidate.creative_id,
             ad_set_id=candidate.ad_set_id,
+            advertiser_id=candidate.advertiser_id,
+            advertiser_name=getattr(candidate, "advertiser_name", None),
             creative=creative,
             tracking=tracking,
             sponsored=True,
             disclosure_label="Sponsored",
+            review_status=getattr(candidate, "review_status", "APPROVED"),
             metadata={
                 "ecpm": round(candidate.ecpm, 4),
                 "pctr": round(candidate.pctr, 6),
+                "is_sandbox": is_sandbox,
             }
-            if settings.debug
+            if (settings.debug or is_sandbox)
             else None,
         )
         ads.append(ad)
@@ -430,19 +621,37 @@ async def serve_ad_iframe(
     if request and request.client and ad_req.geo and not ad_req.geo.ip:
         ad_req.geo.ip = request.client.host
 
-    # Optional domain validation for publisher site_url
+    # Normalized domain validation for publisher property or site_url (Task C)
     try:
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
         slot_res = await ad_service.session.execute(
-            select(AdSlot).options(selectinload(AdSlot.publisher)).where(AdSlot.slot_id == slot_id)
+            select(AdSlot)
+            .options(selectinload(AdSlot.publisher), selectinload(AdSlot.property))
+            .where(AdSlot.slot_id == slot_id)
         )
         slot = slot_res.scalar_one_or_none()
-        if slot and slot.publisher and slot.publisher.site_url and request:
-            referer = request.headers.get("referer") or request.headers.get("origin")
-            if referer and not referer.startswith(slot.publisher.site_url):
-                logger.warning("domain_validation_failed", slot=slot_id, site_url=slot.publisher.site_url, referer=referer)
-                return HTMLResponse(content="<!-- domain validation failed -->", status_code=204)
+        if slot and request:
+            target_domain = (
+                (slot.property.domain if slot.property and slot.property.domain else None)
+                or (slot.publisher.site_url if slot.publisher else None)
+            )
+            if target_domain:
+                referer = request.headers.get("referer") or request.headers.get("origin")
+                if referer:
+                    ref_host = _extract_and_normalize_host(referer)
+                    if not ref_host or not _is_domain_match(ref_host, target_domain):
+                        logger.warning(
+                            "domain_validation_failed",
+                            slot=slot_id,
+                            target_domain=target_domain,
+                            referer=referer,
+                            ref_host=ref_host,
+                        )
+                        return HTMLResponse(
+                            content="<!-- domain validation failed -->",
+                            status_code=403,
+                        )
     except Exception:
         pass
 
@@ -551,5 +760,13 @@ async def classify_text(payload: TextClassifyRequest) -> TextClassifyResponse:
 # ---------------------------------------------------------------------------
 def _get_creative_type_name(creative_type: int) -> str:
     """Convert creative type int to string label."""
-    types = {1: "banner", 2: "native", 3: "video", 4: "interstitial"}
+    types = {
+        1: "banner",
+        2: "native",
+        3: "video",
+        4: "interstitial",
+        5: "display_card",
+        6: "label_ad",
+        7: "element_ad",
+    }
     return types.get(creative_type, "banner")

@@ -1,12 +1,19 @@
 import { useState, useEffect, type FormEvent } from "react";
 import {
   createCreative,
-  listCreatives,
   listAdvertiserDomains,
   type AdvertiserDomain,
 } from "../../../api/client";
-import { CREATIVE_TYPES, type Campaign, type AdSet, type Creative } from "../../../types";
-import { Button, Input, Select, Alert, Card, StatusBadge } from "../../../components/ui";
+import {
+  AD_CATEGORIES,
+  AI_CHATBOT_FORMATS,
+  BANNER_FORMAT,
+  CREATIVE_FORMAT_LABELS,
+  type Campaign,
+  type AdSet,
+  type Creative,
+} from "../../../types";
+import { Button, Input, Select, Alert, Card } from "../../../components/ui";
 
 interface AdsStepProps {
   campaign: Campaign;
@@ -17,6 +24,60 @@ interface AdsStepProps {
   onBack: () => void;
   onContinue: () => void;
 }
+
+interface FormatConfig {
+  id: string;
+  name: string;
+  category: "ai_chatbot" | "banner";
+  width: number;
+  height: number;
+  creativeType: number;
+  badge: string;
+  placeholderText: string;
+}
+
+const FORMAT_CONFIGS: Record<string, FormatConfig> = {
+  banner: {
+    id: BANNER_FORMAT.id,
+    name: "Banner Ad",
+    category: "banner",
+    width: BANNER_FORMAT.width,
+    height: BANNER_FORMAT.height,
+    creativeType: BANNER_FORMAT.typeId,
+    badge: BANNER_FORMAT.label,
+    placeholderText: "Banner Ad (500x500)",
+  },
+  display_card: {
+    id: AI_CHATBOT_FORMATS.DISPLAY_CARD.id,
+    name: AI_CHATBOT_FORMATS.DISPLAY_CARD.label,
+    category: "ai_chatbot",
+    width: AI_CHATBOT_FORMATS.DISPLAY_CARD.width,
+    height: AI_CHATBOT_FORMATS.DISPLAY_CARD.height,
+    creativeType: AI_CHATBOT_FORMATS.DISPLAY_CARD.typeId,
+    badge: "Display Card (520 × 120)",
+    placeholderText: "Display Card (520x120)",
+  },
+  label_ad: {
+    id: AI_CHATBOT_FORMATS.LABEL_ADS.id,
+    name: AI_CHATBOT_FORMATS.LABEL_ADS.label,
+    category: "ai_chatbot",
+    width: AI_CHATBOT_FORMATS.LABEL_ADS.width,
+    height: AI_CHATBOT_FORMATS.LABEL_ADS.height,
+    creativeType: AI_CHATBOT_FORMATS.LABEL_ADS.typeId,
+    badge: "Label Ads (400 × 100)",
+    placeholderText: "Label Ads (400x100)",
+  },
+  element_ad: {
+    id: AI_CHATBOT_FORMATS.ELEMENT_ADS.id,
+    name: AI_CHATBOT_FORMATS.ELEMENT_ADS.label,
+    category: "ai_chatbot",
+    width: AI_CHATBOT_FORMATS.ELEMENT_ADS.width,
+    height: AI_CHATBOT_FORMATS.ELEMENT_ADS.height,
+    creativeType: AI_CHATBOT_FORMATS.ELEMENT_ADS.typeId,
+    badge: "Element Ads (310 × 150)",
+    placeholderText: "Element Ads (310x150)",
+  },
+};
 
 export function AdsStep({
   campaign,
@@ -35,26 +96,55 @@ export function AdsStep({
   const [error, setError] = useState<string | null>(null);
   const [domains, setDomains] = useState<AdvertiserDomain[]>([]);
 
-  // Form state
+  // Category & Format selection state
+  const [category, setCategory] = useState<string>(""); // "ai_chatbot" | "banner" | ""
+  const [subcategory, setSubcategory] = useState<string>(""); // "display_card" | "label_ad" | "element_ad" | ""
+
+  // Form field state
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [creativeType, setCreativeType] = useState("1"); // 1=banner
-  const [imageUrl, setImageUrl] = useState("https://placehold.co/300x250.png");
+  const [imageUrl, setImageUrl] = useState("https://placehold.co/500x500.png?text=Creative+Asset");
   const [videoUrl, setVideoUrl] = useState("");
   const [landingUrl, setLandingUrl] = useState("https://example.com");
-  const [width, setWidth] = useState("300");
-  const [height, setHeight] = useState("250");
 
   useEffect(() => {
     void listAdvertiserDomains().then(setDomains).catch(() => {});
   }, []);
 
-  // Standard creative sizes helper
-  const handleSizePreset = (w: string, h: string) => {
-    setWidth(w);
-    setHeight(h);
-    if (imageUrl.includes("placehold.co")) {
-      setImageUrl(`https://placehold.co/${w}x${h}.png`);
+  // Compute active format configuration
+  const activeFormatKey =
+    category === "banner"
+      ? "banner"
+      : category === "ai_chatbot" && subcategory
+      ? subcategory
+      : null;
+
+  const activeFormat: FormatConfig | null = activeFormatKey
+    ? FORMAT_CONFIGS[activeFormatKey] || null
+    : null;
+
+  // Handle category change: switches category, immediately clears incompatible subcategory and stale dimensions
+  const handleCategoryChange = (newCategory: string) => {
+    setCategory(newCategory);
+    setSubcategory(""); // Mandatory: clear previously selected subcategory
+    setError(null);
+
+    if (newCategory === "banner") {
+      const bannerCfg = FORMAT_CONFIGS.banner;
+      if (imageUrl.includes("placehold.co")) {
+        setImageUrl(`https://placehold.co/${bannerCfg.width}x${bannerCfg.height}.png?text=${encodeURIComponent(bannerCfg.placeholderText)}`);
+      }
+    }
+  };
+
+  // Handle AI & Chatbot subcategory change
+  const handleSubcategoryChange = (newSubcategory: string) => {
+    setSubcategory(newSubcategory);
+    setError(null);
+
+    const cfg = FORMAT_CONFIGS[newSubcategory];
+    if (cfg && imageUrl.includes("placehold.co")) {
+      setImageUrl(`https://placehold.co/${cfg.width}x${cfg.height}.png?text=${encodeURIComponent(cfg.placeholderText)}`);
     }
   };
 
@@ -82,6 +172,18 @@ export function AdsStep({
       setError("Please select an Ad Set to assign this creative to.");
       return;
     }
+    if (!category) {
+      setError("Please select an Ad Category.");
+      return;
+    }
+    if (category === "ai_chatbot" && !subcategory) {
+      setError("Please select an AI and Chatbot ad format.");
+      return;
+    }
+    if (!activeFormat) {
+      setError("Please select a valid ad format.");
+      return;
+    }
     if (!title.trim()) {
       setError("Ad title is required.");
       return;
@@ -104,18 +206,20 @@ export function AdsStep({
         ad_set_id: activeAdSetId,
         title: title.trim(),
         description: description.trim() || undefined,
-        creative_type: Number(creativeType),
+        category: activeFormat.category,
+        format: activeFormat.id,
+        creative_type: activeFormat.creativeType,
         image_url: imageUrl.trim() || undefined,
         video_url: videoUrl.trim() || undefined,
         landing_url: landingUrl.trim(),
-        width: Number(width) || 300,
-        height: Number(height) || 250,
+        width: activeFormat.width,
+        height: activeFormat.height,
       });
 
       const updatedCreatives = [...creatives, newCreative];
       onCreativesUpdated(updatedCreatives);
 
-      // Reset form fields
+      // Reset headline and description while preserving category choice
       setTitle("");
       setDescription("");
       setError(null);
@@ -144,7 +248,7 @@ export function AdsStep({
             Step 3: Ads & Creatives
           </h2>
           <p className="text-muted" style={{ margin: 0 }}>
-            Create visual and interactive ad formats. Each ad is strictly linked to an Ad Set and subject to automated moderation.
+            Create visual and interactive ad formats with fixed predefined dimensions. Each ad is strictly linked to an Ad Set and subject to automated moderation.
           </p>
         </div>
 
@@ -163,6 +267,9 @@ export function AdsStep({
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "var(--space-4)" }}>
               {creatives.map((c) => {
                 const adSet = adSets.find((a) => a.id === c.ad_set_id);
+                const formatLabel =
+                  CREATIVE_FORMAT_LABELS[c.creative_type] ||
+                  (c.format ? c.format.replace("_", " ") : `${c.width}×${c.height}`);
                 return (
                   <div
                     key={c.id}
@@ -179,12 +286,12 @@ export function AdsStep({
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                       <strong style={{ fontSize: "var(--font-size-sm)" }}>{c.title}</strong>
                       <span className="text-muted" style={{ fontSize: "var(--font-size-xs)" }}>
-                        {c.width}x{c.height}
+                        {c.width}×{c.height}
                       </span>
                     </div>
 
                     <div style={{ fontSize: "var(--font-size-xs)", color: "var(--color-text-muted)" }}>
-                      Ad Set: <strong>{adSet?.name || "Default"}</strong> | {CREATIVE_TYPES[c.creative_type] || "Banner"}
+                      Ad Set: <strong>{adSet?.name || "Default"}</strong> · {formatLabel}
                     </div>
 
                     {c.image_url && (
@@ -238,6 +345,69 @@ export function AdsStep({
                 />
               </div>
 
+              {/* Main Ad Category Dropdown */}
+              <div style={{ marginBottom: "var(--space-3)" }}>
+                <Select
+                  label="Select Ad Category *"
+                  value={category}
+                  onChange={(e) => handleCategoryChange(e.target.value)}
+                  options={[
+                    { value: "", label: "-- Select Ad Category --" },
+                    { value: "ai_chatbot", label: "AI and Chatbot Ads" },
+                    { value: "banner", label: "Banner Ads" },
+                  ]}
+                  required
+                />
+              </div>
+
+              {/* Conditional AI and Chatbot Format Dropdown */}
+              {category === "ai_chatbot" && (
+                <div style={{ marginBottom: "var(--space-3)" }}>
+                  <Select
+                    label="Select AI and Chatbot Ad Format *"
+                    value={subcategory}
+                    onChange={(e) => handleSubcategoryChange(e.target.value)}
+                    options={[
+                      { value: "", label: "-- Select AI and Chatbot Ad Format --" },
+                      { value: "display_card", label: "Display Card (520 × 120)" },
+                      { value: "label_ad", label: "Label Ads (400 × 100)" },
+                      { value: "element_ad", label: "Element Ads (310 × 150)" },
+                    ]}
+                    required
+                  />
+                </div>
+              )}
+
+              {/* Selected Format & Fixed Dimensions Enforced Badge */}
+              <div style={{ marginBottom: "var(--space-3)" }}>
+                {activeFormat ? (
+                  <div className="format-locked-badge">
+                    <div>
+                      <div style={{ fontSize: "11px", color: "var(--color-text-muted)", textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>
+                        Enforced Format
+                      </div>
+                      <div style={{ fontWeight: 600, fontSize: "14px", marginTop: "2px", color: "var(--color-text-main)" }}>
+                        {activeFormat.badge}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: "var(--space-2)", alignItems: "center" }}>
+                      <span className="chip chip-include" style={{ fontSize: "11px" }}>
+                        Fixed {activeFormat.width} × {activeFormat.height} px
+                      </span>
+                      <span className="text-muted" style={{ fontSize: "11px" }} title="Manual dimension edits are disabled">
+                        🔒 Fixed
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ padding: "10px", background: "var(--color-bg-surface)", border: "1px dashed var(--color-border)", borderRadius: "var(--radius-md)", fontSize: "12px", color: "var(--color-text-muted)" }}>
+                    {category === "ai_chatbot"
+                      ? "Select an AI and Chatbot format above to assign predefined dimensions."
+                      : "Select an ad category above to assign predefined dimensions."}
+                  </div>
+                )}
+              </div>
+
               <div style={{ marginBottom: "var(--space-3)" }}>
                 <Input
                   label="Creative Headline / Title *"
@@ -254,46 +424,6 @@ export function AdsStep({
                   placeholder="Compelling promotional copy or disclosure"
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
-                />
-              </div>
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-2)", marginBottom: "var(--space-3)" }}>
-                <Select
-                  label="Format Type"
-                  value={creativeType}
-                  onChange={(e) => setCreativeType(e.target.value)}
-                  options={Object.entries(CREATIVE_TYPES).map(([v, l]) => ({ value: v, label: l }))}
-                />
-                <div>
-                  <label className="form-label">Common Dimensions</label>
-                  <div style={{ display: "flex", gap: "var(--space-1)", marginTop: "var(--space-1)" }}>
-                    <Button type="button" variant="outline" size="sm" onClick={() => handleSizePreset("300", "250")}>
-                      300x250
-                    </Button>
-                    <Button type="button" variant="outline" size="sm" onClick={() => handleSizePreset("728", "90")}>
-                      728x90
-                    </Button>
-                    <Button type="button" variant="outline" size="sm" onClick={() => handleSizePreset("320", "50")}>
-                      320x50
-                    </Button>
-                  </div>
-                </div>
-              </div>
-
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-2)", marginBottom: "var(--space-3)" }}>
-                <Input
-                  label="Width (px)"
-                  type="number"
-                  min="0"
-                  value={width}
-                  onChange={(e) => setWidth(e.target.value)}
-                />
-                <Input
-                  label="Height (px)"
-                  type="number"
-                  min="0"
-                  value={height}
-                  onChange={(e) => setHeight(e.target.value)}
                 />
               </div>
 
@@ -324,7 +454,12 @@ export function AdsStep({
                 )}
               </div>
 
-              <Button type="submit" variant="primary" isLoading={loading} disabled={loading || !title.trim()}>
+              <Button
+                type="submit"
+                variant="primary"
+                isLoading={loading}
+                disabled={loading || !title.trim() || !category || (category === "ai_chatbot" && !subcategory)}
+              >
                 + Save Ad to Selected Ad Set
               </Button>
             </form>
@@ -340,45 +475,182 @@ export function AdsStep({
                 <span className="badge badge-subtle" style={{ fontSize: "10px", textTransform: "uppercase" }}>
                   Sponsored
                 </span>
-                <span className="text-muted" style={{ fontSize: "11px" }}>
-                  {width} × {height}
+                <span className="text-muted" style={{ fontSize: "11px", fontWeight: "var(--font-weight-medium)" }}>
+                  {activeFormat ? `${activeFormat.name} (${activeFormat.width} × ${activeFormat.height})` : "No Format Selected"}
                 </span>
               </div>
 
-              {imageUrl ? (
-                <img
-                  src={imageUrl}
-                  alt="Live Preview"
-                  className="ad-preview-thumb"
-                  onError={(e) => {
-                    (e.target as HTMLImageElement).src = "https://placehold.co/300x180.png?text=Asset+Preview";
-                  }}
-                />
-              ) : (
-                <div
-                  className="ad-preview-thumb"
-                  style={{ display: "flex", alignItems: "center", justifyContent: "center", color: "var(--color-text-muted)" }}
-                >
-                  No Asset Selected
+              {activeFormatKey === "display_card" && (
+                /* Display Card: Wide horizontal layout (520 × 120 px) */
+                <div className="preview-format-container preview-layout-display-card">
+                  {imageUrl ? (
+                    <img
+                      src={imageUrl}
+                      alt="Asset Preview"
+                      className="format-thumb"
+                      onError={(e) => {
+                        (e.target as HTMLImageElement).src = "https://placehold.co/520x120.png?text=Display+Card";
+                      }}
+                    />
+                  ) : (
+                    <div className="format-thumb" style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "var(--color-bg-subtle)", color: "var(--color-text-muted)", fontSize: "10px" }}>
+                      520 × 120
+                    </div>
+                  )}
+                  <div className="format-content">
+                    <div>
+                      <div style={{ fontSize: "10px", color: "var(--color-text-muted)", textTransform: "uppercase", marginBottom: "2px" }}>
+                        AI Assistant Card · {domainStatus.host || "example.com"}
+                      </div>
+                      <div style={{ fontWeight: 600, fontSize: "13px", lineHeight: 1.3, color: "var(--color-text-main)" }}>
+                        {title || "Your Compelling Headline Here"}
+                      </div>
+                      <p className="text-muted" style={{ fontSize: "11px", margin: "2px 0 0 0", overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>
+                        {description || "Description preview text formatted for conversational card context."}
+                      </p>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center" }}>
+                      <span style={{ fontSize: "11px", color: "var(--color-primary)", fontWeight: 500 }}>
+                        Learn More →
+                      </span>
+                    </div>
+                  </div>
                 </div>
               )}
 
-              <div style={{ fontWeight: "var(--font-weight-bold)", fontSize: "var(--font-size-sm)", marginBottom: "var(--space-1)" }}>
-                {title || "Your Compelling Headline Here"}
-              </div>
+              {activeFormatKey === "label_ad" && (
+                /* Label Ads: Compact horizontal layout (400 × 100 px) */
+                <div className="preview-format-container preview-layout-label-ad">
+                  {imageUrl ? (
+                    <img
+                      src={imageUrl}
+                      alt="Asset Preview"
+                      className="format-thumb"
+                      onError={(e) => {
+                        (e.target as HTMLImageElement).src = "https://placehold.co/400x100.png?text=Label+Ad";
+                      }}
+                    />
+                  ) : (
+                    <div className="format-thumb" style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "var(--color-bg-subtle)", color: "var(--color-text-muted)", fontSize: "10px" }}>
+                      400 × 100
+                    </div>
+                  )}
+                  <div className="format-content">
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontSize: "10px", color: "var(--color-text-muted)" }}>
+                        {domainStatus.host || "example.com"}
+                      </span>
+                      <span style={{ fontSize: "10px", color: "var(--color-primary)", fontWeight: 600 }}>
+                        Visit ↗
+                      </span>
+                    </div>
+                    <div style={{ fontWeight: 600, fontSize: "12px", lineHeight: 1.2, color: "var(--color-text-main)" }}>
+                      {title || "Compact Sponsored Label Ad Headline"}
+                    </div>
+                    <div className="text-muted" style={{ fontSize: "10px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {description || "Subtext for compact conversational suggestion label."}
+                    </div>
+                  </div>
+                </div>
+              )}
 
-              <p className="text-muted" style={{ fontSize: "var(--font-size-xs)", margin: "0 0 var(--space-3) 0" }}>
-                {description || "Description preview text will display here to engage prospective customers."}
-              </p>
+              {activeFormatKey === "element_ad" && (
+                /* Element Ads: Medium rectangular layout (310 × 150 px) */
+                <div className="preview-format-container preview-layout-element-ad">
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontSize: "10px", color: "var(--color-text-muted)" }}>
+                      Assistant Element · {domainStatus.host || "example.com"}
+                    </span>
+                    <span style={{ fontSize: "10px", color: "var(--color-primary)", fontWeight: 500 }}>
+                      Open →
+                    </span>
+                  </div>
+                  {imageUrl && (
+                    <img
+                      src={imageUrl}
+                      alt="Asset Preview"
+                      className="format-thumb"
+                      onError={(e) => {
+                        (e.target as HTMLImageElement).src = "https://placehold.co/310x150.png?text=Element+Ad";
+                      }}
+                    />
+                  )}
+                  <div className="format-content">
+                    <div style={{ fontWeight: 600, fontSize: "12px", lineHeight: 1.3, color: "var(--color-text-main)" }}>
+                      {title || "Chatbot Assistant Interactive Element"}
+                    </div>
+                    <p className="text-muted" style={{ fontSize: "11px", margin: 0, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>
+                      {description || "Rich interactive element preview embedded directly into chat responses."}
+                    </p>
+                  </div>
+                </div>
+              )}
 
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--color-border)", paddingTop: "var(--space-2)" }}>
-                <span style={{ fontSize: "11px", color: "var(--color-text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "180px" }}>
-                  {domainStatus.host || "example.com"}
-                </span>
-                <span style={{ fontSize: "11px", color: "var(--color-primary)", fontWeight: "var(--font-weight-medium)" }}>
-                  Learn More →
-                </span>
-              </div>
+              {activeFormatKey === "banner" && (
+                /* Banner Ads: Square layout (500 × 500 px) */
+                <div className="preview-format-container preview-layout-banner">
+                  {imageUrl ? (
+                    <img
+                      src={imageUrl}
+                      alt="Asset Preview"
+                      className="format-thumb"
+                      onError={(e) => {
+                        (e.target as HTMLImageElement).src = "https://placehold.co/500x500.png?text=Banner+Ad";
+                      }}
+                    />
+                  ) : (
+                    <div className="format-thumb" style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "var(--color-bg-subtle)", color: "var(--color-text-muted)" }}>
+                      500 × 500 px
+                    </div>
+                  )}
+                  <div className="format-content">
+                    <div style={{ fontWeight: 700, fontSize: "14px", lineHeight: 1.3 }}>
+                      {title || "High-Impact Square Banner Headline"}
+                    </div>
+                    <p className="text-muted" style={{ fontSize: "12px", margin: 0 }}>
+                      {description || "Full visual banner presentation tailored for high-conversion web display placements."}
+                    </p>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid var(--color-border)", paddingTop: "var(--space-2)", marginTop: "var(--space-1)" }}>
+                      <span style={{ fontSize: "11px", color: "var(--color-text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "200px" }}>
+                        {domainStatus.host || "example.com"}
+                      </span>
+                      <span style={{ fontSize: "11px", color: "var(--color-primary)", fontWeight: 600 }}>
+                        Learn More →
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {!activeFormat && (
+                /* Placeholder before format selection */
+                <div
+                  style={{
+                    border: "1px dashed var(--color-border)",
+                    borderRadius: "var(--radius-md)",
+                    padding: "var(--space-6) var(--space-4)",
+                    textAlign: "center",
+                    color: "var(--color-text-muted)",
+                    margin: "var(--space-3) 0",
+                  }}
+                >
+                  <div style={{ fontSize: "28px", marginBottom: "var(--space-2)" }}>📐</div>
+                  <div style={{ fontWeight: 500, fontSize: "13px", marginBottom: "4px" }}>
+                    No Format Selected
+                  </div>
+                  <div style={{ fontSize: "11px" }}>
+                    Select an Ad Category above to activate the live creative preview.
+                  </div>
+                </div>
+              )}
+
+              {/* Footer summary of preview */}
+              {activeFormat && (
+                <div style={{ fontSize: "11px", color: "var(--color-text-muted)", display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "var(--space-2)" }}>
+                  <span>Preview Format: <strong>{activeFormat.name}</strong></span>
+                  <span>Dimensions: <strong>{activeFormat.width} × {activeFormat.height} px</strong></span>
+                </div>
+              )}
             </div>
 
             <div style={{ marginTop: "var(--space-4)" }}>

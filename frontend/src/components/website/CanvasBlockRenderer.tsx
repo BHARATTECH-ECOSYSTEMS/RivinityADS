@@ -37,6 +37,7 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
     cta_banner: "Call-to-Action Banner",
     ad_placement: "Ad Placement Placeholder",
     footer: "Footer Section",
+    open_design_section: "Open Design Visual Section",
   }[block.type] || block.type;
 
   return (
@@ -49,6 +50,8 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
       tabIndex={0}
       role="button"
       aria-label={`Edit ${blockTypeLabel}`}
+      data-od-block-id={block.id}
+      data-od-block-type={block.type}
       style={{
         opacity: block.is_visible ? 1 : 0.5,
         borderBottom: "1px solid #f1f5f9",
@@ -97,6 +100,8 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
       {/* Render block visually according to type */}
       {block.type === "hero" && (
         <section
+          data-od-block-id={block.id}
+          data-od-block-type="hero"
           style={{
             padding: "4rem 2rem",
             textAlign: (content.alignment || "left") as any,
@@ -110,16 +115,32 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
           }}
         >
           <div style={{ maxWidth: 800, margin: content.alignment === "center" ? "0 auto" : content.alignment === "right" ? "0 0 0 auto" : "0" }}>
-            <h1 style={{ fontSize: "2.5rem", fontWeight: 800, marginBottom: "1rem", lineHeight: 1.2 }}>
+            <h1
+              data-od-block-id={block.id}
+              data-od-block-type="hero"
+              data-od-field="headline"
+              data-od-editable="true"
+              style={{ fontSize: "2.5rem", fontWeight: 800, marginBottom: "1rem", lineHeight: 1.2 }}
+            >
               {content.headline || "Welcome to Your Website"}
             </h1>
             {content.subheadline && (
-              <p style={{ fontSize: "1.2rem", opacity: 0.9, marginBottom: "1.75rem", lineHeight: 1.5 }}>
+              <p
+                data-od-block-id={block.id}
+                data-od-block-type="hero"
+                data-od-field="subheadline"
+                data-od-editable="true"
+                style={{ fontSize: "1.2rem", opacity: 0.9, marginBottom: "1.75rem", lineHeight: 1.5 }}
+              >
                 {content.subheadline}
               </p>
             )}
             {content.cta_button && (
               <span
+                data-od-block-id={block.id}
+                data-od-block-type="hero"
+                data-od-field="cta_button.label"
+                data-od-editable="true"
                 style={{
                   display: "inline-block",
                   padding: "0.75rem 1.75rem",
@@ -138,18 +159,43 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
       )}
 
       {block.type === "text_section" && (
-        <section style={{ padding: "3rem 2rem", backgroundColor: theme.background_color, color: theme.text_color }}>
+        <section
+          data-od-block-id={block.id}
+          data-od-block-type="text_section"
+          style={{ padding: "3rem 2rem", backgroundColor: theme.background_color, color: theme.text_color }}
+        >
           <div style={{ maxWidth: 840, margin: "0 auto" }}>
             {content.heading && (
-              <h2 style={{ fontSize: "1.875rem", fontWeight: 700, marginBottom: "1rem" }}>
+              <h2
+                data-od-block-id={block.id}
+                data-od-block-type="text_section"
+                data-od-field="heading"
+                data-od-editable="true"
+                style={{ fontSize: "1.875rem", fontWeight: 700, marginBottom: "1rem" }}
+              >
                 {content.heading}
               </h2>
             )}
-            <div style={{ fontSize: "1.05rem", lineHeight: 1.7, opacity: 0.85 }}>
+            <div
+              data-od-block-id={block.id}
+              data-od-block-type="text_section"
+              data-od-field="body"
+              style={{ fontSize: "1.05rem", lineHeight: 1.7, opacity: 0.85 }}
+            >
               {(content.body || "Add your body text, story, or article here.")
                 .split("\n\n")
                 .map((paragraph: string, idx: number) => (
-                  <p key={idx} style={{ marginBottom: "1rem" }}>{paragraph}</p>
+                  <p
+                    key={idx}
+                    data-od-block-id={block.id}
+                    data-od-block-type="text_section"
+                    data-od-field="body"
+                    data-od-item-index={idx}
+                    data-od-editable="true"
+                    style={{ marginBottom: "1rem" }}
+                  >
+                    {paragraph}
+                  </p>
                 ))}
             </div>
           </div>
@@ -157,10 +203,20 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
       )}
 
       {block.type === "features_grid" && (
-        <section style={{ padding: "3.5rem 2rem", backgroundColor: "rgba(0,0,0,0.02)", color: theme.text_color }}>
+        <section
+          data-od-block-id={block.id}
+          data-od-block-type="features_grid"
+          style={{ padding: "3.5rem 2rem", backgroundColor: "rgba(0,0,0,0.02)", color: theme.text_color }}
+        >
           <div style={{ maxWidth: 1000, margin: "0 auto" }}>
             {content.title && (
-              <h2 style={{ fontSize: "2rem", fontWeight: 700, textAlign: "center", marginBottom: "2.5rem" }}>
+              <h2
+                data-od-block-id={block.id}
+                data-od-block-type="features_grid"
+                data-od-field="title"
+                data-od-editable="true"
+                style={{ fontSize: "2rem", fontWeight: 700, textAlign: "center", marginBottom: "2.5rem" }}
+              >
                 {content.title}
               </h2>
             )}
@@ -168,6 +224,10 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
               {(content.items || []).map((item: any, idx: number) => (
                 <div
                   key={idx}
+                  data-od-block-id={block.id}
+                  data-od-block-type="features_grid"
+                  data-od-field="items"
+                  data-od-item-index={idx}
                   style={{
                     padding: "1.75rem",
                     backgroundColor: "#ffffff",
@@ -177,6 +237,11 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
                   }}
                 >
                   <div
+                    data-od-block-id={block.id}
+                    data-od-block-type="features_grid"
+                    data-od-field="items.icon"
+                    data-od-item-index={idx}
+                    data-od-editable="false"
                     style={{
                       width: 40,
                       height: 40,
@@ -193,10 +258,24 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
                   >
                     ★
                   </div>
-                  <h3 style={{ fontSize: "1.15rem", fontWeight: 600, marginBottom: "0.5rem" }}>
+                  <h3
+                    data-od-block-id={block.id}
+                    data-od-block-type="features_grid"
+                    data-od-field="items.title"
+                    data-od-item-index={idx}
+                    data-od-editable="true"
+                    style={{ fontSize: "1.15rem", fontWeight: 600, marginBottom: "0.5rem" }}
+                  >
                     {item.title || "Feature Title"}
                   </h3>
-                  <p style={{ fontSize: "0.925rem", color: "#64748b", lineHeight: 1.5 }}>
+                  <p
+                    data-od-block-id={block.id}
+                    data-od-block-type="features_grid"
+                    data-od-field="items.description"
+                    data-od-item-index={idx}
+                    data-od-editable="true"
+                    style={{ fontSize: "0.925rem", color: "#64748b", lineHeight: 1.5 }}
+                  >
                     {item.description || "Description of this capability or service."}
                   </p>
                 </div>
@@ -207,10 +286,20 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
       )}
 
       {block.type === "image_gallery" && (
-        <section style={{ padding: "3.5rem 2rem", backgroundColor: theme.background_color }}>
+        <section
+          data-od-block-id={block.id}
+          data-od-block-type="image_gallery"
+          style={{ padding: "3.5rem 2rem", backgroundColor: theme.background_color }}
+        >
           <div style={{ maxWidth: 1000, margin: "0 auto" }}>
             {content.title && (
-              <h2 style={{ fontSize: "2rem", fontWeight: 700, textAlign: "center", marginBottom: "2rem" }}>
+              <h2
+                data-od-block-id={block.id}
+                data-od-block-type="image_gallery"
+                data-od-field="title"
+                data-od-editable="true"
+                style={{ fontSize: "2rem", fontWeight: 700, textAlign: "center", marginBottom: "2rem" }}
+              >
                 {content.title}
               </h2>
             )}
@@ -218,6 +307,10 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
               {(content.images || []).map((img: any, idx: number) => (
                 <div
                   key={idx}
+                  data-od-block-id={block.id}
+                  data-od-block-type="image_gallery"
+                  data-od-field="images"
+                  data-od-item-index={idx}
                   style={{
                     overflow: "hidden",
                     borderRadius: theme.border_radius,
@@ -227,13 +320,29 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
                 >
                   <div style={{ height: 160, backgroundColor: "#f1f5f9", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
                     {img.image_url ? (
-                      <img src={img.image_url} alt={img.alt_text || "Photo"} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                      <img
+                        src={img.image_url}
+                        alt={img.alt_text || "Photo"}
+                        data-od-block-id={block.id}
+                        data-od-block-type="image_gallery"
+                        data-od-field="images.image_url"
+                        data-od-item-index={idx}
+                        data-od-editable="true"
+                        style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                      />
                     ) : (
                       <span style={{ color: "#94a3b8" }}>🖼️ Image Photo</span>
                     )}
                   </div>
                   {img.caption && (
-                    <div style={{ padding: "0.5rem 0.75rem", fontSize: "0.85rem", color: "#64748b" }}>
+                    <div
+                      data-od-block-id={block.id}
+                      data-od-block-type="image_gallery"
+                      data-od-field="images.caption"
+                      data-od-item-index={idx}
+                      data-od-editable="true"
+                      style={{ padding: "0.5rem 0.75rem", fontSize: "0.85rem", color: "#64748b" }}
+                    >
                       {img.caption}
                     </div>
                   )}
@@ -245,7 +354,11 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
       )}
 
       {block.type === "contact_form" && (
-        <section style={{ padding: "3.5rem 2rem", backgroundColor: "rgba(0,0,0,0.01)" }}>
+        <section
+          data-od-block-id={block.id}
+          data-od-block-type="contact_form"
+          style={{ padding: "3.5rem 2rem", backgroundColor: "rgba(0,0,0,0.01)" }}
+        >
           <div
             style={{
               maxWidth: 540,
@@ -257,13 +370,19 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
               boxShadow: "0 2px 4px rgba(0,0,0,0.05)",
             }}
           >
-            <h2 style={{ fontSize: "1.5rem", fontWeight: 700, textAlign: "center", marginBottom: "1.5rem" }}>
+            <h2
+              data-od-block-id={block.id}
+              data-od-block-type="contact_form"
+              data-od-field="title"
+              data-od-editable="true"
+              style={{ fontSize: "1.5rem", fontWeight: 700, textAlign: "center", marginBottom: "1.5rem" }}
+            >
               {content.title || "Contact Us"}
             </h2>
-            <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }} data-od-editable="false">
               {(content.fields || ["name", "email", "message"]).map((f: string) => (
-                <div key={f} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  <label style={{ fontSize: "0.85rem", fontWeight: 500, color: "#475569", textTransform: "capitalize" }}>
+                <div key={f} style={{ display: "flex", flexDirection: "column", gap: 4 }} data-od-editable="false">
+                  <label style={{ fontSize: "0.85rem", fontWeight: 500, color: "#475569", textTransform: "capitalize" }} data-od-editable="false">
                     {f}
                   </label>
                   <div
@@ -273,10 +392,15 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
                       borderRadius: theme.border_radius,
                       backgroundColor: "#f8fafc",
                     }}
+                    data-od-editable="false"
                   />
                 </div>
               ))}
               <div
+                data-od-block-id={block.id}
+                data-od-block-type="contact_form"
+                data-od-field="submit_label"
+                data-od-editable="true"
                 style={{
                   padding: "0.75rem",
                   backgroundColor: theme.primary_color,
@@ -297,6 +421,8 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
 
       {block.type === "cta_banner" && (
         <section
+          data-od-block-id={block.id}
+          data-od-block-type="cta_banner"
           style={{
             padding: "3.5rem 2rem",
             backgroundColor: theme.primary_color,
@@ -305,16 +431,32 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
           }}
         >
           <div style={{ maxWidth: 680, margin: "0 auto" }}>
-            <h2 style={{ fontSize: "2rem", fontWeight: 800, marginBottom: "0.75rem" }}>
+            <h2
+              data-od-block-id={block.id}
+              data-od-block-type="cta_banner"
+              data-od-field="title"
+              data-od-editable="true"
+              style={{ fontSize: "2rem", fontWeight: 800, marginBottom: "0.75rem" }}
+            >
               {content.title || "Ready to take the next step?"}
             </h2>
             {content.description && (
-              <p style={{ fontSize: "1.1rem", opacity: 0.9, marginBottom: "1.5rem" }}>
+              <p
+                data-od-block-id={block.id}
+                data-od-block-type="cta_banner"
+                data-od-field="description"
+                data-od-editable="true"
+                style={{ fontSize: "1.1rem", opacity: 0.9, marginBottom: "1.5rem" }}
+              >
                 {content.description}
               </p>
             )}
             {content.button && (
               <span
+                data-od-block-id={block.id}
+                data-od-block-type="cta_banner"
+                data-od-field="button.label"
+                data-od-editable="true"
                 style={{
                   display: "inline-block",
                   padding: "0.75rem 1.75rem",
@@ -333,8 +475,12 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
       )}
 
       {block.type === "ad_placement" && (
-        <div style={{ padding: "2rem", display: "flex", justifyContent: "center" }}>
+        <div style={{ padding: "2rem", display: "flex", justifyContent: "center" }} data-od-protected="true" data-od-editable="false">
           <div
+            data-od-block-id={block.id}
+            data-od-block-type="ad_placement"
+            data-od-protected="true"
+            data-od-editable="false"
             style={{
               width: "100%",
               maxWidth: 728,
@@ -350,22 +496,22 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
               textAlign: "center",
             }}
           >
-            <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
-              <span style={{ background: "#e2e8f0", color: "#475569", fontSize: "0.7rem", fontWeight: 700, textTransform: "uppercase", padding: "2px 8px", borderRadius: 4 }}>
+            <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }} data-od-protected="true" data-od-editable="false">
+              <span style={{ background: "#e2e8f0", color: "#475569", fontSize: "0.7rem", fontWeight: 700, textTransform: "uppercase", padding: "2px 8px", borderRadius: 4 }} data-od-protected="true" data-od-editable="false">
                 Advertisement
               </span>
-              <span style={{ background: "#fef3c7", color: "#92400e", fontSize: "0.7rem", fontWeight: 700, textTransform: "uppercase", padding: "2px 8px", borderRadius: 4 }}>
+              <span style={{ background: "#fef3c7", color: "#92400e", fontSize: "0.7rem", fontWeight: 700, textTransform: "uppercase", padding: "2px 8px", borderRadius: 4 }} data-od-protected="true" data-od-editable="false">
                 Non-Billable Preview Placeholder
               </span>
             </div>
-            <p style={{ fontWeight: 600, fontSize: "0.9rem", color: "#334155" }}>
+            <p style={{ fontWeight: 600, fontSize: "0.9rem", color: "#334155" }} data-od-protected="true" data-od-editable="false">
               RivinityADS Placement Slot ({content.placement_location || "in_article"})
             </p>
-            <p style={{ fontSize: "0.75rem", color: "#64748b", marginTop: 4 }}>
+            <p style={{ fontSize: "0.75rem", color: "#64748b", marginTop: 4 }} data-od-protected="true" data-od-editable="false">
               Format: {content.format === 1 ? "Standard Display Banner" : "Native Card"} • Live monetization inactive • Strictly disabled during draft preview
             </p>
             {content.ad_slot_id && (
-              <span style={{ fontSize: "0.7rem", color: "#94a3b8", marginTop: 2, fontFamily: "monospace" }}>
+              <span style={{ fontSize: "0.7rem", color: "#94a3b8", marginTop: 2, fontFamily: "monospace" }} data-od-protected="true" data-od-editable="false">
                 Slot: {content.ad_slot_id}
               </span>
             )}
@@ -373,8 +519,39 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
         </div>
       )}
 
+      {block.type === "open_design_section" && (
+        <section
+          id={content.section_id || undefined}
+          className={`od-section ${content.css_classes || ""}`}
+          data-od-block-id={block.id}
+          data-od-block-type="open_design_section"
+          style={{
+            padding: "2.5rem 1.5rem",
+            backgroundColor: theme.background_color,
+            color: theme.text_color,
+            ...(content.styles || {}),
+          }}
+        >
+          <div style={{ maxWidth: 1080, margin: "0 auto" }}>
+            {content.html_content ? (
+              <div
+                className="od-rendered-html-container"
+                dangerouslySetInnerHTML={{ __html: content.html_content }}
+              />
+            ) : (
+              <div style={{ padding: "2rem", border: "1px dashed #cbd5e1", borderRadius: 8, textAlign: "center", color: "#94a3b8" }}>
+                <p style={{ fontWeight: 600, margin: 0 }}>Open Design Visual Section</p>
+                <p style={{ fontSize: "0.8125rem", margin: "4px 0 0" }}>Component ID: {content.section_id || "unassigned"}</p>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
       {block.type === "footer" && (
         <footer
+          data-od-block-id={block.id}
+          data-od-block-type="footer"
           style={{
             padding: "2.5rem 2rem",
             backgroundColor: "#0f172a",
@@ -386,13 +563,27 @@ export const CanvasBlockRenderer: React.FC<CanvasBlockRendererProps> = ({
             {content.links && content.links.length > 0 && (
               <div style={{ display: "flex", gap: "1.5rem", justifyContent: "center", flexWrap: "wrap" }}>
                 {content.links.map((link: any, idx: number) => (
-                  <span key={idx} style={{ color: "#cbd5e1", fontSize: "0.9rem" }}>
+                  <span
+                    key={idx}
+                    data-od-block-id={block.id}
+                    data-od-block-type="footer"
+                    data-od-field="links.label"
+                    data-od-item-index={idx}
+                    data-od-editable="true"
+                    style={{ color: "#cbd5e1", fontSize: "0.9rem" }}
+                  >
                     {link.label || "Link"}
                   </span>
                 ))}
               </div>
             )}
-            <p style={{ fontSize: "0.85rem", color: "#64748b" }}>
+            <p
+              data-od-block-id={block.id}
+              data-od-block-type="footer"
+              data-od-field="copyright_text"
+              data-od-editable="true"
+              style={{ fontSize: "0.85rem", color: "#64748b" }}
+            >
               {content.copyright_text || "© 2026 Powered by RivinityADS"}
             </p>
           </div>

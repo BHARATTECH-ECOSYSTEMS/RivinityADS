@@ -56,6 +56,9 @@ class CreativeType(IntEnum):
     NATIVE = 2
     VIDEO = 3
     INTERSTITIAL = 4
+    DISPLAY_CARD = 5
+    LABEL_AD = 6
+    ELEMENT_AD = 7
 
 
 class EventType(IntEnum):

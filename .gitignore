@@ -1,0 +1,49 @@
+# Logs
+*.log
+
+# Node
+node_modules/
+
+# Vite
+.vite/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+.agents/
+.venv/
+venv/
+build/
+
+# Local databases and binary data
+*.mmdb
+
+# Documents
+*.docx
+
+# Audit and temporary reports
+RIVINITYADS_*.md
+RivinityAds_*.md
+
+# Playwright
+playwright-report/
+test-results/
+frontend/playwright-report/
+frontend/test-results/
+
+
+

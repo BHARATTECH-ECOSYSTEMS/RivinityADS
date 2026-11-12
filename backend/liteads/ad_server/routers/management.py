@@ -1,11 +1,14 @@
 """CRUD and publisher reporting endpoints."""
 
+import csv
 import hashlib
+import io
 import secrets
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +22,7 @@ from liteads.models import (
     AdSet,
     AdSlot,
     Advertiser,
+    AdvertiserApiKey,
     AdEvent,
     Campaign,
     CampaignAssignment,
@@ -33,12 +37,16 @@ from liteads.models import (
     ModerationStatus,
 )
 from liteads.management.api_key_service import ApiKeyService
+from liteads.management.advertiser_api_key_service import AdvertiserApiKeyService
 from liteads.schemas.management import (
     AdSetCreate,
     AdSetReportingItem,
     AdSetReportingResponse,
     AdSetResponse,
     AdSetUpdate,
+    AdvertiserApiKeyCreate,
+    AdvertiserApiKeyCreateResponse,
+    AdvertiserApiKeyResponse,
     AdvertiserCreate,
     AdvertiserResponse,
     AdvertiserUpdate,
@@ -892,6 +900,69 @@ async def advertiser_reporting(
     )
 
 
+@router.get("/advertiser/{advertiser_id}/reporting/export", dependencies=[Depends(require_roles("admin", "advertiser"))])
+async def export_advertiser_reporting(
+    advertiser_id: int,
+    user: User = Depends(verified_user),
+    campaign_id: int | None = Query(default=None),
+    ad_set_id: int | None = Query(default=None),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    format: str = Query(default="csv", pattern="^(csv|json)$"),
+    session: AsyncSession = Depends(get_session),
+) -> Any:
+    """Export advertiser campaign reporting to RFC 4180 CSV or JSON (Phase 3 Task H)."""
+    report = await advertiser_reporting(
+        advertiser_id=advertiser_id,
+        user=user,
+        campaign_id=campaign_id,
+        ad_set_id=ad_set_id,
+        start_date=start_date,
+        end_date=end_date,
+        session=session,
+    )
+    if format == "json":
+        return report
+
+    output = io.StringIO()
+    writer = csv.writer(output, lineterminator="\r\n")
+    writer.writerow([
+        "Date",
+        "Impressions",
+        "Clicks",
+        "TotalConversions",
+        "AttributedConversions",
+        "ConversionValue",
+        "Spend",
+        "CTR_Percent",
+        "CPA",
+        "ROAS",
+        "Currency",
+    ])
+    for d in report.daily_breakdown:
+        d_ctr = (Decimal(d.clicks) / Decimal(d.impressions) * Decimal(100)) if d.impressions else Decimal("0")
+        writer.writerow([
+            d.stat_date.isoformat(),
+            d.impressions,
+            d.clicks,
+            d.total_conversions,
+            d.attributed_conversions,
+            f"{d.conversion_value:.2f}",
+            f"{d.spend:.4f}",
+            f"{d_ctr:.2f}%",
+            f"{d.cpa:.4f}" if d.cpa is not None else "N/A",
+            f"{d.roas:.4f}" if d.roas is not None else "N/A",
+            report.currency,
+        ])
+    csv_bytes = output.getvalue().encode("utf-8")
+    filename = f"advertiser_{advertiser_id}_report_{report.start_date}_{report.end_date}.csv"
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/campaign/{campaign_id}/ad-set-reporting", response_model=AdSetReportingResponse, dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def campaign_ad_set_reporting(
     campaign_id: int,
@@ -1100,6 +1171,57 @@ async def publisher_reporting(
         earnings=earnings,
         ecpm=ecpm,
         daily_breakdown=breakdown,
+    )
+
+
+@router.get("/publisher/{publisher_id}/reporting/export", dependencies=[Depends(require_roles("admin", "publisher"))])
+async def export_publisher_reporting(
+    publisher_id: int,
+    user: User = Depends(verified_user),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    format: str = Query(default="csv", pattern="^(csv|json)$"),
+    session: AsyncSession = Depends(get_session),
+) -> Any:
+    """Export publisher earnings and delivery reporting to RFC 4180 CSV or JSON (Phase 3 Task H)."""
+    report = await publisher_reporting(
+        publisher_id=publisher_id,
+        user=user,
+        start_date=start_date,
+        end_date=end_date,
+        session=session,
+    )
+    if format == "json":
+        return report
+
+    output = io.StringIO()
+    writer = csv.writer(output, lineterminator="\r\n")
+    writer.writerow([
+        "Date",
+        "Impressions",
+        "Clicks",
+        "Conversions",
+        "Earnings",
+        "ECPM",
+        "Currency",
+    ])
+    for d in report.daily_breakdown:
+        d_ecpm = (Decimal(d.earnings) / Decimal(d.impressions) * Decimal(1000)) if d.impressions else Decimal("0")
+        writer.writerow([
+            d.stat_date.isoformat(),
+            d.impressions,
+            d.clicks,
+            d.conversions,
+            f"{d.earnings:.4f}",
+            f"{d_ecpm:.4f}",
+            "INR",
+        ])
+    csv_bytes = output.getvalue().encode("utf-8")
+    filename = f"publisher_{publisher_id}_report_{report.start_date}_{report.end_date}.csv"
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -1561,6 +1683,71 @@ async def revoke_publisher_api_key(
     await session.commit()
 
 
+@router.post(
+    "/publisher/{publisher_id}/keys/{key_id}/rotate",
+    response_model=PublisherApiKeyCreateResponse,
+    dependencies=[Depends(require_roles("admin", "publisher"))],
+    summary="Rotate a publisher API key",
+    description="Revokes the existing key and generates a new active key with the same configuration. The raw key is returned once.",
+)
+async def rotate_publisher_api_key_by_pub(
+    publisher_id: int,
+    key_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> PublisherApiKeyCreateResponse:
+    _assert_publisher_access(user, publisher_id)
+    if await session.get(Publisher, publisher_id) is None:
+        raise _not_found("Publisher", publisher_id)
+
+    new_key, raw_key = await ApiKeyService.rotate_api_key(session, publisher_id, key_id)
+    return PublisherApiKeyCreateResponse(
+        id=new_key.id,
+        publisher_id=new_key.publisher_id,
+        name=new_key.name,
+        label=new_key.name,
+        key_prefix=new_key.key_prefix,
+        is_sandbox=new_key.is_sandbox,
+        rate_limit_per_minute=new_key.rate_limit_per_minute,
+        daily_quota=new_key.daily_quota,
+        status=new_key.status,
+        created_at=new_key.created_at,
+        raw_key=raw_key,
+    )
+
+
+@router.post(
+    "/publisher/keys/{key_id}/rotate",
+    response_model=PublisherApiKeyCreateResponse,
+    dependencies=[Depends(require_roles("admin", "publisher"))],
+    summary="Rotate a publisher API key for current user",
+)
+async def rotate_publisher_api_key(
+    key_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> PublisherApiKeyCreateResponse:
+    api_key = await session.get(PublisherApiKey, key_id)
+    if api_key is None:
+        raise HTTPException(status_code=404, detail=f"API key {key_id} not found")
+    _assert_publisher_access(user, api_key.publisher_id)
+
+    new_key, raw_key = await ApiKeyService.rotate_api_key(session, api_key.publisher_id, key_id)
+    return PublisherApiKeyCreateResponse(
+        id=new_key.id,
+        publisher_id=new_key.publisher_id,
+        name=new_key.name,
+        label=new_key.name,
+        key_prefix=new_key.key_prefix,
+        is_sandbox=new_key.is_sandbox,
+        rate_limit_per_minute=new_key.rate_limit_per_minute,
+        daily_quota=new_key.daily_quota,
+        status=new_key.status,
+        created_at=new_key.created_at,
+        raw_key=raw_key,
+    )
+
+
 @router.get(
     "/publisher/{publisher_id}/keys/usage",
     response_model=list[ApiKeyUsageResponse],
@@ -1718,3 +1905,130 @@ async def update_suggestion_status(
         
     await session.refresh(suggestion)
     return suggestion
+
+
+# ── Advertiser API Key Endpoints (Phase 1) ───────────────────────────────────
+
+@router.post(
+    "/advertiser/{advertiser_id}/keys",
+    response_model=AdvertiserApiKeyCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_roles("admin", "advertiser"))],
+    summary="Create an advertiser API key / signing credential",
+    description="Generates an API key and HMAC secret for S2S conversion postbacks. Returned raw exactly once.",
+)
+async def create_advertiser_api_key(
+    advertiser_id: int,
+    payload: AdvertiserApiKeyCreate,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> AdvertiserApiKeyCreateResponse:
+    _assert_advertiser_access(user, advertiser_id)
+    adv = await session.get(Advertiser, advertiser_id)
+    if not adv:
+        raise _not_found("Advertiser", advertiser_id)
+
+    db_key, raw_key, raw_secret = await AdvertiserApiKeyService.create_api_key(
+        db=session,
+        advertiser_id=advertiser_id,
+        name=payload.name,
+        campaign_id=payload.campaign_id,
+        is_sandbox=payload.is_sandbox,
+        rate_limit_per_minute=payload.rate_limit_per_minute,
+        daily_quota=payload.daily_quota,
+        user_id=user.id,
+    )
+    return AdvertiserApiKeyCreateResponse(
+        id=db_key.id,
+        advertiser_id=db_key.advertiser_id,
+        campaign_id=db_key.campaign_id,
+        name=db_key.name,
+        key_prefix=db_key.key_prefix,
+        is_sandbox=db_key.is_sandbox,
+        rate_limit_per_minute=db_key.rate_limit_per_minute,
+        daily_quota=db_key.daily_quota,
+        created_at=db_key.created_at,
+        raw_key=raw_key,
+        raw_secret=raw_secret,
+    )
+
+
+@router.get(
+    "/advertiser/{advertiser_id}/keys",
+    response_model=list[AdvertiserApiKeyResponse],
+    dependencies=[Depends(require_roles("admin", "advertiser"))],
+    summary="List advertiser API keys",
+)
+async def list_advertiser_api_keys(
+    advertiser_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[AdvertiserApiKeyResponse]:
+    _assert_advertiser_access(user, advertiser_id)
+    adv = await session.get(Advertiser, advertiser_id)
+    if not adv:
+        raise _not_found("Advertiser", advertiser_id)
+
+    keys = await AdvertiserApiKeyService.list_api_keys(session, advertiser_id)
+    return [AdvertiserApiKeyResponse.model_validate(k) for k in keys]
+
+
+@router.post(
+    "/advertiser/{advertiser_id}/keys/{key_id}/rotate",
+    response_model=AdvertiserApiKeyCreateResponse,
+    dependencies=[Depends(require_roles("admin", "advertiser"))],
+    summary="Rotate an advertiser API key",
+)
+async def rotate_advertiser_api_key(
+    advertiser_id: int,
+    key_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> AdvertiserApiKeyCreateResponse:
+    _assert_advertiser_access(user, advertiser_id)
+    adv = await session.get(Advertiser, advertiser_id)
+    if not adv:
+        raise _not_found("Advertiser", advertiser_id)
+
+    new_key, raw_key, raw_secret = await AdvertiserApiKeyService.rotate_api_key(
+        db=session,
+        advertiser_id=advertiser_id,
+        key_id=key_id,
+        user_id=user.id,
+    )
+    return AdvertiserApiKeyCreateResponse(
+        id=new_key.id,
+        advertiser_id=new_key.advertiser_id,
+        campaign_id=new_key.campaign_id,
+        name=new_key.name,
+        key_prefix=new_key.key_prefix,
+        is_sandbox=new_key.is_sandbox,
+        rate_limit_per_minute=new_key.rate_limit_per_minute,
+        daily_quota=new_key.daily_quota,
+        created_at=new_key.created_at,
+        raw_key=raw_key,
+        raw_secret=raw_secret,
+    )
+
+
+@router.delete(
+    "/advertiser/{advertiser_id}/keys/{key_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_roles("admin", "advertiser"))],
+    summary="Revoke an advertiser API key",
+)
+async def revoke_advertiser_api_key(
+    advertiser_id: int,
+    key_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    _assert_advertiser_access(user, advertiser_id)
+    success = await AdvertiserApiKeyService.revoke_api_key(
+        db=session,
+        advertiser_id=advertiser_id,
+        key_id=key_id,
+        user_id=user.id,
+    )
+    if not success:
+        raise HTTPException(status_code=404, detail="API key not found or already revoked")

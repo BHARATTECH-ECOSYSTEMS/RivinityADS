@@ -38,9 +38,17 @@ import type {
   PageData,
   ProjectSummary,
   ProjectData,
+  BusinessProfileIntake,
+  BusinessProfileAudit,
+  CustomDomainStatusResponse,
+  WebmasterToolsConfig,
+  AccessibilityAuditReport,
+  GeoReadinessReport,
   VersionSummary,
   PreviewTokenResponse,
   SlugCheckResponse,
+  WebsiteTemplateSummary,
+  WebsiteTemplateDetail,
   EmailMarketingList,
   CreateMailingListInput,
   EmailMarketingContact,
@@ -52,9 +60,51 @@ import type {
   UpdateCampaignInput,
   CampaignPreview,
   CampaignAnalytics,
+  AISectionPreset,
+  WebsiteAIGenerateSectionInput,
+  WebsiteAIGenerateSectionResponse,
+  AdSlot,
+  PublisherProperty,
+  PublisherPropertyInput,
+  PropertyChallengeRequest,
+  PropertyChallengeResponse,
+  PropertyVerificationStatus,
+  PropertyVerificationMethod,
+  BoundSlot,
+  AdPlacementLocation,
+  AdPlacementContent,
+  MonetizationPrerequisites,
+  MonetizationConsentScope,
+  MonetizationConsentRecord,
+  ProjectMonetizationStatus,
+  PublisherLinkInput,
+  MonetizationConsentInput,
+  UnpublishProjectResponse,
 } from "../types";
 
+export const WebsiteMonetizationStatusCode = {
+  DISABLED: 0,
+  PENDING_APPROVAL: 1,
+  ACTIVE_MONETIZED: 2,
+  PAUSED: 3,
+  REJECTED: 4,
+} as const;
+
+export type WebsiteMonetizationStatusCode =
+  typeof WebsiteMonetizationStatusCode[keyof typeof WebsiteMonetizationStatusCode];
+
+export const WebsiteMonetizationStatusMap: Record<number, string> = {
+  0: "disabled",
+  1: "pending_approval",
+  2: "active_monetized",
+  3: "paused",
+  4: "rejected",
+};
+
 export type {
+  AISectionPreset,
+  WebsiteAIGenerateSectionInput,
+  WebsiteAIGenerateSectionResponse,
   EmailMarketingList,
   CreateMailingListInput,
   EmailMarketingContact,
@@ -73,6 +123,23 @@ export type {
   ResendVerificationInput,
   RequestPasswordResetInput,
   ResetPasswordInput,
+  AdSlot,
+  PublisherProperty,
+  PublisherPropertyInput,
+  PropertyChallengeRequest,
+  PropertyChallengeResponse,
+  PropertyVerificationStatus,
+  PropertyVerificationMethod,
+  BoundSlot,
+  AdPlacementLocation,
+  AdPlacementContent,
+  MonetizationPrerequisites,
+  MonetizationConsentScope,
+  MonetizationConsentRecord,
+  ProjectMonetizationStatus,
+  PublisherLinkInput,
+  MonetizationConsentInput,
+  UnpublishProjectResponse,
 };
 const BASE_URL = (import.meta.env?.VITE_API_BASE_URL as string | undefined) ?? "";
 let memoryToken: string | null = null;
@@ -80,10 +147,12 @@ export const setMemoryToken = (token: string | null) => { memoryToken = token; }
 export const getMemoryToken = () => memoryToken;
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  headers?: Headers;
+  constructor(message: string, status: number, headers?: Headers) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.headers = headers;
   }
 }
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -102,7 +171,7 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
         message = body.message;
       }
     } catch { /* non-json error */ }
-    throw new ApiError(message, res.status);
+    throw new ApiError(message, res.status, res.headers);
   }
   if (res.status === 204) return undefined as T;
   return await res.json() as T;
@@ -199,7 +268,7 @@ export const getAdvertiser = (id: number) => apiFetch<Advertiser>(`/api/v1/adver
 export const updateAdvertiser = (id: number, payload: Partial<Advertiser>) => apiFetch<Advertiser>(`/api/v1/advertiser/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
 export const setAdvertiserStatus = (id: number, status: number) => updateAdvertiser(id, { status });
 export interface CampaignInput { advertiser_id: number; name: string; description?: string; budget_daily: number; budget_total: number; bid_type: number; bid_amount: number; freq_cap_daily: number; freq_cap_hourly: number; }
-export interface CreativeInput { campaign_id: number; ad_set_id?: number | null; title: string; description?: string; image_url?: string; video_url?: string; landing_url: string; creative_type: number; width: number; height: number; }
+export interface CreativeInput { campaign_id: number; ad_set_id?: number | null; title: string; description?: string; image_url?: string; video_url?: string; landing_url: string; creative_type: number; width: number; height: number; category?: string; format?: string; }
 export const listCampaigns = (advertiserId?: number) => apiFetch<Campaign[]>(`/api/v1/campaign${advertiserId ? `?advertiser_id=${advertiserId}` : ""}`);
 export const createCampaign = (payload: CampaignInput) => apiFetch<Campaign>("/api/v1/campaign", { method: "POST", body: JSON.stringify(payload) });
 export const getCampaign = (id: number) => apiFetch<Campaign>(`/api/v1/campaign/${id}`);
@@ -212,10 +281,25 @@ export const listCreatives = (campaignId: number, adSetId?: number) => {
   return apiFetch<Creative[]>(`/api/v1/creative?${params.toString()}`);
 };
 export const createCreative = (payload: CreativeInput) => apiFetch<Creative>("/api/v1/creative", { method: "POST", body: JSON.stringify(payload) });
-export interface SlotData { id: number; publisher_id: number; property_id: number | null; slot_id: string; name: string; format: number; width: number; height: number; status: number; floor_price: number; is_chat_surface: boolean; }
+export interface SlotData {
+  id: number;
+  publisher_id: number;
+  property_id: number | null;
+  slot_id: string;
+  name: string;
+  format: number;
+  width: number;
+  height: number;
+  status: number;
+  floor_price: number;
+  is_chat_surface: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
 export interface SlotInput { slot_id: string; name: string; format: number; width: number; height: number; property_id?: number | null; floor_price?: number; is_chat_surface?: boolean; }
 export interface PublisherInput { name: string; email?: string; site_url?: string; is_sandbox?: boolean; }
 export const listSlots = (publisherId?: number) => apiFetch<SlotData[]>(`/api/v1/slot${publisherId ? `?publisher_id=${publisherId}` : ""}`);
+export const getSlot = (slotId: number): Promise<SlotData> => apiFetch<SlotData>(`/api/v1/slot/${slotId}`);
 export const createSlot = (payload: SlotInput) => apiFetch<SlotData>("/api/v1/slot", { method: "POST", body: JSON.stringify(payload) });
 export const updateSlot = (id: number, payload: Partial<SlotInput>) => apiFetch<SlotData>(`/api/v1/slot/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
 export const listPublishers = () => apiFetch<Publisher[]>("/api/v1/publisher");
@@ -223,74 +307,102 @@ export const createPublisher = (payload: PublisherInput) => apiFetch<Publisher>(
 export const updatePublisher = (id: number, payload: Partial<Publisher>) => apiFetch<Publisher>(`/api/v1/publisher/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
 export const setPublisherStatus = (id: number, status: number) => updatePublisher(id, { status });
 
-// Publisher Properties
-export interface PublisherProperty { id: number; publisher_id: number; name: string; domain: string; status: number; }
-export interface PublisherPropertyInput { name: string; domain: string; status?: number; }
-export const listPublisherProperties = (publisherId: number) => apiFetch<PublisherProperty[]>(`/api/v1/publisher/${publisherId}/property`);
-export const createPublisherProperty = (publisherId: number, payload: PublisherPropertyInput) => apiFetch<PublisherProperty>(`/api/v1/publisher/${publisherId}/property`, { method: "POST", body: JSON.stringify(payload) });
-export const updatePublisherProperty = (propertyId: number, payload: Partial<PublisherPropertyInput>) => apiFetch<PublisherProperty>(`/api/v1/publisher/property/${propertyId}`, { method: "PATCH", body: JSON.stringify(payload) });
+// Publisher Properties & Domain Verification
+export const listPublisherProperties = (publisherId: number): Promise<PublisherProperty[]> =>
+  apiFetch<PublisherProperty[]>(`/api/v1/publisher/${publisherId}/property`);
+
+export const getPublisherProperty = (propertyId: number): Promise<PublisherProperty> =>
+  apiFetch<PublisherProperty>(`/api/v1/publisher/property/${propertyId}`);
+
+export const createPublisherProperty = (publisherId: number, payload: PublisherPropertyInput): Promise<PublisherProperty> =>
+  apiFetch<PublisherProperty>(`/api/v1/publisher/${publisherId}/property`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
+export const updatePublisherProperty = (propertyId: number, payload: Partial<PublisherPropertyInput>): Promise<PublisherProperty> =>
+  apiFetch<PublisherProperty>(`/api/v1/publisher/property/${propertyId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+
+export const challengePublisherProperty = (
+  propertyId: number,
+  payload?: "DNS_TXT" | "HTML_META" | PropertyChallengeRequest
+): Promise<PropertyChallengeResponse> => {
+  const body = typeof payload === "string" ? { method: payload } : (payload || { method: "DNS_TXT" });
+  return apiFetch<PropertyChallengeResponse>(`/api/v1/publisher/property/${propertyId}/challenge`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+};
+
+export const verifyPublisherProperty = (propertyId: number): Promise<PublisherProperty> =>
+  apiFetch<PublisherProperty>(`/api/v1/publisher/property/${propertyId}/verify`, {
+    method: "POST",
+  });
 
 // Publisher Ad Units (Tags)
-export const generateSlotTag = (slotId: number) => apiFetch<{html: string}>(`/api/v1/slot/${slotId}/tag`);
+export const generateSlotTag = (slotId: number) => apiFetch<{ html: string }>(`/api/v1/slot/${slotId}/tag`);
 
 // Publisher Reporting
 export interface DailyStat { stat_date: string; impressions: number; clicks: number; conversions: number; spend?: number; earnings?: number; }
 export interface PublisherReporting { publisher_id: number; start_date: string; end_date: string; impressions: number; clicks: number; conversions: number; earnings: number; ecpm: number; daily_breakdown: DailyStat[]; }
 export const getPublisherReporting = (publisherId: number, startDate?: string, endDate?: string) => {
-    const params = new URLSearchParams();
-    if (startDate) params.append("start_date", startDate);
-    if (endDate) params.append("end_date", endDate);
-    const qs = params.toString();
-    return apiFetch<PublisherReporting>(`/api/v1/publisher/${publisherId}/reporting${qs ? `?${qs}` : ""}`);
+  const params = new URLSearchParams();
+  if (startDate) params.append("start_date", startDate);
+  if (endDate) params.append("end_date", endDate);
+  const qs = params.toString();
+  return apiFetch<PublisherReporting>(`/api/v1/publisher/${publisherId}/reporting${qs ? `?${qs}` : ""}`);
 };
 
 // Publisher Placement Health (Phase 6 WU3)
 export interface FormatBenchmark {
-    format: number;
-    format_name?: string;
-    eligible_slots_count: number;
-    median_ctr: number | null;
-    median_ecpm: number | null;
+  format: number;
+  format_name?: string;
+  eligible_slots_count: number;
+  median_ctr: number | null;
+  median_ecpm: number | null;
 }
 
 export interface PlacementHealthItem {
-    slot_id: string;
-    slot_name: string;
-    format: number;
-    format_name: string;
-    impressions: number;
-    clicks: number;
-    conversions: number;
-    earnings: number;
-    ctr: number;
-    ecpm: number;
-    verdict: "great" | "healthy" | "low_visibility" | "insufficient_data" | string;
-    recommendation: string;
-    benchmark: FormatBenchmark;
+  slot_id: string;
+  slot_name: string;
+  format: number;
+  format_name: string;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  earnings: number;
+  ctr: number;
+  ecpm: number;
+  verdict: "great" | "healthy" | "low_visibility" | "insufficient_data" | string;
+  recommendation: string;
+  benchmark: FormatBenchmark;
 }
 
 export interface PlacementHealthResponse {
-    publisher_id: number;
-    window_days: number;
-    start_date: string;
-    end_date: string;
-    total_placements: number;
-    placements: PlacementHealthItem[];
-    benchmarks: Record<string, FormatBenchmark>;
+  publisher_id: number;
+  window_days: number;
+  start_date: string;
+  end_date: string;
+  total_placements: number;
+  placements: PlacementHealthItem[];
+  benchmarks: Record<string, FormatBenchmark>;
 }
 
 export const getPlacementHealth = (publisherId: number, windowDays: number = 30) =>
-    apiFetch<PlacementHealthResponse>(`/api/v1/publisher/${publisherId}/placements/health?window_days=${windowDays}`);
+  apiFetch<PlacementHealthResponse>(`/api/v1/publisher/${publisherId}/placements/health?window_days=${windowDays}`);
 
 // Advertiser Reporting
 export interface AdvertiserReporting { advertiser_id: number; campaign_id?: number; start_date: string; end_date: string; impressions: number; clicks: number; conversions: number; spend: number; ctr: number; cvr: number; daily_breakdown: DailyStat[]; }
 export const getAdvertiserReporting = (advertiserId: number, startDate?: string, endDate?: string, campaignId?: number) => {
-    const params = new URLSearchParams();
-    if (startDate) params.append("start_date", startDate);
-    if (endDate) params.append("end_date", endDate);
-    if (campaignId) params.append("campaign_id", campaignId.toString());
-    const qs = params.toString();
-    return apiFetch<AdvertiserReporting>(`/api/v1/advertiser/${advertiserId}/reporting${qs ? `?${qs}` : ""}`);
+  const params = new URLSearchParams();
+  if (startDate) params.append("start_date", startDate);
+  if (endDate) params.append("end_date", endDate);
+  if (campaignId) params.append("campaign_id", campaignId.toString());
+  const qs = params.toString();
+  return apiFetch<AdvertiserReporting>(`/api/v1/advertiser/${advertiserId}/reporting${qs ? `?${qs}` : ""}`);
 };
 
 // Campaign Assignments
@@ -298,7 +410,7 @@ export interface CampaignAssignment { id: number; campaign_id: number; publisher
 export interface CampaignAssignmentInput { campaign_id: number; publisher_id: number; slot_id?: string | null; }
 export const listCampaignAssignments = (campaignId: number) => apiFetch<CampaignAssignment[]>(`/api/v1/campaign/${campaignId}/assignments`);
 export const createCampaignAssignment = (campaignId: number, payload: CampaignAssignmentInput) => apiFetch<CampaignAssignment>(`/api/v1/campaign/${campaignId}/assignments`, { method: "POST", body: JSON.stringify(payload) });
-export const deleteCampaignAssignment = (campaignId: number, assignmentId: number) => apiFetch<{success: boolean}>(`/api/v1/campaign/${campaignId}/assignments/${assignmentId}`, { method: "DELETE" });
+export const deleteCampaignAssignment = (campaignId: number, assignmentId: number) => apiFetch<{ success: boolean }>(`/api/v1/campaign/${campaignId}/assignments/${assignmentId}`, { method: "DELETE" });
 
 export interface PublisherAssignment { id: number; campaign_id: number; campaign_name: string; advertiser_name: string; slot_id: string | null; slot_name: string | null; status: string; }
 export const listPublisherAssignments = () => apiFetch<PublisherAssignment[]>("/api/v1/publisher/assignments");
@@ -367,7 +479,7 @@ export const getCampaignTargeting = (campaignId: number) => apiFetch<TargetingRe
 export const updateCampaignTargeting = (campaignId: number, payload: TargetingSet) => apiFetch<TargetingResponse>(`/api/v1/campaign/${campaignId}/targeting`, { method: "PUT", body: JSON.stringify(payload) });
 export const getReferenceSectors = () => apiFetch<string[]>("/api/v1/reference/sectors");
 export const getReferenceCountries = () => apiFetch<string[]>("/api/v1/reference/locations/countries");
-export const getReferenceStates = (country: string) => apiFetch<{code: string; name: string}[]>(`/api/v1/reference/locations/states?country=${country}`);
+export const getReferenceStates = (country: string) => apiFetch<{ code: string; name: string }[]>(`/api/v1/reference/locations/states?country=${country}`);
 export const getReferenceCities = (country: string, state: string) => apiFetch<string[]>(`/api/v1/reference/locations/cities?country=${country}&state=${state}`);
 export const getReferencePincodes = (country: string, state: string, city: string) => apiFetch<string[]>(`/api/v1/reference/locations/pincodes?country=${country}&state=${state}&city=${city}`);
 
@@ -468,7 +580,7 @@ export const listWebhooks = () => apiFetch<Webhook[]>("/api/v1/webhooks");
 export const createWebhook = (payload: WebhookInput) => apiFetch<WebhookCreateResponse>("/api/v1/webhooks", { method: "POST", body: JSON.stringify(payload) });
 export const updateWebhook = (id: number, payload: Partial<WebhookInput>) => apiFetch<Webhook>(`/api/v1/webhooks/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
 export const deleteWebhook = (id: number) => apiFetch<void>(`/api/v1/webhooks/${id}`, { method: "DELETE" });
-export const testWebhook = (id: number, payload?: any) => apiFetch<{delivered: boolean; status_code?: number; error?: string; delivery_id?: number}>(`/api/v1/webhooks/${id}/test`, { method: "POST", body: payload ? JSON.stringify(payload) : undefined });
+export const testWebhook = (id: number, payload?: any) => apiFetch<{ delivered: boolean; status_code?: number; error?: string; delivery_id?: number }>(`/api/v1/webhooks/${id}/test`, { method: "POST", body: payload ? JSON.stringify(payload) : undefined });
 export const listWebhookDeliveries = (webhookId: number, limit = 50, offset = 0) =>
   apiFetch<WebhookDelivery[]>(`/api/v1/webhooks/${webhookId}/deliveries?limit=${limit}&offset=${offset}`);
 export const getWebhookDeliveryDetail = (webhookId: number, deliveryId: number) =>
@@ -484,12 +596,12 @@ export const updateSuggestionStatus = (suggestionId: number, status: string) => 
 // Chat API
 export const createChatSession = () => apiFetch<ChatSessionResponse>("/api/v1/chat/session", { method: "POST" });
 export const sendChatMessage = (sessionId: string, message: string) => {
-    if (!sessionId || !sessionId.trim()) throw new Error("session_id is required");
-    if (!message || !message.trim()) throw new Error("message is required");
-    return apiFetch<ChatResponse>("/api/v1/chat", {
-        method: "POST",
-        body: JSON.stringify({ session_id: sessionId, message })
-    });
+  if (!sessionId || !sessionId.trim()) throw new Error("session_id is required");
+  if (!message || !message.trim()) throw new Error("message is required");
+  return apiFetch<ChatResponse>("/api/v1/chat", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId, message })
+  });
 };
 
 // Notification APIs (Phase 6)
@@ -616,10 +728,21 @@ export const getCampaignAdSetReporting = (
   );
 };
 
-// ── Website Builder Endpoints (Phase 10B/10C/10D) ──────────────────────────
+// ── Website Builder Endpoints (Phase 10B/10C/10D & Phase 2 Templates) ─────
+
+export const listWebsiteTemplates = (params?: { category?: string; search?: string }): Promise<WebsiteTemplateSummary[]> => {
+  const query = new URLSearchParams();
+  if (params?.category && params.category !== "All") query.append("category", params.category);
+  if (params?.search && params.search.trim()) query.append("search", params.search.trim());
+  const qs = query.toString();
+  return apiFetch<WebsiteTemplateSummary[]>(`/api/v1/website/templates${qs ? `?${qs}` : ""}`);
+};
+
+export const getWebsiteTemplate = (templateId: string): Promise<WebsiteTemplateDetail> =>
+  apiFetch<WebsiteTemplateDetail>(`/api/v1/website/templates/${encodeURIComponent(templateId)}`);
 
 export const checkWebsiteSlug = (slug: string): Promise<SlugCheckResponse> =>
-  apiFetch<SlugCheckResponse>(`/api/v1/website/check-slug?slug=${encodeURIComponent(slug)}`);
+  apiFetch<SlugCheckResponse>(`/api/v1/website/slug/check?slug=${encodeURIComponent(slug)}`);
 
 export const listWebsiteProjects = (): Promise<ProjectSummary[]> =>
   apiFetch<ProjectSummary[]>("/api/v1/website/projects");
@@ -704,14 +827,14 @@ export const reorderWebsitePages = (projectId: number, pageIds: number[]): Promi
     body: JSON.stringify({ page_ids: pageIds }),
   });
 
-export const publishWebsiteProject = (projectId: number, notes?: string): Promise<ProjectData> =>
-  apiFetch<ProjectData>(`/api/v1/website/projects/${projectId}/publish`, {
+export const publishWebsiteProject = (projectId: number, notes?: string): Promise<VersionSummary> =>
+  apiFetch<VersionSummary>(`/api/v1/website/projects/${projectId}/publish`, {
     method: "POST",
     body: JSON.stringify({ notes: notes || null }),
   });
 
-export const unpublishWebsiteProject = (projectId: number): Promise<ProjectData> =>
-  apiFetch<ProjectData>(`/api/v1/website/projects/${projectId}/unpublish`, {
+export const unpublishWebsiteProject = (projectId: number): Promise<UnpublishProjectResponse> =>
+  apiFetch<UnpublishProjectResponse>(`/api/v1/website/projects/${projectId}/unpublish`, {
     method: "POST",
   });
 
@@ -732,6 +855,71 @@ export const generateWebsitePreviewToken = (projectId: number): Promise<PreviewT
   apiFetch<PreviewTokenResponse>(`/api/v1/website/projects/${projectId}/preview-token`, {
     method: "POST",
   });
+
+// ── Website Monetization & Ad Placement Endpoints (Phase 5) ───────────────
+
+export const linkWebsitePublisher = (
+  projectId: number,
+  payload: PublisherLinkInput
+): Promise<ProjectData> =>
+  apiFetch<ProjectData>(`/api/v1/website/projects/${projectId}/publisher-link`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
+export const listWebsiteProjectSlots = (projectId: number): Promise<BoundSlot[]> =>
+  apiFetch<BoundSlot[]>(`/api/v1/website/projects/${projectId}/slots`);
+
+export const getWebsiteMonetizationStatus = (
+  projectId: number
+): Promise<ProjectMonetizationStatus> =>
+  apiFetch<ProjectMonetizationStatus>(`/api/v1/website/projects/${projectId}/monetization`);
+
+export const recordWebsiteMonetizationConsent = (
+  projectId: number,
+  payload: MonetizationConsentInput
+): Promise<ProjectMonetizationStatus> =>
+  apiFetch<ProjectMonetizationStatus>(
+    `/api/v1/website/projects/${projectId}/monetization/consent`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }
+  );
+
+export const enableWebsiteMonetization = (
+  projectId: number
+): Promise<ProjectMonetizationStatus> =>
+  apiFetch<ProjectMonetizationStatus>(
+    `/api/v1/website/projects/${projectId}/monetization/enable`,
+    {
+      method: "POST",
+    }
+  );
+
+export const disableWebsiteMonetization = (
+  projectId: number
+): Promise<ProjectMonetizationStatus> =>
+  apiFetch<ProjectMonetizationStatus>(
+    `/api/v1/website/projects/${projectId}/monetization/disable`,
+    {
+      method: "POST",
+    }
+  );
+
+// ── Open Design AI Generation (Phase 4D) ────────────────────────────────────
+
+export const generateWebsiteAISection = (
+  projectId: number,
+  input: WebsiteAIGenerateSectionInput
+): Promise<WebsiteAIGenerateSectionResponse> =>
+  apiFetch<WebsiteAIGenerateSectionResponse>(
+    `/api/v1/website/projects/${projectId}/ai/generate-section`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    }
+  );
 
 // ── Email Marketing (Phase 6.1E) ─────────────────────────────────────────────
 
@@ -823,3 +1011,225 @@ export const launchMarketingCampaign = (campaignId: number, confirmed: boolean):
 
 export const getCampaignAnalytics = (campaignId: number): Promise<CampaignAnalytics> =>
   apiFetch<CampaignAnalytics>(`/api/v1/email-marketing/campaigns/${campaignId}/analytics`);
+
+// Channel Connectors API (Phase 5)
+export interface ChannelCapabilities {
+  provider: string;
+  connector_type: "advertiser_management" | "publisher_delivery";
+  supports_inventory_injection: boolean;
+  supports_account_discovery: boolean;
+  supports_campaign_management: boolean;
+  supports_reporting_sync: boolean;
+  supported_objectives: string[];
+  supported_bidding_strategies: string[];
+  supported_targeting: string[];
+  supported_creative_types: string[];
+  limitations: string[];
+  auth_requirements: string[];
+}
+
+export interface ConnectAdvertiserInput {
+  provider: string;
+  name: string;
+  api_key: string;
+  account_id: string;
+  organization_id?: string;
+  additional_credentials?: Record<string, any>;
+}
+
+export interface ChannelConnection {
+  id: number;
+  provider: string;
+  name: string;
+  external_account_id: string;
+  external_organization_id?: string | null;
+  credentials_prefix: string;
+  status: string;
+  last_sync_at?: string | null;
+  last_error?: string | null;
+  capabilities?: ChannelCapabilities | null;
+  created_at: string;
+}
+
+export interface ExternalAccount {
+  account_id: string;
+  name: string;
+  currency: string;
+  timezone: string;
+  organization_id?: string | null;
+  status: string;
+}
+
+export interface ExternalCampaign {
+  external_id: string;
+  name: string;
+  status: string;
+  objective?: string | null;
+  daily_budget?: number | null;
+  total_spend?: number | null;
+  currency: string;
+  local_campaign_id?: number | null;
+}
+
+export interface CampaignCreateParams {
+  name: string;
+  objective: string;
+  daily_budget: number;
+  bid_amount?: number;
+  targeting?: Record<string, any>;
+  confirmed: boolean;
+}
+
+export interface CampaignPreviewResult {
+  name: string;
+  objective: string;
+  daily_budget: number;
+  currency: string;
+  bid_amount?: number | null;
+  targeting_summary: Record<string, any>;
+  estimated_daily_impressions: [number, number];
+  estimated_daily_clicks: [number, number];
+  disclaimer: string;
+  requires_confirmation: boolean;
+}
+
+export interface ExternalReportRow {
+  date: string;
+  external_campaign_id: string;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  spend: number;
+  currency: string;
+}
+
+export const getChannelCapabilities = (provider: string): Promise<ChannelCapabilities> =>
+  apiFetch<ChannelCapabilities>(`/api/v1/channels/capabilities/${encodeURIComponent(provider)}`);
+
+export const connectAdvertiserChannel = (input: ConnectAdvertiserInput): Promise<ChannelConnection> =>
+  apiFetch<ChannelConnection>("/api/v1/channels/advertiser/connect", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+
+export const listAdvertiserChannels = (): Promise<ChannelConnection[]> =>
+  apiFetch<ChannelConnection[]>("/api/v1/channels/advertiser/connections");
+
+export const getAdvertiserChannel = (connectionId: number): Promise<ChannelConnection> =>
+  apiFetch<ChannelConnection>(`/api/v1/channels/advertiser/connections/${connectionId}`);
+
+export const discoverChannelAccounts = (connectionId: number): Promise<ExternalAccount[]> =>
+  apiFetch<ExternalAccount[]>(`/api/v1/channels/advertiser/connections/${connectionId}/accounts`);
+
+export const syncChannelCampaigns = (connectionId: number): Promise<ExternalCampaign[]> =>
+  apiFetch<ExternalCampaign[]>(`/api/v1/channels/advertiser/connections/${connectionId}/sync`, {
+    method: "POST",
+  });
+
+export const previewChannelCampaign = (
+  connectionId: number,
+  params: CampaignCreateParams
+): Promise<CampaignPreviewResult> =>
+  apiFetch<CampaignPreviewResult>(`/api/v1/channels/advertiser/connections/${connectionId}/preview`, {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+
+export const createChannelCampaign = (
+  connectionId: number,
+  params: CampaignCreateParams,
+  idempotencyKey: string
+): Promise<ExternalCampaign> =>
+  apiFetch<ExternalCampaign>(`/api/v1/channels/advertiser/connections/${connectionId}/campaigns`, {
+    method: "POST",
+    headers: { "X-Idempotency-Key": idempotencyKey },
+    body: JSON.stringify(params),
+  });
+
+export const updateChannelCampaignStatus = (
+  connectionId: number,
+  externalCampaignId: string,
+  status: "ACTIVE" | "PAUSED" | "ARCHIVED"
+): Promise<{ success: boolean; external_campaign_id: string; status: string }> =>
+  apiFetch(`/api/v1/channels/advertiser/connections/${connectionId}/campaigns/${encodeURIComponent(externalCampaignId)}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+
+export const syncChannelReporting = (
+  connectionId: number,
+  startDate: string,
+  endDate: string
+): Promise<ExternalReportRow[]> =>
+  apiFetch<ExternalReportRow[]>(
+    `/api/v1/channels/advertiser/connections/${connectionId}/reporting?start_date=${encodeURIComponent(startDate)}&end_date=${encodeURIComponent(endDate)}`
+  );
+
+export const disconnectChannel = (connectionId: number): Promise<{ success: boolean; connection_id: number; status: string }> =>
+  apiFetch(`/api/v1/channels/advertiser/connections/${connectionId}`, {
+    method: "DELETE",
+  });
+
+// ── Phase 6: Business Profile Questionnaire, Custom Domain, & Audits ──
+
+export const submitBusinessIntake = (
+  projectId: number,
+  intake: BusinessProfileIntake,
+  generateDraft: boolean = true
+): Promise<{ project_id: number; audit: BusinessProfileAudit; page_count: number; message: string }> =>
+  apiFetch(`/api/v1/website/projects/${projectId}/business-intake?generate_draft=${generateDraft}`, {
+    method: "POST",
+    body: JSON.stringify(intake),
+  });
+
+export const getBusinessProfile = (
+  projectId: number
+): Promise<{ project_id: number; business_profile: BusinessProfileIntake | null; audit: BusinessProfileAudit | null }> =>
+  apiFetch(`/api/v1/website/projects/${projectId}/business-profile`);
+
+export const getAccessibilityAudit = (
+  projectId: number,
+  pageId?: number
+): Promise<{
+  project_id: number;
+  overall_score: number;
+  page_count: number;
+  pages: Array<{ page_id: number; page_title: string; slug: string; report: AccessibilityAuditReport }>;
+  consolidated_recommendations: string[];
+}> =>
+  apiFetch(`/api/v1/website/projects/${projectId}/accessibility-audit${pageId ? `?page_id=${pageId}` : ""}`);
+
+export const getGeoReadiness = (projectId: number): Promise<GeoReadinessReport> =>
+  apiFetch<GeoReadinessReport>(`/api/v1/website/projects/${projectId}/geo-readiness`);
+
+export const configureCustomDomain = (
+  projectId: number,
+  customDomain: string
+): Promise<CustomDomainStatusResponse> =>
+  apiFetch<CustomDomainStatusResponse>(`/api/v1/website/projects/${projectId}/custom-domain`, {
+    method: "POST",
+    body: JSON.stringify({ custom_domain: customDomain }),
+  });
+
+export const verifyCustomDomain = (projectId: number): Promise<CustomDomainStatusResponse> =>
+  apiFetch<CustomDomainStatusResponse>(`/api/v1/website/projects/${projectId}/custom-domain/verify`, {
+    method: "POST",
+  });
+
+export const removeCustomDomain = (projectId: number): Promise<{ success: boolean; message: string }> =>
+  apiFetch(`/api/v1/website/projects/${projectId}/custom-domain`, {
+    method: "DELETE",
+  });
+
+export const getWebmasterTools = (projectId: number): Promise<WebmasterToolsConfig> =>
+  apiFetch<WebmasterToolsConfig>(`/api/v1/website/projects/${projectId}/webmaster-tools`);
+
+export const updateWebmasterTools = (
+  projectId: number,
+  config: WebmasterToolsConfig
+): Promise<WebmasterToolsConfig> =>
+  apiFetch<WebmasterToolsConfig>(`/api/v1/website/projects/${projectId}/webmaster-tools`, {
+    method: "PUT",
+    body: JSON.stringify(config),
+  });
+

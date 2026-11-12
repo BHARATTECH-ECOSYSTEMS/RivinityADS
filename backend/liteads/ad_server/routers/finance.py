@@ -4,27 +4,35 @@ Finance API endpoints.
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from decimal import Decimal
 
 from liteads.ad_server.services.billing import BillingService
+from liteads.ad_server.services.reconciliation_service import ReconciliationService
 from liteads.common.database import get_session
 from liteads.common.logger import get_logger
-from liteads.common.security import current_user, verified_user
+from liteads.common.security import current_user, require_roles, verified_user
 from liteads.models import Advertiser, Publisher, User
-from liteads.models.finance import Transaction
+from liteads.models.finance import BillingDispute, PaymentRequest, PublisherPayout, Transaction
 from liteads.schemas.finance import (
     DepositRequest, 
+    DisputeCreate,
+    DisputeResponse,
+    DisputeResolveRequest,
     LedgerResponse, 
+    PayoutConfirmRequest,
+    PayoutRecordResponse,
+    PayoutRejectRequest,
     PayoutRequest, 
+    ReconciliationRequest,
+    ReconciliationResponse,
     TransactionResponse,
     PaymentOrderRequest,
     PaymentOrderResponse,
 )
-from liteads.models.finance import Transaction, PaymentRequest
 from liteads.ad_server.services.razorpay_client import get_razorpay_client, RazorpayClient, RazorpayClientError
 
 logger = get_logger(__name__)
@@ -78,6 +86,7 @@ async def deposit_funds(
             session=session,
             advertiser_id=advertiser_id,
             amount=request.amount,
+            currency=request.currency,
             reference_id=request.reference_id,
         )
         await session.commit()
@@ -218,6 +227,7 @@ async def razorpay_webhook(
             session=session,
             advertiser_id=advertiser_id,
             amount=amount,
+            currency=currency,
             reference_id=order_id,
             description=f"Razorpay Wallet Top-up (Order: {order_id})"
         )
@@ -267,7 +277,7 @@ async def request_payout(
     session: AsyncSession = Depends(get_session),
     user: User = Depends(verified_user),
 ) -> TransactionResponse:
-    """Request a payout from publisher earnings."""
+    """Request a payout from publisher earnings. Holds funds in reservation pending admin/provider execution."""
     pub = await session.get(Publisher, publisher_id)
     if not pub:
         raise HTTPException(status_code=404, detail="Publisher not found")
@@ -276,15 +286,93 @@ async def request_payout(
         raise HTTPException(status_code=403, detail="Not authorized to request payout for this publisher")
 
     try:
-        tx = await BillingService.record_payout(
+        payout, tx = await BillingService.request_payout(
             session=session,
             publisher_id=publisher_id,
             amount=request.amount,
+            currency=request.currency,
             reference_id=request.reference_id,
         )
         await session.commit()
         await session.refresh(tx)
         return TransactionResponse.model_validate(tx)
+    except ValueError as e:
+        await session.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/publisher/{publisher_id}/payouts", response_model=list[PayoutRecordResponse])
+async def list_publisher_payouts(
+    publisher_id: int,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(verified_user),
+) -> list[PayoutRecordResponse]:
+    """List all payout records and their lifecycle statuses for a publisher."""
+    pub = await session.get(Publisher, publisher_id)
+    if not pub:
+        raise HTTPException(status_code=404, detail="Publisher not found")
+
+    if user.role != "admin" and pub.owner_user_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to view payouts for this publisher")
+
+    stmt = (
+        select(PublisherPayout)
+        .where(PublisherPayout.publisher_id == publisher_id)
+        .order_by(PublisherPayout.id.desc())
+    )
+    result = await session.execute(stmt)
+    records = result.scalars().all()
+    return [PayoutRecordResponse.model_validate(r) for r in records]
+
+
+@router.post("/publisher/{publisher_id}/payout/{payout_id}/reject", response_model=TransactionResponse)
+async def reject_publisher_payout(
+    publisher_id: int,
+    payout_id: int,
+    request: PayoutRejectRequest,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(verified_user),
+) -> TransactionResponse:
+    """Reject a pending payout request and restore reserved funds to publisher balance (admin only)."""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin authorization required to reject payouts")
+
+    try:
+        _, reversal_tx = await BillingService.reject_payout(
+            session=session,
+            payout_id=payout_id,
+            reason=request.reason,
+        )
+        await session.commit()
+        await session.refresh(reversal_tx)
+        return TransactionResponse.model_validate(reversal_tx)
+    except ValueError as e:
+        await session.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/publisher/{publisher_id}/payout/{payout_id}/confirm", response_model=PayoutRecordResponse)
+async def confirm_publisher_payout(
+    publisher_id: int,
+    payout_id: int,
+    request: PayoutConfirmRequest,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(verified_user),
+) -> PayoutRecordResponse:
+    """Confirm that an external payment provider successfully executed the payout (admin only)."""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin authorization required to confirm payouts")
+
+    try:
+        payout = await BillingService.confirm_payout(
+            session=session,
+            payout_id=payout_id,
+            provider_payout_id=request.provider_payout_id,
+            notes=request.notes,
+        )
+        await session.commit()
+        await session.refresh(payout)
+        return PayoutRecordResponse.model_validate(payout)
     except ValueError as e:
         await session.rollback()
         raise HTTPException(status_code=400, detail=str(e))
@@ -335,4 +423,168 @@ async def dev_simulate_payment(
     pr.status = "paid"
     await session.commit()
     return {"status": "success", "message": f"Dev payment confirmed. Credited ₹{pr.amount} to advertiser {pr.advertiser_id}."}
+
+
+# ── Phase 3: Dispute & Appeal Workflow ────────────────────────────────────────
+
+@router.post("/disputes", response_model=DisputeResponse, status_code=201)
+async def create_dispute(
+    payload: DisputeCreate,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(verified_user),
+) -> BillingDispute:
+    """Submit a billing dispute or IVT traffic appeal."""
+    adv_id = payload.advertiser_id
+    pub_id = payload.publisher_id
+
+    # Tenant scoping and validation
+    if user.role == "advertiser":
+        adv_id = user.advertiser_id
+    elif user.role == "publisher":
+        pub_id = user.publisher_id
+
+    if adv_id:
+        adv = await session.get(Advertiser, adv_id)
+        if not adv:
+            raise HTTPException(status_code=404, detail="Advertiser not found")
+        if user.role != "admin" and adv.owner_user_id != user.id:
+            raise HTTPException(status_code=403, detail="Not authorized to dispute on behalf of this advertiser")
+
+    if pub_id:
+        pub = await session.get(Publisher, pub_id)
+        if not pub:
+            raise HTTPException(status_code=404, detail="Publisher not found")
+        if user.role != "admin" and pub.owner_user_id != user.id:
+            raise HTTPException(status_code=403, detail="Not authorized to appeal on behalf of this publisher")
+
+    dispute = BillingDispute(
+        dispute_type=payload.dispute_type,
+        user_id=user.id,
+        advertiser_id=adv_id,
+        publisher_id=pub_id,
+        campaign_id=payload.campaign_id,
+        slot_id=payload.slot_id,
+        transaction_id=payload.transaction_id,
+        amount_disputed=payload.amount_disputed,
+        amount_credited=Decimal("0"),
+        currency=payload.currency.upper(),
+        status="OPEN",
+        reason=payload.reason,
+        evidence=payload.evidence,
+    )
+    session.add(dispute)
+    await session.commit()
+    await session.refresh(dispute)
+    return dispute
+
+
+@router.get("/disputes", response_model=list[DisputeResponse])
+async def list_disputes(
+    status_filter: str | None = Query(default=None, alias="status"),
+    advertiser_id: int | None = Query(default=None),
+    publisher_id: int | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(verified_user),
+) -> list[BillingDispute]:
+    """List billing disputes and traffic appeals, strictly scoped to role and ownership."""
+    query = select(BillingDispute).order_by(BillingDispute.created_at.desc())
+
+    if user.role == "advertiser":
+        query = query.where(BillingDispute.advertiser_id == user.advertiser_id)
+    elif user.role == "publisher":
+        query = query.where(BillingDispute.publisher_id == user.publisher_id)
+    elif user.role == "admin":
+        if advertiser_id:
+            query = query.where(BillingDispute.advertiser_id == advertiser_id)
+        if publisher_id:
+            query = query.where(BillingDispute.publisher_id == publisher_id)
+    else:
+        query = query.where(BillingDispute.user_id == user.id)
+
+    if status_filter:
+        query = query.where(BillingDispute.status == status_filter.upper())
+
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
+@router.get("/disputes/{dispute_id}", response_model=DisputeResponse)
+async def get_dispute(
+    dispute_id: int,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(verified_user),
+) -> BillingDispute:
+    """Retrieve details for a single dispute."""
+    dispute = await session.get(BillingDispute, dispute_id)
+    if not dispute:
+        raise HTTPException(status_code=404, detail="Dispute not found")
+
+    if user.role != "admin":
+        if user.role == "advertiser" and dispute.advertiser_id != user.advertiser_id:
+            raise HTTPException(status_code=403, detail="Not authorized to access this dispute")
+        if user.role == "publisher" and dispute.publisher_id != user.publisher_id:
+            raise HTTPException(status_code=403, detail="Not authorized to access this dispute")
+        if user.role not in ("advertiser", "publisher") and dispute.user_id != user.id:
+            raise HTTPException(status_code=403, detail="Not authorized to access this dispute")
+
+    return dispute
+
+
+@router.post("/disputes/{dispute_id}/resolve", response_model=DisputeResponse, dependencies=[Depends(require_roles("admin"))])
+async def resolve_dispute(
+    dispute_id: int,
+    payload: DisputeResolveRequest,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(verified_user),
+) -> BillingDispute:
+    """Admin-only endpoint to resolve a dispute with optional automated refund/credit."""
+    try:
+        dispute = await BillingService.process_dispute_resolution(
+            session=session,
+            dispute_id=dispute_id,
+            status=payload.status,
+            amount_credited=payload.amount_credited,
+            notes=payload.resolution_notes,
+            admin_user_id=user.id,
+        )
+        await session.commit()
+        await session.refresh(dispute)
+        return dispute
+    except ValueError as e:
+        await session.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ── Phase 3: Financial & Measurement Reconciliation ──────────────────────────
+
+@router.post("/reconcile", response_model=ReconciliationResponse, dependencies=[Depends(require_roles("admin"))])
+async def run_reconciliation(
+    payload: ReconciliationRequest = ReconciliationRequest(),
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(verified_user),
+) -> ReconciliationResponse:
+    """
+    Run authoritative financial and delivery telemetry audit (Phase 3 Task D).
+    Compares ad_events spend, ledger transactions, advertiser balances, and publisher earnings.
+    """
+    service = ReconciliationService(session)
+    report = await service.reconcile(
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        advertiser_id=payload.advertiser_id,
+        publisher_id=payload.publisher_id,
+    )
+    return ReconciliationResponse(
+        status=report.status,
+        start_date=report.start_date,
+        end_date=report.end_date,
+        total_event_spend=report.total_event_spend,
+        total_ledger_spend=report.total_ledger_spend,
+        spend_delta=report.spend_delta,
+        total_ivt_events=report.total_ivt_events,
+        ivt_suppressed_spend=report.ivt_suppressed_spend,
+        discrepancies=report.discrepancies,
+        alerts=report.alerts,
+    )
+
 

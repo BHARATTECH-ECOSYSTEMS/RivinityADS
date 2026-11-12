@@ -603,14 +603,32 @@ async def test_privacy_pii_email_user_id_rejected(client: AsyncClient, setup_ad_
 
 @pytest.mark.asyncio
 async def test_anonymous_request_without_auth_headers_succeeds(client: AsyncClient, setup_ad_data) -> None:
-    """Anonymous ad request with no auth headers succeeds for public web slots."""
+    """Anonymous headerless requests are rejected with HTTP 403 and never reach candidate retrieval or billing."""
     body = json.dumps({"slot_id": "slot_pub1", "num_ads": 1}).encode()
     headers = {"Content-Type": "application/json"}
 
-    response = await client.post("/api/v1/ad/request", content=body, headers=headers)
-    assert response.status_code == 200
+    with patch("liteads.ad_server.services.ad_service.AdService.serve_ads", new_callable=AsyncMock) as mock_serve:
+        response = await client.post("/api/v1/ad/request", content=body, headers=headers)
+        assert response.status_code == 403
+        assert "missing Origin or Referer" in response.json()["detail"]
+        mock_serve.assert_not_called()
+
+    # Verify no tracking URLs are issued
     data = response.json()
-    assert "request_id" in data
+    assert "ads" not in data or not data.get("ads")
+
+    # Verify no billable event can be created
+    track_res = await client.post(
+        "/api/v1/event/track",
+        json={
+            "request_id": "req_unauthorized_headerless",
+            "ad_id": "ad_1_1",
+            "event_type": "impression",
+            "sig": "invalid_forged_sig",
+            "slot_id": "slot_pub1",
+        },
+    )
+    assert track_res.status_code in (400, 403)
 
 
 @pytest.mark.asyncio

@@ -92,9 +92,13 @@ class EventService:
                 if slot:
                     publisher_id = slot.publisher_id
 
-            # Phase 10F Financial Safeguards:
+            # Phase 10F & Phase 2 Financial Safeguards:
             # 1. Non-billable preview or sandbox traffic generates zero billable spend
-            if (extra and (extra.get("is_preview") or extra.get("is_sandbox"))) or request_id.startswith(("prev_", "test_preview_")):
+            is_sandbox_event = bool(
+                (extra and (extra.get("is_preview") or extra.get("is_sandbox") or extra.get("sandbox")))
+                or request_id.startswith(("prev_", "test_preview_", "test_", "req_sandbox_"))
+            )
+            if is_sandbox_event:
                 cost = Decimal("0")
 
             # 2. Placements bound to unverified or inactive properties generate zero billable spend
@@ -115,46 +119,112 @@ class EventService:
                 if not pub_obj or pub_obj.status != Status.ACTIVE:
                     logger.warning("Event on inactive publisher; billable charge suppressed", publisher_id=publisher_id)
                     cost = Decimal("0")
+
+            # Phase 3 IVT Assessment:
+            from liteads.ad_server.services.ivt_service import IVTService
+            ip_address = extra.get("ip_address") or extra.get("client_ip") or extra.get("ip") if extra else None
+            user_agent = extra.get("user_agent") if extra else None
+            cur_event_dt = (
+                datetime.fromtimestamp(timestamp, tz=timezone.utc).replace(tzinfo=None)
+                if timestamp
+                else datetime.now(timezone.utc).replace(tzinfo=None)
+            )
+
+            ivt_service = IVTService(self.session)
+            ivt_result = await ivt_service.evaluate_event(
+                event_type=event_type_enum,
+                request_id=request_id,
+                campaign_id=campaign_id,
+                creative_id=creative_id,
+                user_id=user_id,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                event_time=cur_event_dt,
+                slot_id=slot_id,
+                seq=seq,
+                is_sandbox=is_sandbox_event,
+                extra=extra,
+            )
+
+            if ivt_result.is_invalid:
+                logger.warning(
+                    "Event flagged as invalid traffic (IVT); billing and stats suppressed",
+                    reason=ivt_result.reason,
+                    request_id=request_id,
+                )
+                if ivt_result.reason == "DUPLICATE_REPLAY" and raise_on_duplicate:
+                    raise HTTPException(status_code=429, detail="Duplicate event rejected")
+                cost = Decimal("0")
             
             logical_event_key = f"{request_id}:{creative_id or 0}:{event_type_enum}:{seq}"
 
-            if campaign and campaign.advertiser_id and publisher_id and cost > 0:
-                success_bill = await BillingService.process_impression_charge(
-                    self.session,
-                    advertiser_id=campaign.advertiser_id,
-                    campaign_id=campaign.id,
-                    publisher_id=publisher_id,
-                    cost=cost,
-                    reference_id=logical_event_key,
-                )
-                if not success_bill:
-                    logger.warning(f"Billing failed for event {request_id}")
-                    return False
-            elif campaign and campaign.updated_at.date() < datetime.now(timezone.utc).date():
-                campaign.spent_today = 0
+            if not ivt_result.is_invalid:
+                if event_type_enum == EventType.CONVERSION:
+                    order_id_cpa = extra.get("order_id") if extra else None
+                    if campaign and campaign.advertiser_id and cost > 0:
+                        success_bill = await BillingService.process_cpa_charge(
+                            self.session,
+                            advertiser_id=campaign.advertiser_id,
+                            campaign_id=campaign.id,
+                            cost=cost,
+                            currency="INR",
+                            publisher_id=publisher_id,
+                            order_id=order_id_cpa,
+                            request_id=request_id,
+                        )
+                        if not success_bill:
+                            logger.warning(f"CPA billing failed for event {request_id}")
+                            return False
+                elif campaign and campaign.advertiser_id and publisher_id and cost > 0:
+                    success_bill = await BillingService.process_impression_charge(
+                        self.session,
+                        advertiser_id=campaign.advertiser_id,
+                        campaign_id=campaign.id,
+                        publisher_id=publisher_id,
+                        cost=cost,
+                        reference_id=logical_event_key,
+                        currency="INR",
+                    )
+                    if not success_bill:
+                        logger.warning(f"Billing failed for event {request_id}")
+                        return False
+                elif campaign and campaign.updated_at.date() < datetime.now(timezone.utc).date():
+                    campaign.spent_today = 0
 
             event = AdEvent(
                 request_id=request_id,
                 campaign_id=campaign_id,
                 creative_id=creative_id,
                 event_type=event_type_enum,
-                event_time=datetime.fromtimestamp(timestamp, tz=timezone.utc).replace(tzinfo=None)
-                if timestamp
-                else datetime.now(timezone.utc).replace(tzinfo=None),
+                event_time=cur_event_dt,
                 user_id=user_id,
+                ip_address=ip_address,
                 cost=cost,
                 idempotency_key=logical_event_key,
+                is_test=is_sandbox_event,
+                is_invalid=ivt_result.is_invalid,
+                invalid_reason=ivt_result.reason,
+                invalid_details=ivt_result.details,
             )
 
             self.session.add(event)
             await self.session.flush()
 
-            await self._update_campaign_stats(campaign, creative_id, event_type_enum)
-            await self._update_publisher_stats(event_type_enum, cost, extra)
-            await self._update_user_profile(user_id, campaign_id, event_type_enum)
+            if not is_sandbox_event and not ivt_result.is_invalid:
+                await self._update_campaign_stats(campaign, creative_id, event_type_enum)
+                await self._update_publisher_stats(event_type_enum, cost, extra)
+                await self._update_user_profile(user_id, campaign_id, event_type_enum)
+
+            if ivt_result.is_invalid:
+                today_str = current_date()
+                try:
+                    await redis_client.hincrby(f"stat:ivt:{today_str}", ivt_result.reason or "unknown", 1)
+                    await redis_client.expire(f"stat:ivt:{today_str}", 86400 * 7)
+                except Exception:
+                    pass
 
             # Update AdSet daily budget in Redis if applicable
-            if ad_set_id and cost > 0:
+            if ad_set_id and cost > 0 and not ivt_result.is_invalid:
                 today = current_date()
                 as_key = f"adset_budget:{ad_set_id}:{today}"
                 try:
@@ -163,11 +233,12 @@ class EventService:
                 except Exception as e:
                     logger.error(f"Failed to update ad set spent for ad_set {ad_set_id}: {e}")
 
-            # Update real-time stats in Redis
-            await self._update_stats(campaign_id, event_type_enum, ad_set_id=ad_set_id)
+            # Update real-time stats in Redis (production only, non-invalid)
+            if not is_sandbox_event and not ivt_result.is_invalid:
+                await self._update_stats(campaign_id, event_type_enum, ad_set_id=ad_set_id)
 
             # Update frequency counter for impressions
-            if event_type_enum == EventType.IMPRESSION and user_id:
+            if event_type_enum == EventType.IMPRESSION and user_id and not ivt_result.is_invalid:
                 await self._update_frequency(user_id, campaign_id, slot_id=slot_id, ad_set_id=ad_set_id)
 
             # ── Webhook dispatch (fire-and-forget background tasks) ──────
@@ -306,7 +377,8 @@ class EventService:
         delta_impressions = 1 if event_type == EventType.IMPRESSION else 0
         delta_clicks = 1 if event_type == EventType.CLICK else 0
         delta_conversions = 1 if event_type == EventType.CONVERSION else 0
-        delta_earnings = cost * Decimal("0.70")
+        rev_share = await BillingService.get_rev_share(self.session)
+        delta_earnings = cost * rev_share
 
         # Database-atomic upsert across supported dialects
         dialect_name = self.session.get_bind().dialect.name

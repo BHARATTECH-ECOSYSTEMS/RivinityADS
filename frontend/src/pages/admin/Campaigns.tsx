@@ -178,7 +178,7 @@ export default function CampaignsAdmin() {
                 {filteredRows.map((c) => {
                   const adv = advertisers.find((a) => a.id === c.advertiser_id);
                   const isActive = c.status === 1;
-                  const pct = c.budget_daily ? Math.min(100, Math.round((c.spent_today / c.budget_daily) * 100)) : 0;
+                  const pct = Number(c.budget_daily) ? Math.min(100, Math.round((Number(c.spent_today) / Number(c.budget_daily)) * 100)) : 0;
 
                   return (
                     <tr key={c.id}>

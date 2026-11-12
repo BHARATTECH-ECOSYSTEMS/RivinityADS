@@ -1,5 +1,5 @@
-# Prometheus Alert Rules for RivinityADS (Phase 12C)
-# Operational monitoring and alert definitions for Ad Server, dependencies, and outbox.
+# Prometheus Alert Rules for RivinityADS (Phase 7 Production Hardening)
+# Operational monitoring and alert definitions for Ad Server, dependencies, outbox, workers, and financial integrity.
 #
 # Rules conform to standard Prometheus v2 alert rule schema.
 # All expressions reference real metrics emitted by liteads or standard probes.
@@ -7,19 +7,31 @@
 groups:
   - name: rivinity_ads_operational_alerts
     rules:
-      # Alert 1: High HTTP 5xx Error Rate
-      - alert: AdServerElevated5xxRate
-        expr: (sum(rate(liteads_http_requests_total{status=~"5.."}[5m])) / sum(rate(liteads_http_requests_total[5m]))) * 100 > 2.0
+      # Alert 1: High HTTP 5xx Error Rate (> 1.0%)
+      - alert: AdServerElevatedErrorRate
+        expr: (sum(rate(liteads_http_requests_total{status=~"5.."}[5m])) / sum(rate(liteads_http_requests_total[5m]))) * 100 > 1.0
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "Ad Server 5xx error rate is above 2% (current: {{ $value }}%)"
+          summary: "Ad Server 5xx error rate is above 1% (current: {{ $value }}%)"
           description: "Elevated HTTP 5xx responses observed across API endpoints over the last 5 minutes."
-          runbook_url: "backend/docs/PHASE_12B_OPERATIONAL_READINESS_REPORT.md#runbook-1"
-          threshold_status: "provisional_baseline"
+          runbook_url: "docs/runbooks/05_provider_outage.md"
+          threshold_status: "operational_slo"
 
-      # Alert 2: Database Connection Failure
+      # Alert 2: Ad Server High p95 Latency (> 500ms)
+      - alert: AdServerP95LatencyHigh
+        expr: histogram_quantile(0.95, sum(rate(liteads_http_request_duration_seconds_bucket[5m])) by (le)) > 0.500
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ad Server p95 latency is {{ $value }}s (> 500ms)"
+          description: "Ad serving or event tracking p95 latency exceeds the 500ms production SLA over a 5-minute window."
+          runbook_url: "docs/runbooks/06_suspicious_traffic.md"
+          threshold_status: "operational_slo"
+
+      # Alert 3: Database Connection Failure
       - alert: DatabaseDependencyUnreachable
         expr: liteads_db_query_latency_seconds_count == 0 or probe_success{instance="ad-server:8000/health/ready"} == 0
         for: 1m
@@ -28,10 +40,10 @@ groups:
         annotations:
           summary: "PostgreSQL database connection is unreachable by the Ad Server"
           description: "Ad Server readiness probe indicates PostgreSQL database dependency is down or unreachable."
-          runbook_url: "backend/docs/PHASE_12B_OPERATIONAL_READINESS_REPORT.md#runbook-2"
+          runbook_url: "docs/runbooks/03_database_restore.md"
           threshold_status: "deterministic_invariant"
 
-      # Alert 3: Redis Connection Failure
+      # Alert 4: Redis Connection Failure
       - alert: RedisDependencyUnreachable
         expr: probe_success{instance="redis:6379"} == 0
         for: 1m
@@ -40,10 +52,10 @@ groups:
         annotations:
           summary: "Redis cache/rate-limiting instance is unreachable"
           description: "Blackbox health check failed to ping Redis instance on port 6379."
-          runbook_url: "backend/docs/PHASE_12B_OPERATIONAL_READINESS_REPORT.md#runbook-2"
+          runbook_url: "docs/runbooks/05_provider_outage.md"
           threshold_status: "deterministic_invariant"
 
-      # Alert 4: Outbox Backlog Age Exceeded
+      # Alert 5: Outbox Backlog Age Exceeded (> 600s)
       - alert: OutboxProcessingBacklogHigh
         expr: liteads_outbox_oldest_age_seconds > 600
         for: 5m
@@ -52,46 +64,34 @@ groups:
         annotations:
           summary: "Outbox queue {{ $labels.queue }} oldest pending item age is {{ $value }}s (>10m)"
           description: "Durable webhook or notification outbox queue is falling behind; events are not being processed within 10 minutes."
-          runbook_url: "backend/docs/PHASE_12B_OPERATIONAL_READINESS_REPORT.md#runbook-3"
+          runbook_url: "docs/runbooks/05_provider_outage.md"
           threshold_status: "operational_slo"
 
-      # Alert 5: Outbox Dead-Letter Failure Spike
+      # Alert 6: Outbox Dead-Letter Failure Spike / Webhook Retry Exhaustion
       - alert: OutboxDeadLetterSpike
-        expr: increase(liteads_outbox_failed_count[15m]) > 50
+        expr: increase(liteads_outbox_failed_count[15m]) > 25
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Over 50 outbox jobs permanently dead-lettered in queue {{ $labels.queue }} over 15m"
+          summary: "Over 25 outbox jobs permanently dead-lettered in queue {{ $labels.queue }} over 15m"
           description: "Spike in permanent delivery failures due to destination 4xx rejections, SSRF blocks, or retry exhaustion."
-          runbook_url: "backend/docs/PHASE_12B_OPERATIONAL_READINESS_REPORT.md#runbook-3"
+          runbook_url: "docs/runbooks/05_provider_outage.md"
           threshold_status: "provisional_baseline"
 
-      # Alert 6: Laya Sidecar High Timeout Rate
-      - alert: LayaSidecarElevatedTimeouts
-        expr: (sum(rate(liteads_laya_errors_total{error_category="timeout"}[10m])) / sum(rate(liteads_laya_requests_total[10m]))) * 100 > 5.0
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Laya sidecar timeout rate is above 5% over 10 minutes"
-          description: "Laya AI decision sidecar is failing to respond within bounded timeout threshold during campaign optimization cycles."
-          runbook_url: "backend/docs/PHASE_12B_OPERATIONAL_READINESS_REPORT.md#runbook-4"
-          threshold_status: "provisional_baseline"
-
-      # Alert 7: Conversion Postback Validation Failure Spike
-      - alert: ConversionSignatureFailureSpike
-        expr: increase(liteads_http_requests_total{endpoint=~".*conversion.*", status="403"}[5m]) > 20
+      # Alert 7: Dedicated Worker Heartbeat Missing / Worker Failure
+      - alert: DedicatedWorkerExecutionStalled
+        expr: time() - liteads_worker_last_heartbeat_timestamp > 300
         for: 5m
         labels:
-          severity: warning
+          severity: critical
         annotations:
-          summary: "Spike in rejected conversion postbacks due to invalid attribution signatures"
-          description: "More than 20 conversion postback requests rejected with HTTP 403 Forbidden in a 5-minute window."
-          runbook_url: "backend/docs/PHASE_12B_OPERATIONAL_READINESS_REPORT.md#runbook-5"
-          threshold_status: "provisional_anomaly"
+          summary: "Worker heartbeat for {{ $labels.worker_type }} is missing for over 5 minutes"
+          description: "Background worker container has stopped updating its heartbeat or crashed."
+          runbook_url: "docs/runbooks/01_deployment.md"
+          threshold_status: "operational_slo"
 
-      # Alert 8: Ledger Double-Entry Drift
+      # Alert 8: Spend / Revenue Mismatch & Ledger Drift
       - alert: FinancialLedgerDiscrepancy
         expr: liteads_ledger_unbalanced_transactions_total > 0
         for: 1m
@@ -100,5 +100,29 @@ groups:
         annotations:
           summary: "Unbalanced financial ledger entry detected! Debit and credit sums must match."
           description: "Critical double-entry bookkeeping violation detected by ledger audit reconciliation."
-          runbook_url: "backend/docs/PHASE_12B_OPERATIONAL_READINESS_REPORT.md#runbook-6"
+          runbook_url: "docs/runbooks/07_financial_reconciliation.md"
           threshold_status: "zero_tolerance_invariant"
+
+      # Alert 9: Conversion Anomaly Spike (Potential Fraud / IVT)
+      - alert: ConversionAnomalySpike
+        expr: increase(liteads_events_total{event_type="conversion"}[10m]) > 200
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sudden spike in conversion volume detected (> 200 conversions in 10m)"
+          description: "High volume of conversion signals received in short duration; verify attribution and IVT logs."
+          runbook_url: "docs/runbooks/06_suspicious_traffic.md"
+          threshold_status: "provisional_anomaly"
+
+      # Alert 10: Laya Sidecar High Timeout Rate (> 5.0%)
+      - alert: LayaSidecarElevatedTimeouts
+        expr: (sum(rate(liteads_laya_errors_total{error_category="timeout"}[10m])) / sum(rate(liteads_laya_requests_total[10m]))) * 100 > 5.0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Laya sidecar timeout rate is above 5% over 10 minutes"
+          description: "Laya AI decision sidecar is failing to respond within bounded timeout threshold during campaign optimization cycles."
+          runbook_url: "docs/runbooks/05_provider_outage.md"
+          threshold_status: "provisional_baseline"

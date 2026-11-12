@@ -8,7 +8,44 @@ export interface ResendVerificationInput { email: string; }
 export interface RequestPasswordResetInput { email: string; }
 export interface ResetPasswordInput { token: string; password: string; }
 export const BID_TYPES: Record<number, string> = { 1: "CPM", 2: "CPC", 3: "CPA" };
-export const CREATIVE_TYPES: Record<number, string> = { 1: "banner", 2: "native", 3: "video", 4: "interstitial" };
+export const CREATIVE_TYPES: Record<number, string> = {
+  1: "banner",
+  2: "native",
+  3: "video",
+  4: "interstitial",
+  5: "display_card",
+  6: "label_ad",
+  7: "element_ad",
+};
+
+export const AD_CATEGORIES = {
+  AI_CHATBOT: "AI and Chatbot Ads",
+  BANNER: "Banner Ads",
+} as const;
+
+export const AI_CHATBOT_FORMATS = {
+  DISPLAY_CARD: { id: "display_card", label: "Display Card", width: 520, height: 120, typeId: 5 },
+  LABEL_ADS: { id: "label_ad", label: "Label Ads", width: 400, height: 100, typeId: 6 },
+  ELEMENT_ADS: { id: "element_ad", label: "Element Ads", width: 310, height: 150, typeId: 7 },
+} as const;
+
+export const BANNER_FORMAT = {
+  id: "banner",
+  label: "Banner Ad (500 × 500)",
+  width: 500,
+  height: 500,
+  typeId: 1,
+} as const;
+
+export const CREATIVE_FORMAT_LABELS: Record<number, string> = {
+  1: "Banner Ad (500 × 500)",
+  2: "Native Ad",
+  3: "Video Ad",
+  4: "Interstitial Ad",
+  5: "Display Card (520 × 120)",
+  6: "Label Ads (400 × 100)",
+  7: "Element Ads (310 × 150)",
+};
 export const STATUS: Record<number, string> = { 0: "paused", 1: "active" };
 export interface DeviceInfo { os: string; os_version?: string; model?: string; brand?: string; screen_width?: number; screen_height?: number; language?: string; }
 export interface GeoInfo { ip?: string; country?: string; region?: string; state?: string; city?: string; pincode?: string; latitude?: number; longitude?: number; }
@@ -29,9 +66,68 @@ import type { GeoEntry } from "./api/client";
 export interface AdSetTargetingResponse { ad_set_id: number; campaign_id: number; geo_include?: GeoEntry[]; geo_exclude?: GeoEntry[]; sector_include?: string[]; sector_exclude?: string[]; }
 export interface AdSetReportingItem { ad_set_id: number; ad_set_name: string; status: number; impressions: number; clicks: number; conversions: number; spend: number; ctr: number; cvr: number; }
 export interface AdSetReportingResponse { campaign_id: number; start_date: string; end_date: string; ad_sets: AdSetReportingItem[]; total_impressions: number; total_clicks: number; total_conversions: number; total_spend: number; }
-export interface Creative { id: number; campaign_id: number; ad_set_id?: number | null; title: string; description?: string; image_url?: string; video_url?: string; landing_url: string; creative_type: number; width: number; height: number; status: number; quality_score: number; moderation_status?: number; moderation_reason?: string | null; }
+export interface Creative { id: number; campaign_id: number; ad_set_id?: number | null; title: string; description?: string; image_url?: string; video_url?: string; landing_url: string; creative_type: number; category?: string | null; format?: string | null; width: number; height: number; status: number; quality_score: number; moderation_status?: number; moderation_reason?: string | null; }
 export interface Publisher { id: number; name: string; email?: string; site_url?: string; status: number; is_sandbox: boolean; }
-export interface AdSlot { id: number; publisher_id: number; slot_id: string; name: string; format: number; width: number; height: number; status: number; is_chat_surface: boolean; ecpm_today?: number; }
+export interface AdSlot {
+  id: number;
+  publisher_id: number;
+  property_id?: number | null;
+  slot_id: string;
+  name: string;
+  format: number;
+  width: number;
+  height: number;
+  status: number;
+  floor_price?: number;
+  is_chat_surface: boolean;
+  ecpm_today?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+// ── Publisher Properties & Domain Verification ─────────────────────────────
+
+export type PropertyVerificationStatus = "PENDING" | "VERIFIED" | "FAILED";
+export type PropertyVerificationMethod = "DNS_TXT" | "HTML_META" | "PLATFORM_SUBDOMAIN";
+
+export interface PublisherProperty {
+  id: number;
+  publisher_id: number;
+  name: string;
+  domain: string;
+  status: number;
+  verification_status: PropertyVerificationStatus;
+  verification_method: PropertyVerificationMethod;
+  verification_token?: string | null;
+  challenge_expires_at?: string | null;
+  verified_at?: string | null;
+  last_error?: string | null;
+  is_platform_subdomain: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PublisherPropertyInput {
+  name: string;
+  domain: string;
+  status?: number;
+}
+
+export interface PropertyChallengeRequest {
+  method?: "DNS_TXT" | "HTML_META";
+}
+
+export interface PropertyChallengeResponse {
+  property_id: number;
+  domain: string;
+  verification_method: PropertyVerificationMethod;
+  verification_token: string;
+  dns_record_name: string;
+  dns_record_value: string;
+  html_meta_tag: string;
+  challenge_expires_at: string;
+  instructions: string;
+}
 export interface SuggestionAction {
   action: string;
   confidence?: number;
@@ -147,13 +243,40 @@ export type BlockType =
   | "contact_form"
   | "cta_banner"
   | "ad_placement"
-  | "footer";
+  | "footer"
+  | "open_design_section";
 
 export interface BlockItem {
   id: string;
   type: BlockType;
   is_visible: boolean;
   content: Record<string, any>;
+}
+
+export interface WebsiteTemplateSummary {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  thumbnail_url?: string | null;
+  badge?: string | null;
+  default_theme_config: ThemeConfig;
+  is_active: boolean;
+  order_index: number;
+}
+
+export interface WebsiteTemplateDetail extends WebsiteTemplateSummary {
+  default_pages: Array<{
+    title: string;
+    slug: string;
+    is_home: boolean;
+    order_index: number;
+    seo_meta?: SeoMeta;
+    blocks: {
+      schema_version: number;
+      blocks: BlockItem[];
+    };
+  }>;
 }
 
 export interface SeoMeta {
@@ -170,6 +293,8 @@ export interface PageSummary {
   slug: string;
   is_home: boolean;
   order_index: number;
+  language?: string;
+  translation_group_id?: string | null;
   updated_at: string;
 }
 
@@ -197,6 +322,8 @@ export interface ProjectSummary {
   publisher_id?: number | null;
   name: string;
   slug: string;
+  custom_domain?: string | null;
+  custom_domain_status?: number;
   template_id: string;
   status: number; // 0=draft, 1=published, 2=archived, 3=suspended
   monetization_status: number;
@@ -209,9 +336,124 @@ export interface ProjectSummary {
 }
 
 export interface ProjectData extends ProjectSummary {
-  custom_domain?: string | null;
+  property_id: number | null;
   theme_config: ThemeConfig;
+  business_profile?: BusinessProfileIntake | null;
+  webmaster_tools?: WebmasterToolsConfig;
+  primary_language?: string;
   pages: PageSummary[];
+}
+
+// ── Phase 6: Business Profile Questionnaire, Custom Domain & Audits ──────────
+
+export interface NAPDetails {
+  phone?: string | null;
+  email?: string | null;
+  street_address?: string | null;
+  city?: string | null;
+  state_region?: string | null;
+  postal_code?: string | null;
+  country?: string;
+  latitude?: number | null;
+  longitude?: number | null;
+}
+
+export interface DayHours {
+  day: "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday";
+  opens?: string | null;
+  closes?: string | null;
+  is_closed: boolean;
+}
+
+export interface ServiceProductItem {
+  name: string;
+  description?: string | null;
+  price?: number | null;
+  currency?: string;
+  category?: string | null;
+  image_url?: string | null;
+}
+
+export interface FAQItem {
+  question: string;
+  answer: string;
+}
+
+export interface BusinessProfileIntake {
+  business_name: string;
+  legal_name?: string | null;
+  category: string;
+  tagline?: string | null;
+  description?: string | null;
+  nap?: NAPDetails;
+  service_area_cities?: string[];
+  service_radius_km?: number | null;
+  hours?: DayHours[];
+  services_or_products?: ServiceProductItem[];
+  languages?: string[];
+  logo_url?: string | null;
+  cover_image_url?: string | null;
+  whatsapp_number?: string | null;
+  google_maps_url?: string | null;
+  social_links?: Record<string, string>;
+  faqs?: FAQItem[];
+  factual_declaration?: boolean;
+  ad_monetization_opt_in?: boolean;
+  ai_search_discovery_opt_in?: boolean;
+}
+
+export interface BusinessProfileAudit {
+  is_complete: boolean;
+  completeness_score: number;
+  missing_fields: string[];
+  supplied_fields: string[];
+  factual_assertions_count: number;
+  fabricated_claims_detected: string[];
+  schema_org_type: string;
+}
+
+export interface CustomDomainStatusResponse {
+  project_id: number;
+  custom_domain: string | null;
+  status: number;
+  status_label: string;
+  verification_token: string | null;
+  dns_record_name: string | null;
+  expected_txt_value: string | null;
+  verified_at: string | null;
+  instructions: string;
+}
+
+export interface WebmasterToolsConfig {
+  google_site_verification?: string | null;
+  bing_site_verification?: string | null;
+  indexnow_key?: string | null;
+}
+
+export interface AccessibilityAuditReport {
+  score: number;
+  all_images_have_alt: boolean;
+  missing_alt_images: string[];
+  heading_hierarchy_valid: boolean;
+  heading_issues: string[];
+  contrast_ratio: number;
+  contrast_passed: boolean;
+  has_responsive_viewport: boolean;
+  lazy_loading_applied: boolean;
+  font_display_swap: boolean;
+  recommendations: string[];
+}
+
+export interface GeoReadinessReport {
+  overall_score: number;
+  nap_completeness: boolean;
+  nap_score: number;
+  structured_data_valid: boolean;
+  schema_type: string;
+  factual_services_count: number;
+  verified_hours_present: boolean;
+  llms_txt_available: boolean;
+  disclaimer: string;
 }
 
 export interface VersionSummary {
@@ -234,6 +476,98 @@ export interface SlugCheckResponse {
   slug: string;
   available: boolean;
   reason?: string | null;
+}
+
+// ── Website Monetization & Ad Placement (Phase 5) ───────────────────────────
+
+export type AdPlacementLocation = "header_banner" | "in_article" | "sidebar" | "footer";
+
+export interface AdPlacementContent {
+  placement_location: AdPlacementLocation;
+  format: number; // 1=banner, 2=native
+  ad_slot_id: string | null;
+}
+
+export const WebsiteMonetizationStatusCode = {
+  DISABLED: 0,
+  PENDING_APPROVAL: 1,
+  ACTIVE_MONETIZED: 2,
+  PAUSED: 3,
+  REJECTED: 4,
+} as const;
+
+export type WebsiteMonetizationStatusCode =
+  typeof WebsiteMonetizationStatusCode[keyof typeof WebsiteMonetizationStatusCode];
+
+export const WebsiteMonetizationStatusMap: Record<number, string> = {
+  0: "disabled",
+  1: "pending_approval",
+  2: "active_monetized",
+  3: "paused",
+  4: "rejected",
+};
+
+export interface BoundSlot {
+  id: number;
+  slot_id: string;
+  name: string;
+  format: number;
+  width: number;
+  height: number;
+  status: number;
+  floor_price: number;
+  property_id: number | null;
+  is_chat_surface: boolean;
+}
+
+export interface MonetizationPrerequisites {
+  project_active: boolean;
+  publisher_active: boolean;
+  payout_configured: boolean;
+  property_verified: boolean;
+  slots_authorized: boolean;
+  consent_recorded: boolean;
+}
+
+export interface MonetizationConsentScope {
+  ad_delivery?: boolean;
+  revenue_share?: boolean | string;
+  active?: boolean;
+}
+
+export interface MonetizationConsentRecord {
+  accepted_terms: boolean;
+  version: string;
+  scope: MonetizationConsentScope;
+  agreed_at: string;
+  user_id: number;
+}
+
+export interface ProjectMonetizationStatus {
+  project_id: number;
+  is_eligible: boolean;
+  current_status: WebsiteMonetizationStatusCode;
+  prerequisites: MonetizationPrerequisites;
+  failure_reasons: string[];
+  slot_count: number;
+  consent: MonetizationConsentRecord | null;
+}
+
+export interface PublisherLinkInput {
+  publisher_id: number;
+  property_id: number;
+}
+
+export interface MonetizationConsentInput {
+  accepted_terms: boolean;
+  version?: string;
+  scope?: MonetizationConsentScope;
+}
+
+export interface UnpublishProjectResponse {
+  message: string;
+  status: number;
+  current_published_version_id: number | null;
 }
 
 // ── Email Marketing (Phase 6.1E) ─────────────────────────────────────────────
@@ -332,6 +666,36 @@ export interface CampaignAnalytics {
   clicks: number;
   unsubscribes: number;
   bounces: number;
+}
+
+// ── Open Design AI Generation (Phase 4D) ────────────────────────────────────
+
+export type AISectionPreset =
+  | "hero"
+  | "features"
+  | "testimonials"
+  | "pricing"
+  | "cta"
+  | "footer"
+  | "faq"
+  | "gallery"
+  | "stats"
+  | "contact"
+  | "about"
+  | "custom";
+
+export interface WebsiteAIGenerateSectionInput {
+  prompt: string;
+  section_type?: AISectionPreset | string;
+}
+
+export interface WebsiteAIGenerateSectionResponse {
+  block: BlockItem;
+  section_id: string;
+  section_type: string;
+  quota_remaining: number;
+  daily_limit: number;
+  reset_timestamp_utc: string;
 }
 
 declare global {

@@ -248,6 +248,24 @@ CREATE TABLE IF NOT EXISTS publisher_api_keys (
 CREATE INDEX IF NOT EXISTS idx_publisher_api_keys_hash ON publisher_api_keys(key_hash);
 CREATE INDEX IF NOT EXISTS idx_publisher_api_keys_publisher ON publisher_api_keys(publisher_id);
 
+-- Webhook registrations are part of the pre-Alembic baseline. Durable delivery
+-- records are added later by the webhook outbox migration.
+CREATE TABLE IF NOT EXISTS webhooks (
+    id BIGSERIAL PRIMARY KEY,
+    owner_type VARCHAR(32) NOT NULL,
+    owner_id BIGINT NOT NULL,
+    url TEXT NOT NULL,
+    events VARCHAR(255) NOT NULL DEFAULT 'impression,click,conversion',
+    secret VARCHAR(128) NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    deliveries_ok INTEGER NOT NULL DEFAULT 0,
+    deliveries_failed INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_webhooks_owner_type ON webhooks(owner_type);
+CREATE INDEX IF NOT EXISTS ix_webhooks_owner_id ON webhooks(owner_id);
+
 -- Print success message
 DO $$
 BEGIN

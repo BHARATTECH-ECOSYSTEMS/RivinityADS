@@ -1,3 +1,7 @@
+# LiteAds Local / Development Docker Compose
+# WARNING: DO NOT USE IN PRODUCTION WITHOUT SETTING ENVIRONMENT SECRETS.
+# FOR PRODUCTION DEPLOYMENTS, USE: docker compose -f docker-compose.prod.yml up -d
+
 services:
   # Ad Server (can be scaled horizontally)
   ad-server:
@@ -160,7 +164,7 @@ services:
 
   # PostgreSQL Database
   postgres:
-    image: postgres:15-alpine
+    image: postgres:15.8-alpine
     environment:
       POSTGRES_USER: ${LITEADS_DATABASE__USER:-${POSTGRES_USER:-liteads}}
       POSTGRES_PASSWORD: ${LITEADS_DATABASE__PASSWORD:?LITEADS_DATABASE__PASSWORD or POSTGRES_PASSWORD must be set and non-empty}
@@ -182,7 +186,7 @@ services:
 
   # Redis Cache
   redis:
-    image: redis:7-alpine
+    image: redis:7.2.6-alpine
     command: >
       sh -c '
         if [ -n "$$LITEADS_REDIS__PASSWORD" ]; then
@@ -207,12 +211,12 @@ services:
       - liteads-network
 
 
-  # Mailpit for local email capture
+  # Mailpit for local email capture (Development only; bound to localhost)
   mailpit:
-    image: axllent/mailpit
+    image: axllent/mailpit:v1.20
     ports:
-      - "8025:8025"
-      - "1025:1025"
+      - "127.0.0.1:8025:8025"
+      - "127.0.0.1:1025:1025"
     restart: unless-stopped
     networks:
       - liteads-network
@@ -220,7 +224,7 @@ services:
 
   # Nginx Load Balancer (optional, for production)
   nginx:
-    image: nginx:alpine
+    image: nginx:1.27.2-alpine
     ports:
       - "80:80"
     volumes:
@@ -236,13 +240,13 @@ services:
 
   # Prometheus Monitoring (optional)
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.54.1
     volumes:
       - ./deployment/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./deployment/prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
       - prometheus_data:/prometheus
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
@@ -253,7 +257,7 @@ services:
 
   # Laya optimization sidecar
   laya:
-    build: https://github.com/NandhaKishorM/laya.git
+    build: https://github.com/NandhaKishorM/laya.git#c3e5a7b  # Pinned commit SHA
     command: ["laya-serve"]
     environment:
       - HF_HUB_OFFLINE=1
@@ -270,12 +274,11 @@ services:
 
   # Grafana Dashboard (optional)
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.2.0
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_AUTH_ANONYMOUS_ENABLED=true
-      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_ANONYMOUS_ENABLED=false
     volumes:
       - grafana_data:/var/lib/grafana
       - ./deployment/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro

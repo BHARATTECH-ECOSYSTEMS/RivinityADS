@@ -32,7 +32,12 @@ ad_serving:
   default_num_ads: 1
   max_num_ads: 10
   timeout_ms: 50
-  enable_ml_prediction: true
+  enable_ml_prediction: false
+  prediction_mode: "statistical"
+  model_path: ""
+  feature_builder_path: ""
+  model_version: "v1"
+  prediction_timeout_ms: 20.0
 
 # Frequency control
 frequency:

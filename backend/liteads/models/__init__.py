@@ -4,6 +4,7 @@ Database models for LiteAds.
 
 from liteads.models.ad import (
     Advertiser,
+    AdvertiserApiKey,
     AdEvent,
     AdSet,
     Campaign,
@@ -18,7 +19,7 @@ from liteads.models.ad import (
 from liteads.models.geo import GeoLocation
 from liteads.models.publisher import AdSlot, Publisher, PublisherApiKey, PublisherDailyStat, PublisherProperty, ApiKeyDailyStat
 from liteads.models.auth import AuditLog, OneTimeToken, RefreshToken, User
-from liteads.models.finance import Transaction, PlatformSettings, PaymentRequest
+from liteads.models.finance import Transaction, PlatformSettings, PaymentRequest, PublisherPayout, BillingDispute
 from liteads.models.webhook import Webhook, WebhookDelivery
 from liteads.models.domain import AdvertiserDomain, VerificationStatus, VerificationMethod
 from liteads.models.notification import (
@@ -41,6 +42,11 @@ from liteads.models.email_marketing import (
     EmailMarketingContact,
     EmailMarketingCampaign,
 )
+from liteads.models.channel import (
+    ChannelConnection,
+    ExternalCampaignMapping,
+    PublisherInventoryContract,
+)
 from liteads.models.website import (
     WebsiteProject,
     WebsitePage,
@@ -49,6 +55,7 @@ from liteads.models.website import (
     WebsiteConsentLog,
     WebsiteStatus,
     WebsiteMonetizationStatus,
+    WebsiteTemplate,
 )
 from liteads.models.base import (
     Base,
@@ -74,14 +81,20 @@ __all__ = [
     "TransactionType",
     "WebsiteStatus",
     "WebsiteMonetizationStatus",
+    # Channel adapters
+    "ChannelConnection",
+    "ExternalCampaignMapping",
+    "PublisherInventoryContract",
     # Models
     "WebsiteProject",
     "WebsitePage",
     "WebsiteVersion",
     "WebsiteContactSubmission",
     "WebsiteConsentLog",
+    "WebsiteTemplate",
     # Models
     "Advertiser",
+    "AdvertiserApiKey",
     "AdEvent",
     "AdSet",
     "Campaign",
@@ -103,6 +116,8 @@ __all__ = [
     "Transaction",
     "PlatformSettings",
     "PaymentRequest",
+    "PublisherPayout",
+    "BillingDispute",
     "Webhook",
     "WebhookDelivery",
     "Suggestion",

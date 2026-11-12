@@ -90,6 +90,12 @@ class ContextInfo(BaseModel):
     sectors: list[str] | None = Field(
         None, description="Audience/content sectors from SECTORS taxonomy (e.g. ['tech', 'finance'])"
     )
+    surface: str | None = Field(
+        None, description="Context surface hint (e.g. 'chat', 'feed', 'search', 'sidebar')"
+    )
+    keywords: list[str] | None = Field(
+        None, max_length=20, description="Bounded contextual keywords (max 20 entries)"
+    )
 
 
 class UserFeatures(BaseModel):
@@ -128,13 +134,43 @@ class AdRequest(BaseModel):
     format: int | None = Field(
         None,
         ge=1,
-        le=4,
+        le=7,
         description=(
             "Requested creative_type to filter candidates: "
-            "1=banner, 2=native, 3=video, 4=interstitial. "
+            "1=banner, 2=native, 3=video, 4=interstitial, 5=display_card, 6=label_ad, 7=element_ad. "
             "Defaults to the slot's configured format. "
-            "Falls back to unfiltered candidates if none match."
+            "Returns no ads if no candidate matches, unless allow_format_fallback is True."
         ),
+    )
+    supported_formats: list[int] | None = Field(
+        None,
+        description="Optional list of supported creative formats (e.g. [1, 2]).",
+    )
+    allow_format_fallback: bool = Field(
+        False,
+        description="If True, permits fallback to other available formats if requested format is unavailable. Default False.",
+    )
+    surface: str | None = Field(
+        None,
+        description="Placement surface identifier, e.g. 'web', 'mobile_app', 'chat', 'ai', 'voice'.",
+    )
+    is_chat_surface: bool | None = Field(
+        None,
+        description="Explicit flag indicating request originates from a conversational/chat assistant surface.",
+    )
+    timeout_ms: int | None = Field(
+        None,
+        ge=10,
+        le=10000,
+        description="Partner SLA timeout hint in milliseconds.",
+    )
+    consent_flags: dict[str, bool] | None = Field(
+        None,
+        description="Privacy and regulatory consent signals (e.g. {'gdpr': True, 'coppa': False}).",
+    )
+    is_sandbox: bool = Field(
+        False,
+        description="Sandbox testing mode indicator.",
     )
 
     @field_validator("user_id")

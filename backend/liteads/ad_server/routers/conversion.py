@@ -106,9 +106,26 @@ async def track_conversion_postback(
 ) -> ConversionEventResponse:
     """
     Server-to-server (S2S) authenticated conversion postback endpoint.
-    Accepts HMAC-signed conversion payloads or authenticated advertiser requests.
+    Requires HMAC-signed conversion payloads bound to advertiser, campaign,
+    order ID, value, currency, timestamp, and click identifier.
+    Supports advertiser API key authentication via X-API-Key or Authorization header.
     """
     client_ip = resolve_client_ip(request)
+
+    api_key_header = request.headers.get("x-api-key") or request.headers.get("X-API-Key")
+    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+    raw_key = None
+    if api_key_header:
+        raw_key = api_key_header.strip()
+    elif auth_header and auth_header.startswith("Bearer "):
+        raw_key = auth_header[7:].strip()
+
+    api_key_advertiser_id = None
+    if raw_key and raw_key.startswith(("ak_live_", "ak_test_")):
+        from liteads.management.advertiser_api_key_service import AdvertiserApiKeyService
+        matching_key, adv = await AdvertiserApiKeyService.resolve_advertiser_api_key(raw_key, session)
+        api_key_advertiser_id = adv.id
+
     service = ConversionService(session)
     result = await service.track_conversion(
         click_token=req.click_token,
@@ -122,6 +139,8 @@ async def track_conversion_postback(
         user_id=req.user_id,
         signature=req.signature,
         is_test=req.is_test,
+        is_s2s=True,
+        api_key_advertiser_id=api_key_advertiser_id,
         ip_address=client_ip,
         extra=req.extra,
     )

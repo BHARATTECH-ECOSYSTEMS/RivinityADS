@@ -2,6 +2,7 @@
 Event tracking endpoints.
 """
 
+from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -114,6 +115,7 @@ async def track_event_get(
     ad: str = Query(..., description="Ad ID"),
     sig: str = Query(..., description="Tracking signature"),
     slot: str | None = Query(None, description="Publisher slot ID"),
+    sandbox: int | None = Query(None, description="Sandbox indicator flag"),
     event_service: EventService = Depends(get_event_service),
 ) -> EventResponse:
     """
@@ -142,6 +144,12 @@ async def track_event_get(
     # 3. Acquire replay guard reservation
     reservation = await acquire_replay_guard(type, req, ad)
 
+    extra_data: dict[str, Any] = {}
+    if slot:
+        extra_data["slot_id"] = slot
+    if sandbox:
+        extra_data["is_sandbox"] = True
+
     # 4. Record the event with transactional retry safety
     try:
         success = await event_service.track_event(
@@ -150,7 +158,7 @@ async def track_event_get(
             event_type=type,
             user_id=None,
             timestamp=current_timestamp(),
-            extra={"slot_id": slot} if slot else None,
+            extra=extra_data if extra_data else None,
             seq=reservation.seq,
             raise_on_duplicate=True,
         )

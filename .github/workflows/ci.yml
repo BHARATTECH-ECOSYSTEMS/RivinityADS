@@ -37,8 +37,8 @@ jobs:
         run: |
           HEAD_OUTPUT=$(alembic -c backend/alembic.ini heads)
           echo "Current Alembic Head: $HEAD_OUTPUT"
-          if [[ "$HEAD_OUTPUT" != *"n6f7a8b9c0d1"* ]]; then
-            echo "ERROR: Expected migration head n6f7a8b9c0d1, got: $HEAD_OUTPUT"
+          if [[ "$HEAD_OUTPUT" != *"r0a1b2c3d4e5"* ]]; then
+            echo "ERROR: Expected migration head r0a1b2c3d4e5, got: $HEAD_OUTPUT"
             exit 1
           fi
           HEAD_COUNT=$(echo "$HEAD_OUTPUT" | wc -l)
@@ -66,7 +66,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: "npm"
           cache-dependency-path: "frontend/package-lock.json"
 
@@ -126,3 +126,38 @@ jobs:
       - name: Run PostgreSQL Migration & Concurrency Verification
         run: |
           python backend/scripts/verify_postgres_phase11_concurrency.py
+
+  e2e-browser-quality:
+    name: Playwright Real-Browser E2E Security Quality Gate
+    runs-on: ubuntu-latest
+    needs: [frontend-quality]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+          cache-dependency-path: "frontend/package-lock.json"
+
+      - name: Install Frontend Dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install Playwright Chromium Browser
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright E2E Security Suite (Chromium)
+        working-directory: frontend
+        run: npm run test:e2e:chromium
+
+      - name: Upload Playwright Test Report Artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 7

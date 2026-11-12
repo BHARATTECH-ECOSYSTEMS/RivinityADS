@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 
 from urllib.parse import urlparse
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 def _validate_https_url(v: str | None) -> str | None:
     if not v:
@@ -173,7 +173,9 @@ class CreativeCreate(BaseModel):
     image_url: str | None = None
     video_url: str | None = None
     landing_url: str
-    creative_type: int = Field(default=1, ge=1, le=4)
+    category: str | None = None
+    format: str | None = None
+    creative_type: int = Field(default=1, ge=1, le=7)
     width: int = Field(default=0, ge=0)
     height: int = Field(default=0, ge=0)
     status: int = Field(default=1, ge=0, le=4)
@@ -184,6 +186,24 @@ class CreativeCreate(BaseModel):
     def validate_urls(cls, v: str | None) -> str | None:
         return _validate_https_url(v)
 
+    @model_validator(mode="after")
+    def validate_format_and_dimensions(self) -> "CreativeCreate":
+        from liteads.common.creative_formats import validate_and_normalize_creative_format
+        cat, fmt, ctype, w, h = validate_and_normalize_creative_format(
+            category=self.category,
+            format_name=self.format,
+            creative_type=self.creative_type,
+            width=self.width,
+            height=self.height,
+            is_new=True,
+        )
+        self.category = cat
+        self.format = fmt
+        self.creative_type = ctype
+        self.width = w
+        self.height = h
+        return self
+
 
 class CreativeUpdate(BaseModel):
     ad_set_id: int | None = None
@@ -192,7 +212,9 @@ class CreativeUpdate(BaseModel):
     image_url: str | None = None
     video_url: str | None = None
     landing_url: str | None = None
-    creative_type: int | None = Field(default=None, ge=1, le=4)
+    category: str | None = None
+    format: str | None = None
+    creative_type: int | None = Field(default=None, ge=1, le=7)
     width: int | None = Field(default=None, ge=0)
     height: int | None = Field(default=None, ge=0)
     status: int | None = Field(default=None, ge=0, le=4)
@@ -202,6 +224,25 @@ class CreativeUpdate(BaseModel):
     @classmethod
     def validate_urls(cls, v: str | None) -> str | None:
         return _validate_https_url(v)
+
+    @model_validator(mode="after")
+    def validate_format_and_dimensions(self) -> "CreativeUpdate":
+        if self.category or self.format or self.creative_type or self.width or self.height:
+            from liteads.common.creative_formats import validate_and_normalize_creative_format
+            cat, fmt, ctype, w, h = validate_and_normalize_creative_format(
+                category=self.category,
+                format_name=self.format,
+                creative_type=self.creative_type,
+                width=self.width,
+                height=self.height,
+                is_new=False,
+            )
+            self.category = cat
+            self.format = fmt
+            self.creative_type = ctype
+            self.width = w
+            self.height = h
+        return self
 
 
 class CreativeResponse(ORMModel):
@@ -214,6 +255,8 @@ class CreativeResponse(ORMModel):
     video_url: str | None
     landing_url: str
     creative_type: int
+    category: str | None = None
+    format: str | None = None
     width: int
     height: int
     status: int
@@ -495,6 +538,55 @@ class PublisherApiKeyCreate(BaseModel):
         elif "name" in data and "label" not in data:
             data["label"] = data["name"]
         super().__init__(**data)
+
+
+# ── Advertiser API Key schemas (Phase 1) ───────────────────────────────────────
+
+class AdvertiserApiKeyCreate(BaseModel):
+    """Input for creating a new advertiser API key."""
+
+    name: str = Field(..., min_length=1, max_length=255, description="Human-readable label for key")
+    campaign_id: int | None = Field(default=None, gt=0, description="Optional campaign scope")
+    is_sandbox: bool = Field(default=False)
+    rate_limit_per_minute: int = Field(default=60, gt=0)
+    daily_quota: int = Field(default=10000, gt=0)
+
+
+class AdvertiserApiKeyResponse(ORMModel):
+    """Read-only view of an advertiser API key."""
+
+    id: int
+    advertiser_id: int
+    campaign_id: int | None = None
+    name: str
+    key_prefix: str
+    is_sandbox: bool = False
+    rate_limit_per_minute: int = 60
+    daily_quota: int = 10000
+    last_used_at: datetime | None = None
+    revoked_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime | None = None
+
+
+class AdvertiserApiKeyCreateResponse(BaseModel):
+    """Returned exactly once when a key is created; contains raw key and raw signing secret."""
+
+    id: int
+    advertiser_id: int
+    campaign_id: int | None = None
+    name: str
+    key_prefix: str
+    is_sandbox: bool = False
+    rate_limit_per_minute: int = 60
+    daily_quota: int = 10000
+    created_at: datetime
+    raw_key: str = Field(
+        description="The full API key — copy it now, it cannot be retrieved again."
+    )
+    raw_secret: str = Field(
+        description="The HMAC signing secret — copy it now, it cannot be retrieved again."
+    )
 
 
 class PublisherApiKeyResponse(ORMModel):

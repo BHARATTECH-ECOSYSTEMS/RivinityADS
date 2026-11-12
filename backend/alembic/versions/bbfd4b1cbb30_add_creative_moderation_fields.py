@@ -29,7 +29,12 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # Remove columns
-    op.drop_constraint(None, 'creatives', type_='foreignkey')
+    inspector = sa.inspect(op.get_bind())
+    for constraint in inspector.get_foreign_keys('creatives'):
+        if constraint.get('constrained_columns') == ['moderated_by_id']:
+            if constraint.get('name'):
+                op.drop_constraint(constraint['name'], 'creatives', type_='foreignkey')
+            break
     op.drop_column('creatives', 'moderated_by_id')
     op.drop_column('creatives', 'moderated_at')
     op.drop_column('creatives', 'moderation_reason')

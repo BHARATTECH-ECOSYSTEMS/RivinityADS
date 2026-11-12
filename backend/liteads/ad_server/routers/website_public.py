@@ -15,6 +15,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from liteads.ad_server.services.business_profile_service import business_profile_service
 from liteads.ad_server.services.website_cache import website_cache
 from liteads.ad_server.services.website_renderer import website_renderer
 from liteads.common.cache import redis_client
@@ -23,6 +24,7 @@ from liteads.common.database import get_session
 from liteads.common.logger import get_logger
 from liteads.common.security import is_trusted_proxy, resolve_client_ip
 from liteads.models.website import (
+    CustomDomainStatus,
     WebsiteConsentLog,
     WebsiteContactSubmission,
     WebsiteMonetizationStatus,
@@ -200,6 +202,26 @@ def resolve_subdomain_from_request(request: Request) -> str | None:
             return subdomain
 
     return None
+
+
+async def resolve_custom_domain_slug(request: Request, session: AsyncSession) -> str | None:
+    """
+    Check if the incoming Host matches an active verified custom domain.
+    Returns the project's canonical slug if matched and verified, else None.
+    """
+    raw_host = request.headers.get("Host", "").strip().lower()
+    if ":" in raw_host:
+        raw_host = raw_host.split(":")[0]
+    if not raw_host or raw_host in ("localhost", "127.0.0.1"):
+        return None
+
+    stmt = select(WebsiteProject.slug).where(
+        WebsiteProject.custom_domain == raw_host,
+        WebsiteProject.custom_domain_status == CustomDomainStatus.VERIFIED,
+        WebsiteProject.is_deleted == False,
+    )
+    res = await session.execute(stmt)
+    return res.scalar_one_or_none()
 
 
 async def _resolve_published_site_and_snapshot(
@@ -687,6 +709,8 @@ async def preview_draft_website(
             "title": p.title,
             "slug": p.slug,
             "is_home": p.is_home,
+            "language": getattr(p, "language", "en"),
+            "translation_group_id": getattr(p, "translation_group_id", None),
             "seo_meta": p.seo_meta,
             "blocks": p.blocks,
         }
@@ -716,6 +740,10 @@ async def preview_draft_website(
             "name": project.name,
             "slug": project.slug,
             "theme_config": project.theme_config,
+            "business_profile": project.business_profile,
+            "webmaster_tools": project.webmaster_tools,
+            "primary_language": project.primary_language,
+            "custom_domain": project.custom_domain,
         },
         page_dict=selected_page,
         all_pages_dict=pages_dict,
@@ -760,7 +788,7 @@ async def preview_draft_website(
     )
 
 
-# ── SEO Endpoints: Sitemap & Robots ────────────────────────────────────────
+# ── SEO Endpoints: Sitemap & Robots & LLMs.txt ────────────────────────────
 
 @router.get("/sitemap.xml")
 async def get_sitemap(
@@ -769,6 +797,8 @@ async def get_sitemap(
 ) -> Response:
     """Generate dynamic XML sitemap containing strictly indexable published pages."""
     slug = resolve_subdomain_from_request(request)
+    if not slug:
+        slug = await resolve_custom_domain_slug(request, session)
     if not slug:
         raise HTTPException(status_code=404, detail="Sitemap not available on base platform domain.")
 
@@ -795,9 +825,14 @@ async def get_sitemap(
 
 
 @router.get("/robots.txt", response_class=PlainTextResponse)
-async def get_robots_txt(request: Request) -> PlainTextResponse:
+async def get_robots_txt(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> PlainTextResponse:
     """Generate robots.txt directing search engines to the published sitemap."""
     slug = resolve_subdomain_from_request(request)
+    if not slug:
+        slug = await resolve_custom_domain_slug(request, session)
     if not slug:
         # Standard root platform robots.txt
         return PlainTextResponse("User-agent: *\nDisallow: /api/\nDisallow: /preview/\n")
@@ -810,6 +845,46 @@ async def get_robots_txt(request: Request) -> PlainTextResponse:
         headers={
             "X-Content-Type-Options": "nosniff",
             "Cache-Control": "public, max-age=86400",
+        },
+    )
+
+
+@router.get("/llms.txt", response_class=PlainTextResponse)
+async def get_llms_txt(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> PlainTextResponse:
+    """Generate factual entity summary in Markdown for AI search crawlers (Task K)."""
+    slug = resolve_subdomain_from_request(request)
+    if not slug:
+        slug = await resolve_custom_domain_slug(request, session)
+    if not slug:
+        raise HTTPException(status_code=404, detail="llms.txt not available on platform root domain.")
+
+    project, _, _ = await _resolve_published_site_and_snapshot(slug, session)
+    content = business_profile_service.generate_factual_llms_txt(project)
+    return PlainTextResponse(
+        content=content,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "public, max-age=3600",
+        },
+    )
+
+
+@router.get("/sites/{site_slug}/llms.txt", response_class=PlainTextResponse)
+async def get_site_llms_txt_by_path(
+    site_slug: str,
+    session: AsyncSession = Depends(get_session),
+) -> PlainTextResponse:
+    """Direct path access to factual llms.txt (e.g. /sites/mysite/llms.txt)."""
+    project, _, _ = await _resolve_published_site_and_snapshot(site_slug, session)
+    content = business_profile_service.generate_factual_llms_txt(project)
+    return PlainTextResponse(
+        content=content,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "public, max-age=3600",
         },
     )
 
@@ -837,17 +912,18 @@ async def serve_site_page_by_path(
     return await _serve_published_page_response(site_slug, page_slug, request, session)
 
 
-# ── Subdomain Root & Page Catch-All ────────────────────────────────────────
+# ── Subdomain & Custom Domain Catch-All ────────────────────────────────────
 
 @router.get("/", response_class=HTMLResponse)
 async def serve_subdomain_home(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> HTMLResponse:
-    """Serve published homepage when accessed via tenant subdomain."""
+    """Serve published homepage when accessed via tenant subdomain or verified custom domain."""
     subdomain = resolve_subdomain_from_request(request)
     if not subdomain:
-        # Accessing root platform domain
+        subdomain = await resolve_custom_domain_slug(request, session)
+    if not subdomain:
         raise HTTPException(status_code=404, detail="Platform root. Visit /public-api-docs or dashboard.")
     return await _serve_published_page_response(subdomain, "", request, session)
 
@@ -858,8 +934,13 @@ async def serve_subdomain_page(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> HTMLResponse:
-    """Serve published secondary page when accessed via tenant subdomain."""
+    """Serve published secondary page when accessed via tenant subdomain or verified custom domain."""
     subdomain = resolve_subdomain_from_request(request)
+    if not subdomain:
+        subdomain = await resolve_custom_domain_slug(request, session)
+    if not subdomain:
+        raise HTTPException(status_code=404, detail="Not found")
+    return await _serve_published_page_response(subdomain, page_slug, request, session)
     if not subdomain:
         raise HTTPException(status_code=404, detail="Not found")
     return await _serve_published_page_response(subdomain, page_slug, request, session)

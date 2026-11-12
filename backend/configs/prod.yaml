@@ -16,7 +16,9 @@ redis:
 
 ad_serving:
   timeout_ms: 30
-  enable_ml_prediction: true
+  enable_ml_prediction: false
+  prediction_mode: "statistical"
+  prediction_timeout_ms: 20.0
 
 logging:
   level: "INFO"

@@ -300,12 +300,12 @@ export default function CampaignDetail() {
 
   // Pacing calculations
   const dailyPacingPct =
-    campaign.budget_daily > 0
-      ? Math.min(100, Math.round((campaign.spent_today / campaign.budget_daily) * 100))
+    Number(campaign.budget_daily) > 0
+      ? Math.min(100, Math.round((Number(campaign.spent_today) / Number(campaign.budget_daily)) * 100))
       : 0;
   const lifetimePacingPct =
-    campaign.budget_total > 0
-      ? Math.min(100, Math.round((campaign.spent_total / campaign.budget_total) * 100))
+    Number(campaign.budget_total) > 0
+      ? Math.min(100, Math.round((Number(campaign.spent_total) / Number(campaign.budget_total)) * 100))
       : 0;
 
   return (
@@ -381,7 +381,7 @@ export default function CampaignDetail() {
               />
             </div>
             <div className="text-muted" style={{ fontSize: "11px", marginTop: "var(--space-1)" }}>
-              Spent today: ${campaign.spent_today.toFixed(2)}
+              Spent today: ${Number(campaign.spent_today).toFixed(2)}
             </div>
           </div>
 
@@ -397,7 +397,7 @@ export default function CampaignDetail() {
               />
             </div>
             <div className="text-muted" style={{ fontSize: "11px", marginTop: "var(--space-1)" }}>
-              Spent lifetime: ${campaign.spent_total.toFixed(2)}
+              Spent lifetime: ${Number(campaign.spent_total).toFixed(2)}
             </div>
           </div>
         </div>

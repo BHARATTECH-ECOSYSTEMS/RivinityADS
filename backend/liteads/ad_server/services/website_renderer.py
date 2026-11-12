@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 from typing import Any
 from urllib.parse import urlparse
@@ -10,18 +11,25 @@ from urllib.parse import urlparse
 import jinja2
 
 from liteads.common.logger import get_logger
+from liteads.schemas.business_profile import CATEGORY_SCHEMA_MAP
 from liteads.schemas.website import (
+    ALLOWED_CSS_PROPERTIES,
     ALLOWED_FONTS,
     HEX_COLOR_PATTERN,
+    SPOOFING_CLASS_OR_ID_PATTERNS,
     BlockType,
     PageBlocksPayload,
     ThemeConfig,
+    validate_and_sanitize_open_design_html,
 )
 
 logger = get_logger(__name__)
 
 # Safe CSS border-radius token pattern
 BORDER_RADIUS_PATTERN = re.compile(r"^[0-9]+(?:\.[0-9]+)?(?:px|rem|em|%)?$")
+
+# Safe block ID token pattern (1-64 alphanumeric, underscores, hyphens)
+BLOCK_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
 
 # Max HTML output size limit (1 MB)
 MAX_OUTPUT_HTML_BYTES = 1024 * 1024
@@ -91,10 +99,20 @@ def safe_theme_config(raw_theme: dict[str, Any] | None) -> dict[str, str]:
     return theme
 
 
+def safe_open_design_html_for_render(raw_html: str) -> str:
+    """Re-validate and sanitize Open Design HTML at the rendering boundary."""
+    try:
+        return validate_and_sanitize_open_design_html(raw_html)
+    except Exception as e:
+        logger.warning("Failed rendering Open Design section HTML safely: %s", e)
+        # Defense-in-depth: Fallback to escaping to guarantee page rendering cannot break or execute scripts
+        return f"<!-- Sanitization notice: {html.escape(str(e))} --><div>{html.escape(raw_html)}</div>"
+
+
 # ── Jinja2 Templates ────────────────────────────────────────────────────────
 
 _PAGE_TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
+<html lang="{{ page_lang|default('en') }}">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -106,6 +124,19 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   <link rel="icon" href="{{ theme.favicon_url }}">
   {% endif %}
 
+  <!-- Webmaster Verification -->
+  {% if webmaster_tools and webmaster_tools.google_site_verification %}
+  <meta name="google-site-verification" content="{{ webmaster_tools.google_site_verification }}">
+  {% endif %}
+  {% if webmaster_tools and webmaster_tools.bing_site_verification %}
+  <meta name="msvalidate.01" content="{{ webmaster_tools.bing_site_verification }}">
+  {% endif %}
+
+  <!-- Multilingual Alternate Hreflang (rendered only when real translated pages exist) -->
+  {% for alt in hreflang_links %}
+  <link rel="alternate" hreflang="{{ alt.lang }}" href="{{ alt.url }}">
+  {% endfor %}
+
   <!-- Open Graph -->
   <meta property="og:title" content="{{ page_title }} | {{ project_name }}">
   {% if meta_description %}<meta property="og:description" content="{{ meta_description }}">{% endif %}
@@ -113,6 +144,15 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   <meta property="og:type" content="website">
   {% if og_image_url and og_image_url != '#' %}
   <meta property="og:image" content="{{ og_image_url }}">
+  {% endif %}
+
+  <!-- Schema.org JSON-LD Structured Data (from verified owner facts only) -->
+  {% if json_ld_payloads %}
+  {% for item in json_ld_payloads %}
+  <script type="application/ld+json">
+  {{ item | safe }}
+  </script>
+  {% endfor %}
   {% endif %}
 
   <!-- Typography -->
@@ -446,7 +486,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   <a href="#main-content" class="sr-only">Skip to content</a>
 
   {% if is_preview %}
-  <div class="preview-banner" role="alert">
+  <div class="preview-banner" role="alert" data-od-protected="true" data-od-editable="false">
     <strong>Draft Preview Mode</strong> — This is an unpublished draft preview of <em>{{ project_name }}</em>. Monetization and indexing are disabled.
   </div>
   {% endif %}
@@ -455,7 +495,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
     <div class="container header-inner">
       <a href="{{ home_url }}" class="site-brand">
         {% if theme.logo_url and theme.logo_url != '#' %}
-        <img src="{{ theme.logo_url }}" alt="{{ project_name }} logo" class="brand-logo">
+        <img src="{{ theme.logo_url }}" alt="{{ project_name }} logo" class="brand-logo" decoding="async">
         {% endif %}
         <span>{{ project_name }}</span>
       </a>
@@ -476,15 +516,15 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   <main id="main-content">
     {% for block in blocks %}
       {% if block.type == 'hero' %}
-      <section class="block-hero" {% if block.content.background_image_url and block.content.background_image_url != '#' %}style="background-image: linear-gradient(rgba(0,0,0,0.4), rgba(0,0,0,0.4)), url('{{ block.content.background_image_url }}'); color: #ffffff;"{% endif %}>
+      <section class="block-hero" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="hero"{% endif %} {% if block.content.background_image_url and block.content.background_image_url != '#' %}style="background-image: linear-gradient(rgba(0,0,0,0.4), rgba(0,0,0,0.4)), url('{{ block.content.background_image_url }}'); color: #ffffff;"{% endif %}>
         <div class="container">
           <div class="hero-content align-{{ block.content.alignment or 'left' }}">
-            <h1 class="hero-headline">{{ block.content.headline }}</h1>
+            <h1 class="hero-headline" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="hero" data-od-field="headline" data-od-editable="true"{% endif %}>{{ block.content.headline }}</h1>
             {% if block.content.subheadline %}
-            <p class="hero-subheadline">{{ block.content.subheadline }}</p>
+            <p class="hero-subheadline" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="hero" data-od-field="subheadline" data-od-editable="true"{% endif %}>{{ block.content.subheadline }}</p>
             {% endif %}
             {% if block.content.cta_button and block.content.cta_button.target_url != '#' %}
-            <a href="{{ block.content.cta_button.target_url }}" class="btn btn-{{ block.content.cta_button.style or 'primary' }}">
+            <a href="{{ block.content.cta_button.target_url }}" class="btn btn-{{ block.content.cta_button.style or 'primary' }}" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="hero" data-od-field="cta_button.label" data-od-editable="true"{% endif %}>
               {{ block.content.cta_button.label }}
             </a>
             {% endif %}
@@ -493,31 +533,31 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       </section>
 
       {% elif block.type == 'text_section' %}
-      <section class="block-text-section">
+      <section class="block-text-section" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="text_section"{% endif %}>
         <div class="container">
           {% if block.content.heading %}
-          <h2 class="text-heading">{{ block.content.heading }}</h2>
+          <h2 class="text-heading" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="text_section" data-od-field="heading" data-od-editable="true"{% endif %}>{{ block.content.heading }}</h2>
           {% endif %}
-          <div class="text-body">
+          <div class="text-body" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="text_section" data-od-field="body"{% endif %}>
             {% for para in block.content.paragraphs %}
-            <p>{{ para }}</p>
+            <p {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="text_section" data-od-field="body" data-od-item-index="{{ loop.index0 }}" data-od-editable="true"{% endif %}>{{ para }}</p>
             {% endfor %}
           </div>
         </div>
       </section>
 
       {% elif block.type == 'features_grid' %}
-      <section class="block-features-grid">
+      <section class="block-features-grid" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="features_grid"{% endif %}>
         <div class="container">
           {% if block.content.title %}
-          <h2 class="features-title">{{ block.content.title }}</h2>
+          <h2 class="features-title" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="features_grid" data-od-field="title" data-od-editable="true"{% endif %}>{{ block.content.title }}</h2>
           {% endif %}
           <div class="features-grid">
             {% for item in block.content['items'] %}
-            <div class="feature-card">
-              <div class="feature-icon-box" aria-hidden="true">★</div>
-              <h3 class="feature-title">{{ item.title }}</h3>
-              <p class="feature-desc">{{ item.description }}</p>
+            <div class="feature-card" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="features_grid" data-od-field="items" data-od-item-index="{{ loop.index0 }}"{% endif %}>
+              <div class="feature-icon-box" aria-hidden="true" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="features_grid" data-od-field="items.icon" data-od-item-index="{{ loop.index0 }}" data-od-editable="false"{% endif %}>★</div>
+              <h3 class="feature-title" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="features_grid" data-od-field="items.title" data-od-item-index="{{ loop.index0 }}" data-od-editable="true"{% endif %}>{{ item.title }}</h3>
+              <p class="feature-desc" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="features_grid" data-od-field="items.description" data-od-item-index="{{ loop.index0 }}" data-od-editable="true"{% endif %}>{{ item.description }}</p>
             </div>
             {% endfor %}
           </div>
@@ -525,18 +565,18 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       </section>
 
       {% elif block.type == 'image_gallery' %}
-      <section class="block-image-gallery">
+      <section class="block-image-gallery" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="image_gallery"{% endif %}>
         <div class="container">
           {% if block.content.title %}
-          <h2 class="gallery-title">{{ block.content.title }}</h2>
+          <h2 class="gallery-title" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="image_gallery" data-od-field="title" data-od-editable="true"{% endif %}>{{ block.content.title }}</h2>
           {% endif %}
           <div class="gallery-grid">
             {% for img in block.content.images %}
             {% if img.image_url != '#' %}
-            <figure class="gallery-item">
-              <img src="{{ img.image_url }}" alt="{{ img.alt_text }}" loading="lazy" class="gallery-img">
+            <figure class="gallery-item" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="image_gallery" data-od-field="images" data-od-item-index="{{ loop.index0 }}"{% endif %}>
+              <img src="{{ img.image_url }}" alt="{{ img.alt_text }}" loading="lazy" decoding="async" class="gallery-img" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="image_gallery" data-od-field="images.image_url" data-od-item-index="{{ loop.index0 }}" data-od-editable="true"{% endif %}>
               {% if img.caption %}
-              <figcaption class="gallery-caption">{{ img.caption }}</figcaption>
+              <figcaption class="gallery-caption" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="image_gallery" data-od-field="images.caption" data-od-item-index="{{ loop.index0 }}" data-od-editable="true"{% endif %}>{{ img.caption }}</figcaption>
               {% endif %}
             </figure>
             {% endif %}
@@ -546,38 +586,38 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       </section>
 
       {% elif block.type == 'contact_form' %}
-      <section class="block-contact-form">
+      <section class="block-contact-form" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="contact_form"{% endif %}>
         <div class="container">
           <div class="contact-card">
-            <h2 class="contact-title">{{ block.content.title or 'Contact Us' }}</h2>
-            <form method="POST" action="{{ contact_action_url }}">
-              <div style="display:none !important;" aria-hidden="true">
-                <input type="text" name="hp_comment" tabindex="-1" autocomplete="off">
+            <h2 class="contact-title" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="contact_form" data-od-field="title" data-od-editable="true"{% endif %}>{{ block.content.title or 'Contact Us' }}</h2>
+            <form method="POST" action="{{ contact_action_url }}" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="contact_form" data-od-field="fields" data-od-editable="false"{% endif %}>
+              <div style="display:none !important;" aria-hidden="true" data-od-protected="true" data-od-editable="false">
+                <input type="text" name="hp_comment" tabindex="-1" autocomplete="off" data-od-protected="true" data-od-editable="false">
               </div>
               {% for field in block.content.fields %}
                 {% if field == 'message' %}
-                <div class="form-group">
-                  <label for="contact-{{ field }}" class="form-label">Message</label>
-                  <textarea id="contact-{{ field }}" name="{{ field }}" class="form-textarea" required></textarea>
+                <div class="form-group" data-od-editable="false">
+                  <label for="contact-{{ field }}" class="form-label" data-od-editable="false">Message</label>
+                  <textarea id="contact-{{ field }}" name="{{ field }}" class="form-textarea" required data-od-editable="false"></textarea>
                 </div>
                 {% elif field == 'email' %}
-                <div class="form-group">
-                  <label for="contact-{{ field }}" class="form-label">Email Address</label>
-                  <input type="email" id="contact-{{ field }}" name="{{ field }}" class="form-input" required>
+                <div class="form-group" data-od-editable="false">
+                  <label for="contact-{{ field }}" class="form-label" data-od-editable="false">Email Address</label>
+                  <input type="email" id="contact-{{ field }}" name="{{ field }}" class="form-input" required data-od-editable="false">
                 </div>
                 {% elif field == 'phone' %}
-                <div class="form-group">
-                  <label for="contact-{{ field }}" class="form-label">Phone Number</label>
-                  <input type="tel" id="contact-{{ field }}" name="{{ field }}" class="form-input">
+                <div class="form-group" data-od-editable="false">
+                  <label for="contact-{{ field }}" class="form-label" data-od-editable="false">Phone Number</label>
+                  <input type="tel" id="contact-{{ field }}" name="{{ field }}" class="form-input" data-od-editable="false">
                 </div>
                 {% else %}
-                <div class="form-group">
-                  <label for="contact-{{ field }}" class="form-label">{{ field|capitalize }}</label>
-                  <input type="text" id="contact-{{ field }}" name="{{ field }}" class="form-input" required>
+                <div class="form-group" data-od-editable="false">
+                  <label for="contact-{{ field }}" class="form-label" data-od-editable="false">{{ field|capitalize }}</label>
+                  <input type="text" id="contact-{{ field }}" name="{{ field }}" class="form-input" required data-od-editable="false">
                 </div>
                 {% endif %}
               {% endfor %}
-              <button type="submit" class="btn btn-primary" style="width: 100%;">
+              <button type="submit" class="btn btn-primary" style="width: 100%;" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="contact_form" data-od-field="submit_label" data-od-editable="true"{% endif %}>
                 {{ block.content.submit_label or 'Send Message' }}
               </button>
             </form>
@@ -586,14 +626,14 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       </section>
 
       {% elif block.type == 'cta_banner' %}
-      <section class="block-cta-banner">
+      <section class="block-cta-banner" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="cta_banner"{% endif %}>
         <div class="container">
-          <h2 class="cta-title">{{ block.content.title }}</h2>
+          <h2 class="cta-title" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="cta_banner" data-od-field="title" data-od-editable="true"{% endif %}>{{ block.content.title }}</h2>
           {% if block.content.description %}
-          <p class="cta-desc">{{ block.content.description }}</p>
+          <p class="cta-desc" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="cta_banner" data-od-field="description" data-od-editable="true"{% endif %}>{{ block.content.description }}</p>
           {% endif %}
           {% if block.content.button and block.content.button.target_url != '#' %}
-          <a href="{{ block.content.button.target_url }}" class="btn btn-light">
+          <a href="{{ block.content.button.target_url }}" class="btn btn-light" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="cta_banner" data-od-field="button.label" data-od-editable="true"{% endif %}>
             {{ block.content.button.label }}
           </a>
           {% endif %}
@@ -601,26 +641,33 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
       </section>
 
       {% elif block.type == 'ad_placement' %}
-      <div class="container">
-        <div class="block-ad-placement" data-location="{{ block.content.placement_location }}">
+      <div class="container" data-od-protected="true" data-od-editable="false">
+        <div class="block-ad-placement" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="ad_placement"{% endif %} data-location="{{ block.content.placement_location }}" data-od-protected="true" data-od-editable="false">
           {% if is_monetized and not is_preview and block.content.ad_slot_id %}
-          <div class="rivinity-live-ad-container" role="region" aria-label="Sponsored Advertisement">
-            <div id="rivinity-ad-{{ block.content.ad_slot_id }}" class="rivinity-ad-slot" data-slot-id="{{ block.content.ad_slot_id }}" data-format="{{ block.content.format or 1 }}">
-              <script async src="/static/rivinity.js" data-slot="{{ block.content.ad_slot_id }}" data-format="{{ block.content.format or 1 }}"></script>
+          <div class="rivinity-live-ad-container" role="region" aria-label="Sponsored Advertisement" data-od-protected="true" data-od-editable="false">
+            <div id="rivinity-ad-{{ block.content.ad_slot_id }}{% if block.id %}-{{ block.id }}{% endif %}" class="rivinity-ad-slot" data-slot-id="{{ block.content.ad_slot_id }}" data-format="{{ block.content.format or 1 }}" data-od-protected="true" data-od-editable="false">
+              <script async src="/static/rivinity.js" data-slot="{{ block.content.ad_slot_id }}" data-format="{{ block.content.format or 1 }}" data-od-protected="true"></script>
             </div>
-            <div class="ad-label" style="font-size:0.6875rem;color:#94a3b8;text-align:right;margin-top:2px;">Sponsored</div>
+            <div class="ad-label" style="font-size:0.6875rem;color:#94a3b8;text-align:right;margin-top:2px;" data-od-protected="true" data-od-editable="false">Sponsored</div>
           </div>
           {% else %}
-          <div class="rivinity-ad-placeholder" data-slot="{{ block.content.ad_slot_id or '' }}" data-format="{{ block.content.format or 1 }}" role="region" aria-label="Advertisement Placeholder">
-            <div class="ad-placeholder-header">
-              <span class="ad-badge">Advertisement</span>
-              <span class="ad-status">Non-Billable Sandbox</span>
+          <div class="rivinity-ad-placeholder" data-slot="{{ block.content.ad_slot_id or '' }}" data-format="{{ block.content.format or 1 }}" role="region" aria-label="Advertisement Placeholder" data-od-protected="true" data-od-editable="false">
+            <div class="ad-placeholder-header" data-od-protected="true" data-od-editable="false">
+              <span class="ad-badge" data-od-protected="true" data-od-editable="false">Advertisement</span>
+              <span class="ad-status" data-od-protected="true" data-od-editable="false">Non-Billable Sandbox</span>
             </div>
-            <p class="ad-notice">RivinityADS Ad Placement Placeholder</p>
-            <p class="ad-subtext">Slot: {{ block.content.ad_slot_id or 'Auto' }} &bull; Format: {{ 'Banner' if block.content.format == 1 else 'Native' }} &bull; Monetization Inactive</p>
+            <p class="ad-notice" data-od-protected="true" data-od-editable="false">RivinityADS Ad Placement Placeholder</p>
+            <p class="ad-subtext" data-od-protected="true" data-od-editable="false">Slot: {{ block.content.ad_slot_id or 'Auto' }} &bull; Format: {{ 'Banner' if block.content.format == 1 else 'Native' }} &bull; Monetization Inactive</p>
           </div>
           {% endif %}
         </div>
+      </div>
+
+      {% elif block.type == 'open_design_section' %}
+      <div class="block-open-design-wrapper" {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="open_design_section"{% endif %}>
+        <{{ block.content.section_tag or 'section' }} {% if block.content.section_id %}id="{{ block.content.section_id }}"{% endif %} class="od-section{% if block.content.css_classes %} {{ block.content.css_classes }}{% endif %}" {% if block.content.inline_style %}style="{{ block.content.inline_style }}"{% endif %} {% if block.id %}data-od-block-id="{{ block.id }}" data-od-block-type="open_design_section"{% endif %}>
+          {{ block.content.safe_html | safe }}
+        </{{ block.content.section_tag or 'section' }}>
       </div>
 
       {% elif block.type == 'footer' %}
@@ -630,29 +677,1297 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   </main>
 
   <!-- Default or Structured Footer -->
-  <footer class="site-footer">
+  <footer class="site-footer" {% if footer_block_id %}data-od-block-id="{{ footer_block_id }}" data-od-block-type="footer"{% endif %}>
     <div class="container footer-inner">
       {% if footer_links %}
       <ul class="footer-links">
         {% for link in footer_links %}
-        <li><a href="{{ link.target_url }}" class="footer-link">{{ link.label }}</a></li>
+        <li><a href="{{ link.target_url }}" class="footer-link" {% if footer_block_id %}data-od-block-id="{{ footer_block_id }}" data-od-block-type="footer" data-od-field="links.label" data-od-item-index="{{ loop.index0 }}" data-od-editable="true"{% endif %}>{{ link.label }}</a></li>
         {% endfor %}
       </ul>
       {% endif %}
-      <p class="footer-copy">{{ footer_copyright or ('&copy; ' ~ project_name ~ '. Powered by RivinityADS.') }}</p>
+      <p class="footer-copy" {% if footer_block_id %}data-od-block-id="{{ footer_block_id }}" data-od-block-type="footer" data-od-field="copyright_text" data-od-editable="true"{% endif %}>{{ footer_copyright or ('&copy; ' ~ project_name ~ '. Powered by RivinityADS.') }}</p>
     </div>
   </footer>
 
   {% if is_monetized and not is_preview %}
-  <aside id="rivinity-consent-banner" class="rivinity-consent-banner" role="dialog" aria-label="Privacy and Advertising Choices" style="position:fixed;bottom:0;left:0;right:0;background:#1e293b;color:#f8fafc;padding:1rem 1.5rem;display:flex;align-items:center;justify-content:space-between;gap:1rem;z-index:999;box-shadow:0 -4px 12px rgba(0,0,0,0.15);font-size:0.875rem;">
-    <div style="max-width:800px;">
+  <aside id="rivinity-consent-banner" class="rivinity-consent-banner" role="dialog" aria-label="Privacy and Advertising Choices" data-od-protected="true" data-od-editable="false" style="position:fixed;bottom:0;left:0;right:0;background:#1e293b;color:#f8fafc;padding:1rem 1.5rem;display:flex;align-items:center;justify-content:space-between;gap:1rem;z-index:999;box-shadow:0 -4px 12px rgba(0,0,0,0.15);font-size:0.875rem;">
+    <div style="max-width:800px;" data-od-protected="true" data-od-editable="false">
       <strong>Privacy & Advertising Choices:</strong> This website is monetized through RivinityADS. We and our advertising partners use cookies and device identifiers to measure ad performance.
     </div>
-    <div style="display:flex;gap:0.75rem;flex-shrink:0;">
-      <button id="rivinity-consent-accept" class="btn btn-primary" style="padding:0.4rem 1rem;font-size:0.8125rem;">Accept</button>
-      <button id="rivinity-consent-decline" class="btn btn-secondary" style="padding:0.4rem 1rem;font-size:0.8125rem;">Decline</button>
+    <div style="display:flex;gap:0.75rem;flex-shrink:0;" data-od-protected="true" data-od-editable="false">
+      <button id="rivinity-consent-accept" class="btn btn-primary" style="padding:0.4rem 1rem;font-size:0.8125rem;" data-od-protected="true" data-od-editable="false">Accept</button>
+      <button id="rivinity-consent-decline" class="btn btn-secondary" style="padding:0.4rem 1rem;font-size:0.8125rem;" data-od-protected="true" data-od-editable="false">Decline</button>
     </div>
   </aside>
+  {% endif %}
+
+  {% if bridge_nonce %}
+  <script nonce="{{ bridge_nonce }}" data-od-edit-bridge>
+    (function() {
+      // RivinityADS Open Design Phase 3.1 & 3.3A: Secure Bridge & Overlay Engine
+      var bridgePort = null;
+      var activeSessionId = null;
+
+      // ── Stage 3.3A: Overlay Guide Layer & DOM Interaction Engine ─────────────
+      var PROTECTED_SELECTORS = [
+        '[data-od-protected="true"]',
+        '.block-ad-placement',
+        '.rivinity-ad-placeholder',
+        '.rivinity-live-ad-container',
+        '.rivinity-ad-slot',
+        '#rivinity-consent-banner',
+        '.preview-banner',
+        '[name="hp_comment"]',
+        '[data-od-edit-bridge]'
+      ].join(', ');
+
+      var BLOCK_ID_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
+
+      function isElementProtected(el) {
+        if (!el || typeof el.closest !== 'function') return false;
+        return Boolean(el.closest(PROTECTED_SELECTORS));
+      }
+
+      function ensureGuidesLayer() {
+        var existing = document.querySelector('[data-od-edit-guides-layer="true"]');
+        if (existing) return existing;
+
+        var layer = document.createElement('div');
+        layer.setAttribute('data-od-edit-guides-layer', 'true');
+        layer.setAttribute('aria-hidden', 'true');
+        layer.style.position = 'fixed';
+        layer.style.top = '0';
+        layer.style.left = '0';
+        layer.style.width = '100%';
+        layer.style.height = '100%';
+        layer.style.pointerEvents = 'none';
+        layer.style.zIndex = '999999';
+        layer.style.overflow = 'visible';
+
+        if (document.body) {
+          document.body.appendChild(layer);
+        }
+        return layer;
+      }
+
+      var TEXT_LEAF_TAGS = {
+        'h1': 1, 'h2': 1, 'h3': 1, 'h4': 1, 'h5': 1, 'h6': 1, 'p': 1, 'span': 1,
+        'a': 1, 'li': 1, 'blockquote': 1, 'strong': 1, 'em': 1, 'b': 1, 'i': 1,
+        'td': 1, 'th': 1, 'caption': 1, 'figcaption': 1, 'code': 1, 'pre': 1
+      };
+      var CONTAINER_TAGS = {
+        'div': 1, 'section': 1, 'article': 1, 'aside': 1, 'header': 1, 'footer': 1,
+        'table': 1, 'thead': 1, 'tbody': 1, 'tr': 1, 'ul': 1, 'ol': 1, 'figure': 1
+      };
+
+      function isTextLeafElement(el) {
+        if (!el || !el.tagName) return false;
+        var tag = el.tagName.toLowerCase();
+        if (!TEXT_LEAF_TAGS[tag]) return false;
+        if (el.children) {
+          for (var i = 0; i < el.children.length; i++) {
+            var cTag = el.children[i].tagName.toLowerCase();
+            if (CONTAINER_TAGS[cTag] || (cTag.charAt(0) === 'h' && cTag.length === 2) || cTag === 'p') return false;
+          }
+        }
+        return true;
+      }
+
+      function buildRelativeDomPath(el, container) {
+        var segments = [];
+        var curr = el;
+        while (curr && curr !== container && curr.parentElement) {
+          var odId = curr.getAttribute('data-od-id');
+          if (odId && /^[a-zA-Z0-9_\\-]+$/.test(odId)) {
+            segments.unshift('[data-od-id="' + odId + '"]');
+            break;
+          }
+          var elId = curr.getAttribute('id');
+          if (elId && /^[a-zA-Z0-9_\\-]+$/.test(elId)) {
+            segments.unshift('#' + elId);
+            break;
+          }
+          var tag = curr.tagName.toLowerCase();
+          var parent = curr.parentElement;
+          var siblings = parent.children;
+          var sameTagSiblings = [];
+          for (var i = 0; i < siblings.length; i++) {
+            if (siblings[i].tagName.toLowerCase() === tag) {
+              sameTagSiblings.push(siblings[i]);
+            }
+          }
+          if (sameTagSiblings.length > 1) {
+            var idx = sameTagSiblings.indexOf(curr) + 1;
+            segments.unshift(tag + ':nth-of-type(' + idx + ')');
+          } else {
+            segments.unshift(tag);
+          }
+          if (parent === container) break;
+          curr = parent;
+        }
+        return segments.join(' > ');
+      }
+
+      function extractMetadata(el) {
+        if (!el || typeof el.getAttribute !== 'function') return null;
+
+        var isProtected = isElementProtected(el);
+        var targetBlock = el.hasAttribute('data-od-block-id') ? el : el.closest('[data-od-block-id]');
+        if (!targetBlock) return null;
+
+        var rawBlockId = targetBlock.getAttribute('data-od-block-id');
+        if (!rawBlockId || !BLOCK_ID_REGEX.test(rawBlockId)) return null;
+
+        var blockType = (targetBlock.getAttribute('data-od-block-type') || '').trim().toLowerCase();
+        if (!blockType) return null;
+
+        var field = el.getAttribute('data-od-field') || null;
+        var rawIndex = el.getAttribute('data-od-item-index');
+        var itemIndex = null;
+        if (rawIndex !== null && /^[0-9]+$/.test(rawIndex.trim())) {
+          itemIndex = parseInt(rawIndex.trim(), 10);
+        }
+
+        var isEditable = !isProtected && el.getAttribute('data-od-editable') === 'true';
+        if (!isProtected && blockType === 'open_design_section' && isTextLeafElement(el)) {
+          isEditable = true;
+          field = 'html_content';
+        }
+
+        return {
+          blockId: rawBlockId,
+          blockType: blockType,
+          field: field,
+          itemIndex: itemIndex,
+          isEditable: isEditable,
+          isProtected: isProtected
+        };
+      }
+
+      function findSemanticTarget(el) {
+        if (!el || typeof el.closest !== 'function') return null;
+
+        // Overlay self-exclusion
+        if (el.hasAttribute('data-od-edit-guides-layer') || el.closest('[data-od-edit-guides-layer="true"]')) {
+          return null;
+        }
+
+        // Platform notices & honeypot exclusion
+        if (el.closest('.preview-banner, #rivinity-consent-banner, [name="hp_comment"], [data-od-edit-bridge]')) {
+          return null;
+        }
+
+        // Ad placements: return outer block container as protected discovery target
+        if (el.closest('.block-ad-placement, .rivinity-ad-placeholder, .rivinity-live-ad-container, .rivinity-ad-slot')) {
+          var adBlock = el.closest('[data-od-block-id]');
+          if (adBlock && extractMetadata(adBlock)) return adBlock;
+          return null;
+        }
+
+        // Candidate discovery
+        var candidate = null;
+        if (el.hasAttribute('data-od-field') && el.hasAttribute('data-od-block-id')) {
+          candidate = el;
+        } else {
+          var nearestField = el.closest('[data-od-field]');
+          if (nearestField && nearestField.hasAttribute('data-od-block-id')) {
+            candidate = nearestField;
+          } else {
+            candidate = el.closest('[data-od-block-id]');
+          }
+        }
+
+        if (!candidate) return null;
+        if (!extractMetadata(candidate)) return null;
+        return candidate;
+      }
+
+      function formatBadgeText(meta) {
+        if (meta.isProtected) return '🔒 Protected';
+        var typeStr = meta.blockType.split('_').map(function(w){ return w.charAt(0).toUpperCase() + w.slice(1); }).join(' ');
+        if (!meta.field) return typeStr;
+        var fieldStr = meta.field.replace(/_/g, ' ');
+        if (meta.itemIndex !== null) return typeStr + ' • ' + fieldStr + '[' + meta.itemIndex + ']';
+        return typeStr + ' • ' + fieldStr;
+      }
+
+      var activeHoverEl = null;
+      var activeSelectedEl = null;
+      var hoverBox = null;
+      var selectedBox = null;
+
+      function renderHoverBox(targetEl) {
+        var layer = ensureGuidesLayer();
+        if (!layer) return;
+
+        if (!targetEl || !targetEl.isConnected) {
+          clearHover();
+          return;
+        }
+
+        var meta = extractMetadata(targetEl);
+        if (!meta) {
+          clearHover();
+          return;
+        }
+
+        var rect = targetEl.getBoundingClientRect();
+        if (rect.width <= 0 && rect.height <= 0) {
+          clearHover();
+          return;
+        }
+
+        activeHoverEl = targetEl;
+
+        if (!hoverBox) {
+          hoverBox = document.createElement('div');
+          hoverBox.className = 'od-guide-box od-guide-hover';
+          hoverBox.setAttribute('aria-hidden', 'true');
+          hoverBox.style.position = 'absolute';
+          hoverBox.style.boxSizing = 'border-box';
+          hoverBox.style.pointerEvents = 'none';
+          hoverBox.style.borderRadius = '4px';
+          hoverBox.style.zIndex = '1000';
+          layer.appendChild(hoverBox);
+        }
+
+        hoverBox.style.display = 'block';
+        hoverBox.style.top = rect.top + 'px';
+        hoverBox.style.left = rect.left + 'px';
+        hoverBox.style.width = rect.width + 'px';
+        hoverBox.style.height = rect.height + 'px';
+        hoverBox.style.border = meta.isProtected ? '1.5px dashed #d97706' : '1.5px dashed #3b82f6';
+        hoverBox.style.backgroundColor = meta.isProtected ? 'rgba(245, 158, 11, 0.06)' : 'rgba(59, 130, 246, 0.06)';
+
+        var badge = hoverBox.querySelector('.od-guide-badge');
+        if (!badge) {
+          badge = document.createElement('div');
+          badge.className = 'od-guide-badge';
+          badge.style.position = 'absolute';
+          badge.style.fontSize = '10px';
+          badge.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+          badge.style.fontWeight = '600';
+          badge.style.padding = '2px 6px';
+          badge.style.borderRadius = '3px';
+          badge.style.whiteSpace = 'nowrap';
+          badge.style.pointerEvents = 'none';
+          badge.style.lineHeight = '1.2';
+          badge.style.color = '#ffffff';
+          hoverBox.appendChild(badge);
+        }
+
+        badge.textContent = formatBadgeText(meta);
+        badge.style.backgroundColor = meta.isProtected ? '#d97706' : '#2563eb';
+
+        if (rect.top < 24) {
+          badge.style.top = '2px';
+          badge.style.left = '2px';
+        } else {
+          badge.style.top = '-20px';
+          badge.style.left = '0px';
+        }
+      }
+
+      function renderSelectedBox(targetEl) {
+        var layer = ensureGuidesLayer();
+        if (!layer) return;
+
+        if (!targetEl || !targetEl.isConnected) {
+          clearSelected();
+          return;
+        }
+
+        var meta = extractMetadata(targetEl);
+        if (!meta) {
+          clearSelected();
+          return;
+        }
+
+        var rect = targetEl.getBoundingClientRect();
+        if (rect.width <= 0 && rect.height <= 0) {
+          clearSelected();
+          return;
+        }
+
+        activeSelectedEl = targetEl;
+
+        if (!selectedBox) {
+          selectedBox = document.createElement('div');
+          selectedBox.className = 'od-guide-box od-guide-selected';
+          selectedBox.setAttribute('aria-hidden', 'true');
+          selectedBox.style.position = 'absolute';
+          selectedBox.style.boxSizing = 'border-box';
+          selectedBox.style.pointerEvents = 'none';
+          selectedBox.style.borderRadius = '4px';
+          selectedBox.style.zIndex = '1001';
+          selectedBox.style.boxShadow = '0 0 0 1px rgba(255, 255, 255, 0.8), 0 4px 12px rgba(37, 99, 235, 0.25)';
+
+          ['top-left', 'top-right', 'bottom-left', 'bottom-right'].forEach(function(pos) {
+            var handle = document.createElement('div');
+            handle.className = 'od-guide-handle ' + pos;
+            handle.style.position = 'absolute';
+            handle.style.width = '6px';
+            handle.style.height = '6px';
+            handle.style.backgroundColor = '#ffffff';
+            handle.style.border = '1.5px solid #2563eb';
+            handle.style.borderRadius = '1px';
+            if (pos.indexOf('top') >= 0) handle.style.top = '-3px';
+            if (pos.indexOf('bottom') >= 0) handle.style.bottom = '-3px';
+            if (pos.indexOf('left') >= 0) handle.style.left = '-3px';
+            if (pos.indexOf('right') >= 0) handle.style.right = '-3px';
+            selectedBox.appendChild(handle);
+          });
+
+          layer.appendChild(selectedBox);
+        }
+
+        selectedBox.style.display = 'block';
+        selectedBox.style.top = rect.top + 'px';
+        selectedBox.style.left = rect.left + 'px';
+        selectedBox.style.width = rect.width + 'px';
+        selectedBox.style.height = rect.height + 'px';
+        selectedBox.style.border = meta.isProtected ? '2px solid #d97706' : '2px solid #2563eb';
+        selectedBox.style.backgroundColor = meta.isProtected ? 'rgba(245, 158, 11, 0.08)' : 'rgba(37, 99, 235, 0.08)';
+
+        var badge = selectedBox.querySelector('.od-guide-badge');
+        if (!badge) {
+          badge = document.createElement('div');
+          badge.className = 'od-guide-badge';
+          badge.style.position = 'absolute';
+          badge.style.fontSize = '10px';
+          badge.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+          badge.style.fontWeight = '700';
+          badge.style.padding = '2px 6px';
+          badge.style.borderRadius = '3px';
+          badge.style.whiteSpace = 'nowrap';
+          badge.style.pointerEvents = 'none';
+          badge.style.lineHeight = '1.2';
+          badge.style.color = '#ffffff';
+          selectedBox.appendChild(badge);
+        }
+
+        badge.textContent = formatBadgeText(meta);
+        badge.style.backgroundColor = meta.isProtected ? '#d97706' : '#2563eb';
+
+        if (rect.top < 24) {
+          badge.style.top = '2px';
+          badge.style.left = '2px';
+        } else {
+          badge.style.top = '-22px';
+          badge.style.left = '-1px';
+        }
+      }
+
+      function clearHover() {
+        activeHoverEl = null;
+        if (hoverBox) hoverBox.style.display = 'none';
+      }
+
+      function clearSelected() {
+        activeSelectedEl = null;
+        if (selectedBox) selectedBox.style.display = 'none';
+      }
+
+      // ── Stage 3.4A: Native Text Inline Editing Engine ────────────────────────
+      var SCHEMA_FIELD_CONSTRAINTS = {
+        'hero': {
+          'headline': { maxLength: 160, multiline: false, required: true },
+          'subheadline': { maxLength: 300, multiline: true, required: false },
+          'cta_button.label': { maxLength: 60, multiline: false, required: true }
+        },
+        'text_section': {
+          'heading': { maxLength: 160, multiline: false, required: false },
+          'body': { maxLength: 10000, multiline: true, required: true }
+        },
+        'features_grid': {
+          'title': { maxLength: 160, multiline: false, required: false },
+          'items.title': { maxLength: 100, multiline: false, required: true },
+          'items.description': { maxLength: 500, multiline: true, required: true }
+        },
+        'image_gallery': {
+          'title': { maxLength: 160, multiline: false, required: false },
+          'images.caption': { maxLength: 200, multiline: false, required: false }
+        },
+        'contact_form': {
+          'title': { maxLength: 120, multiline: false, required: false },
+          'submit_label': { maxLength: 60, multiline: false, required: true }
+        },
+        'cta_banner': {
+          'title': { maxLength: 160, multiline: false, required: true },
+          'description': { maxLength: 300, multiline: true, required: false },
+          'button.label': { maxLength: 60, multiline: false, required: true }
+        },
+        'footer': {
+          'copyright_text': { maxLength: 160, multiline: false, required: false },
+          'links.label': { maxLength: 50, multiline: false, required: true }
+        }
+      };
+
+      function normalizeFieldIdentifier(field) {
+        if (!field) return null;
+        return field.replace(/\\[\\d*\\]/g, '');
+      }
+
+      function getFieldConstraints(blockType, field) {
+        if (!blockType || !field) return null;
+        var blockConstraints = SCHEMA_FIELD_CONSTRAINTS[blockType];
+        if (!blockConstraints) return null;
+
+        var normalized = normalizeFieldIdentifier(field);
+        if (normalized && blockConstraints[normalized]) {
+          return blockConstraints[normalized];
+        }
+
+        var prefix = blockType + '.';
+        if (normalized && normalized.indexOf(prefix) === 0) {
+          var stripped = normalized.slice(prefix.length);
+          if (blockConstraints[stripped]) {
+            return blockConstraints[stripped];
+          }
+        }
+        return null;
+      }
+
+      function isFieldInlineEditable(blockType, field) {
+        return getFieldConstraints(blockType, field) !== null;
+      }
+
+      function placeCaretFromClick(clickEvent, el) {
+        if (!el || typeof window.getSelection !== 'function') return;
+        var range = null;
+        if (document.caretRangeFromPoint && clickEvent && typeof clickEvent.clientX === 'number') {
+          try {
+            range = document.caretRangeFromPoint(clickEvent.clientX, clickEvent.clientY);
+          } catch (_) {}
+        } else if (document.caretPositionFromPoint && clickEvent && typeof clickEvent.clientX === 'number') {
+          try {
+            var pos = document.caretPositionFromPoint(clickEvent.clientX, clickEvent.clientY);
+            if (pos && pos.offsetNode) {
+              range = document.createRange();
+              range.setStart(pos.offsetNode, pos.offset);
+              range.collapse(true);
+            }
+          } catch (_) {}
+        }
+        if (!range) {
+          try {
+            range = document.createRange();
+            range.selectNodeContents(el);
+            range.collapse(false);
+          } catch (_) {}
+        }
+        if (range) {
+          try {
+            var sel = window.getSelection();
+            if (sel) {
+              sel.removeAllRanges();
+              sel.addRange(range);
+            }
+          } catch (_) {}
+        }
+      }
+
+      var inlineToolbar = null;
+      var toolbarCounter = null;
+      var toolbarBtnSave = null;
+      var toolbarBtnCancel = null;
+      var activeTextEdit = null;
+
+      function ensureInlineToolbar() {
+        if (inlineToolbar && inlineToolbar.isConnected) return inlineToolbar;
+        var layer = ensureGuidesLayer();
+        if (!layer) return null;
+
+        var existing = layer.querySelector('[data-od-inline-toolbar="true"]');
+        if (existing) {
+          inlineToolbar = existing;
+          toolbarCounter = existing.querySelector('.od-toolbar-counter');
+          toolbarBtnSave = existing.querySelector('.od-toolbar-save');
+          toolbarBtnCancel = existing.querySelector('.od-toolbar-cancel');
+          return inlineToolbar;
+        }
+
+        inlineToolbar = document.createElement('div');
+        inlineToolbar.className = 'od-inline-toolbar';
+        inlineToolbar.setAttribute('data-od-inline-toolbar', 'true');
+        inlineToolbar.setAttribute('aria-hidden', 'true');
+        inlineToolbar.style.position = 'absolute';
+        inlineToolbar.style.boxSizing = 'border-box';
+        inlineToolbar.style.zIndex = '1000000';
+        inlineToolbar.style.display = 'none';
+        inlineToolbar.style.alignItems = 'center';
+        inlineToolbar.style.gap = '6px';
+        inlineToolbar.style.backgroundColor = '#0f172a';
+        inlineToolbar.style.border = '1px solid #334155';
+        inlineToolbar.style.borderRadius = '4px';
+        inlineToolbar.style.padding = '3px 6px';
+        inlineToolbar.style.boxShadow = '0 4px 14px rgba(0, 0, 0, 0.35)';
+        inlineToolbar.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+        inlineToolbar.style.fontSize = '11px';
+        inlineToolbar.style.lineHeight = '1';
+        inlineToolbar.style.pointerEvents = 'auto';
+        inlineToolbar.style.userSelect = 'none';
+
+        toolbarCounter = document.createElement('span');
+        toolbarCounter.className = 'od-toolbar-counter';
+        toolbarCounter.style.color = '#94a3b8';
+        toolbarCounter.style.fontSize = '10px';
+        toolbarCounter.style.fontFamily = 'monospace';
+        toolbarCounter.style.padding = '0 4px';
+        inlineToolbar.appendChild(toolbarCounter);
+
+        toolbarBtnSave = document.createElement('button');
+        toolbarBtnSave.type = 'button';
+        toolbarBtnSave.className = 'od-toolbar-btn od-toolbar-save';
+        toolbarBtnSave.setAttribute('title', 'Apply edit (Enter)');
+        toolbarBtnSave.textContent = '✓';
+        toolbarBtnSave.style.background = 'rgba(56, 189, 248, 0.15)';
+        toolbarBtnSave.style.border = '1px solid rgba(56, 189, 248, 0.4)';
+        toolbarBtnSave.style.borderRadius = '3px';
+        toolbarBtnSave.style.color = '#38bdf8';
+        toolbarBtnSave.style.cursor = 'pointer';
+        toolbarBtnSave.style.padding = '2px 6px';
+        toolbarBtnSave.style.fontSize = '11px';
+        toolbarBtnSave.style.fontWeight = '700';
+        toolbarBtnSave.style.lineHeight = '1';
+
+        toolbarBtnCancel = document.createElement('button');
+        toolbarBtnCancel.type = 'button';
+        toolbarBtnCancel.className = 'od-toolbar-btn od-toolbar-cancel';
+        toolbarBtnCancel.setAttribute('title', 'Cancel edit (Esc)');
+        toolbarBtnCancel.textContent = '✕';
+        toolbarBtnCancel.style.background = 'transparent';
+        toolbarBtnCancel.style.border = '1px solid rgba(148, 163, 184, 0.3)';
+        toolbarBtnCancel.style.borderRadius = '3px';
+        toolbarBtnCancel.style.color = '#cbd5e1';
+        toolbarBtnCancel.style.cursor = 'pointer';
+        toolbarBtnCancel.style.padding = '2px 6px';
+        toolbarBtnCancel.style.fontSize = '11px';
+        toolbarBtnCancel.style.fontWeight = '700';
+        toolbarBtnCancel.style.lineHeight = '1';
+
+        toolbarBtnSave.addEventListener('pointerdown', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          finishActiveTextEdit(true);
+        });
+        toolbarBtnCancel.addEventListener('pointerdown', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          finishActiveTextEdit(false);
+        });
+
+        inlineToolbar.appendChild(toolbarBtnSave);
+        inlineToolbar.appendChild(toolbarBtnCancel);
+        layer.appendChild(inlineToolbar);
+        return inlineToolbar;
+      }
+
+      function updateCounterAndToolbar() {
+        if (!activeTextEdit || !toolbarCounter) return;
+        var currentText = activeTextEdit.el.textContent || '';
+        var len = currentText.length;
+        if (activeTextEdit.constraint && activeTextEdit.constraint.maxLength) {
+          var max = activeTextEdit.constraint.maxLength;
+          toolbarCounter.textContent = len + ' / ' + max;
+          toolbarCounter.style.display = 'inline';
+          if (len > max) {
+            toolbarCounter.style.color = '#ef4444';
+            toolbarCounter.style.fontWeight = '700';
+          } else {
+            toolbarCounter.style.color = '#94a3b8';
+            toolbarCounter.style.fontWeight = '500';
+          }
+        } else {
+          toolbarCounter.style.display = 'none';
+        }
+      }
+
+      function renderInlineToolbar(el) {
+        var toolbar = ensureInlineToolbar();
+        if (!toolbar || !el || !el.isConnected) {
+          hideInlineToolbar();
+          return;
+        }
+        var rect = el.getBoundingClientRect();
+        toolbar.style.display = 'flex';
+
+        var winHeight = (window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 600);
+        var winWidth = (window.innerWidth || (document.documentElement && document.documentElement.clientWidth) || 800);
+        var tbHeight = 28;
+        var tbWidth = 140;
+
+        var topPos = rect.top >= (tbHeight + 6) ? (rect.top - tbHeight - 4) : (rect.bottom + 4);
+        var clampedTop = Math.max(4, Math.min(topPos, winHeight - tbHeight - 4));
+        toolbar.style.top = clampedTop + 'px';
+
+        var leftPos = Math.max(8, Math.min(rect.left, winWidth - tbWidth - 8));
+        toolbar.style.left = leftPos + 'px';
+
+        updateCounterAndToolbar();
+      }
+
+      function hideInlineToolbar() {
+        if (inlineToolbar) {
+          inlineToolbar.style.display = 'none';
+        }
+      }
+
+      function startTextEdit(el, clickEvent, options) {
+        if (!el || !el.isConnected) return false;
+        if (isElementProtected(el)) return false;
+
+        var meta = extractMetadata(el);
+        if (!meta || meta.isProtected) return false;
+
+        var isCustomSection = meta.blockType === 'open_design_section';
+        if (isCustomSection) {
+          if (!options || !options.allowCustomSection || !isTextLeafElement(el)) {
+            return false;
+          }
+        } else {
+          if (!meta.isEditable) return false;
+        }
+
+        if (meta.blockType === 'ad_placement' || (typeof el.closest === 'function' && el.closest('.block-ad-placement, .rivinity-ad-placeholder, .rivinity-live-ad-container, .rivinity-ad-slot, [data-od-block-type="ad_placement"]'))) {
+          return false;
+        }
+
+        var disallowed = [
+          'cta_button.target_url',
+          'background_image_url',
+          'alignment',
+          'items.icon',
+          'images.image_url',
+          'images.alt_text',
+          'fields',
+          'button.target_url',
+          'links.target_url'
+        ];
+        if (meta.field && disallowed.indexOf(meta.field) !== -1) {
+          return false;
+        }
+
+        var constraint = null;
+        if (isCustomSection) {
+          var tag = el.tagName.toLowerCase();
+          var isHeading = tag.charAt(0) === 'h' && tag.length === 2;
+          constraint = { maxLength: 5000, multiline: !isHeading, required: false };
+        } else {
+          constraint = getFieldConstraints(meta.blockType, meta.field);
+        }
+        if (!constraint) return false;
+        if (isCustomSection) {
+          var tag = el.tagName.toLowerCase();
+          var isHeading = tag.charAt(0) === 'h' && tag.length === 2;
+          constraint = { maxLength: constraint.maxLength || 5000, multiline: !isHeading, required: false };
+        }
+
+        if (activeTextEdit && activeTextEdit.el === el) {
+          placeCaretFromClick(clickEvent, el);
+          return true;
+        }
+
+        if (activeTextEdit) {
+          finishActiveTextEdit(true);
+        }
+
+        var originalText = el.textContent || '';
+        var editSessionId = 'edit_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+
+        var targetSelector = null;
+        var targetOdId = null;
+        if (isCustomSection) {
+          var secContainer = el.closest('[data-od-block-id][data-od-block-type="open_design_section"]') || el.closest('[data-od-block-id]');
+          if (secContainer) {
+            targetSelector = buildRelativeDomPath(el, secContainer);
+          }
+          targetOdId = el.getAttribute('data-od-id') || null;
+        }
+
+        try {
+          el.setAttribute('contenteditable', 'plaintext-only');
+          if (el.contentEditable !== 'plaintext-only') {
+            el.setAttribute('contenteditable', 'true');
+          }
+        } catch (_) {
+          el.setAttribute('contenteditable', 'true');
+        }
+        el.setAttribute('data-od-editing', 'true');
+        el.style.outline = '2px solid #2563eb';
+        el.style.outlineOffset = '2px';
+        el.style.cursor = 'text';
+
+        try { el.focus(); } catch (_) {}
+        placeCaretFromClick(clickEvent, el);
+
+        function onKey(ev) {
+          if (ev.key === 'Enter') {
+            if (!constraint.multiline) {
+              ev.preventDefault();
+              if (ev.shiftKey) {
+                return;
+              }
+              finishActiveTextEdit(true);
+            } else if (ev.ctrlKey || ev.metaKey) {
+              ev.preventDefault();
+              finishActiveTextEdit(true);
+            }
+          } else if (ev.key === 'Escape') {
+            ev.preventDefault();
+            finishActiveTextEdit(false);
+          } else if ((ev.ctrlKey || ev.metaKey) && (ev.key === 'b' || ev.key === 'i' || ev.key === 'u' || ev.key === 'B' || ev.key === 'I' || ev.key === 'U')) {
+            ev.preventDefault();
+          } else if (ev.key && ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+            if (constraint.maxLength) {
+              var sel = window.getSelection ? window.getSelection() : null;
+              var hasSelection = sel && sel.toString().length > 0;
+              if (!hasSelection && (el.textContent || '').length >= constraint.maxLength) {
+                ev.preventDefault();
+              }
+            }
+          }
+        }
+
+        function onBeforeInput(ev) {
+          if (!ev) return;
+          if (ev.inputType && (
+            ev.inputType.indexOf('format') === 0 ||
+            ev.inputType === 'insertLink' ||
+            ev.inputType === 'insertOrderedList' ||
+            ev.inputType === 'insertUnorderedList' ||
+            ev.inputType === 'insertHorizontalRule'
+          )) {
+            ev.preventDefault();
+            return;
+          }
+          if (!constraint.multiline && (ev.inputType === 'insertParagraph' || ev.inputType === 'insertLineBreak')) {
+            ev.preventDefault();
+            return;
+          }
+        }
+
+        function onInput() {
+          if (!activeTextEdit || activeTextEdit.el !== el) return;
+          if (el.children && el.children.length > 0 && !constraint.multiline) {
+            el.textContent = el.textContent || '';
+          }
+          updateCounterAndToolbar();
+          if (activeSelectedEl === el) {
+            renderSelectedBox(el);
+          }
+          renderInlineToolbar(el);
+        }
+
+        function onPaste(ev) {
+          ev.preventDefault();
+          var text = '';
+          if (ev.clipboardData && ev.clipboardData.getData) {
+            text = ev.clipboardData.getData('text/plain');
+          } else if (window.clipboardData && window.clipboardData.getData) {
+            text = window.clipboardData.getData('Text');
+          }
+          if (!text) return;
+          if (!constraint.multiline) {
+            text = text.replace(/[\\r\\n]+/g, ' ');
+          }
+          if (constraint.maxLength) {
+            var currentLength = (el.textContent || '').length;
+            var sel = window.getSelection ? window.getSelection() : null;
+            var selectedLength = (sel && sel.toString()) ? sel.toString().length : 0;
+            var remaining = Math.max(0, constraint.maxLength - (currentLength - selectedLength));
+            if (text.length > remaining) {
+              text = text.slice(0, remaining);
+            }
+          }
+          if (!text) return;
+          if (document.queryCommandSupported && document.queryCommandSupported('insertText')) {
+            document.execCommand('insertText', false, text);
+          } else {
+            var sel = window.getSelection ? window.getSelection() : null;
+            var range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+            if (range) {
+              range.deleteContents();
+              var node = document.createTextNode(text);
+              range.insertNode(node);
+              range.setStartAfter(node);
+              range.collapse(true);
+              sel.removeAllRanges();
+              sel.addRange(range);
+            } else {
+              el.textContent = (el.textContent || '') + text;
+            }
+          }
+          updateCounterAndToolbar();
+        }
+
+        function onDrop(ev) {
+          ev.preventDefault();
+          var text = ev.dataTransfer ? ev.dataTransfer.getData('text/plain') : '';
+          if (!text) return;
+          if (!constraint.multiline) {
+            text = text.replace(/[\\r\\n]+/g, ' ');
+          }
+          if (constraint.maxLength) {
+            var currentLen = (el.textContent || '').length;
+            var remaining = Math.max(0, constraint.maxLength - currentLen);
+            if (text.length > remaining) {
+              text = text.slice(0, remaining);
+            }
+          }
+          if (!text) return;
+          if (document.queryCommandSupported && document.queryCommandSupported('insertText')) {
+            document.execCommand('insertText', false, text);
+          } else {
+            el.textContent = (el.textContent || '') + text;
+          }
+          updateCounterAndToolbar();
+        }
+
+        activeTextEdit = {
+          sessionId: editSessionId,
+          el: el,
+          originalText: originalText,
+          meta: meta,
+          constraint: constraint,
+          patchKind: isCustomSection ? 'html_fragment' : 'native_field',
+          targetSelector: targetSelector,
+          targetOdId: targetOdId,
+          onKey: onKey,
+          onBeforeInput: onBeforeInput,
+          onInput: onInput,
+          onPaste: onPaste,
+          onDrop: onDrop
+        };
+
+        el.addEventListener('keydown', onKey);
+        el.addEventListener('beforeinput', onBeforeInput);
+        el.addEventListener('input', onInput);
+        el.addEventListener('paste', onPaste);
+        el.addEventListener('drop', onDrop);
+
+        renderInlineToolbar(el);
+
+        if (bridgePort && activeSessionId) {
+          bridgePort.postMessage({
+            type: 'OD_EDIT_SESSION_START',
+            session_id: activeSessionId,
+            timestamp: Date.now(),
+            payload: {
+              sessionId: editSessionId,
+              blockId: meta.blockId,
+              blockType: meta.blockType,
+              field: meta.field,
+              itemIndex: meta.itemIndex,
+              initialValue: originalText,
+              targetSelector: targetSelector,
+              targetOdId: targetOdId
+            }
+          });
+        }
+
+        return true;
+      }
+
+      function finishActiveTextEdit(commit) {
+        if (!activeTextEdit) return false;
+        var session = activeTextEdit;
+        activeTextEdit = null;
+
+        var el = session.el;
+        el.removeAttribute('contenteditable');
+        el.removeAttribute('data-od-editing');
+        el.style.outline = '';
+        el.style.outlineOffset = '';
+        el.style.cursor = '';
+
+        el.removeEventListener('keydown', session.onKey);
+        el.removeEventListener('beforeinput', session.onBeforeInput);
+        el.removeEventListener('input', session.onInput);
+        el.removeEventListener('paste', session.onPaste);
+        el.removeEventListener('drop', session.onDrop);
+
+        hideInlineToolbar();
+
+        if (!commit) {
+          el.textContent = session.originalText;
+          if (bridgePort && activeSessionId) {
+            bridgePort.postMessage({
+              type: 'OD_EDIT_CANCEL',
+              session_id: activeSessionId,
+              timestamp: Date.now(),
+              payload: {
+                sessionId: session.sessionId,
+                blockId: session.meta.blockId,
+                field: session.meta.field,
+                itemIndex: session.meta.itemIndex,
+                targetSelector: session.targetSelector,
+                targetOdId: session.targetOdId
+              }
+            });
+          }
+        } else {
+          var rawText = el.textContent || '';
+          var finalVal = rawText;
+          if (finalVal !== session.originalText) {
+            if (bridgePort && activeSessionId) {
+              bridgePort.postMessage({
+                type: 'OD_EDIT_PROPOSE_PATCH',
+                session_id: activeSessionId,
+                timestamp: Date.now(),
+                payload: {
+                  sessionId: session.sessionId,
+                  blockId: session.meta.blockId,
+                  blockType: session.meta.blockType,
+                  field: session.meta.field,
+                  itemIndex: session.meta.itemIndex,
+                  proposedValue: finalVal,
+                  value: finalVal,
+                  patchKind: session.patchKind || 'native_field',
+                  targetSelector: session.targetSelector,
+                  targetOdId: session.targetOdId,
+                  originalValue: session.originalText
+                }
+              });
+            }
+          }
+        }
+
+        if (activeSelectedEl && activeSelectedEl.isConnected) {
+          renderSelectedBox(activeSelectedEl);
+        }
+
+        return true;
+      }
+
+      function startLocalizedSectionEdit(el, clickEvent) {
+        return startTextEdit(el, clickEvent, { allowCustomSection: true });
+      }
+
+      function updatePositions() {
+        if (activeHoverEl) {
+          if (activeHoverEl.isConnected) renderHoverBox(activeHoverEl);
+          else clearHover();
+        }
+        if (activeSelectedEl) {
+          if (activeSelectedEl.isConnected) renderSelectedBox(activeSelectedEl);
+          else clearSelected();
+        }
+        if (activeTextEdit) {
+          if (activeTextEdit.el && activeTextEdit.el.isConnected) {
+            renderInlineToolbar(activeTextEdit.el);
+          } else {
+            finishActiveTextEdit(false);
+          }
+        }
+      }
+
+      // Event Listeners
+      document.addEventListener('pointerover', function(e) {
+        var semantic = findSemanticTarget(e.target);
+        if (semantic) renderHoverBox(semantic);
+      }, true);
+
+      document.addEventListener('pointerout', function(e) {
+        if (activeHoverEl && (e.target === activeHoverEl || activeHoverEl.contains(e.target))) {
+          var rel = e.relatedTarget;
+          if (!rel || !activeHoverEl.contains(rel)) {
+            clearHover();
+          }
+        }
+      }, true);
+
+      document.addEventListener('dblclick', function(e) {
+        if (e.target && typeof e.target.closest === 'function' && e.target.closest('[data-od-inline-toolbar="true"]')) {
+          return;
+        }
+        var semantic = findSemanticTarget(e.target);
+        if (semantic) {
+          var meta = extractMetadata(semantic);
+          if (meta && meta.isEditable && !meta.isProtected && isFieldInlineEditable(meta.blockType, meta.field)) {
+            if (!activeTextEdit || activeTextEdit.el !== semantic) {
+              startTextEdit(semantic, e);
+            }
+          } else if (meta && meta.blockType === 'open_design_section' && e.target && isTextLeafElement(e.target) && !isElementProtected(e.target)) {
+            if (!activeTextEdit || activeTextEdit.el !== e.target) {
+              startLocalizedSectionEdit(e.target, e);
+            }
+          }
+        }
+      }, true);
+
+      document.addEventListener('click', function(e) {
+        if (e.target && typeof e.target.closest === 'function' && e.target.closest('[data-od-inline-toolbar="true"]')) {
+          return;
+        }
+
+        var semantic = findSemanticTarget(e.target);
+        if (semantic) {
+          renderSelectedBox(semantic);
+          var meta = extractMetadata(semantic);
+          if (bridgePort && activeSessionId && meta) {
+            var classification = meta.isProtected ? 'protected' : (meta.isEditable ? 'editable' : 'read_only');
+            var rect = semantic.getBoundingClientRect();
+            bridgePort.postMessage({
+              type: 'OD_ELEMENT_SELECT',
+              session_id: activeSessionId,
+              timestamp: Date.now(),
+              payload: {
+                blockId: meta.blockId,
+                blockType: meta.blockType,
+                field: meta.field,
+                itemIndex: meta.itemIndex,
+                classification: classification,
+                rect: {
+                  top: rect.top,
+                  left: rect.left,
+                  width: rect.width,
+                  height: rect.height
+                }
+              }
+            });
+          }
+
+          if (meta && meta.isEditable && !meta.isProtected && isFieldInlineEditable(meta.blockType, meta.field)) {
+            if (activeTextEdit && activeTextEdit.el === semantic) {
+              placeCaretFromClick(e, semantic);
+            } else {
+              startTextEdit(semantic, e);
+            }
+          } else if (meta && meta.blockType === 'open_design_section' && e.target && isTextLeafElement(e.target) && !isElementProtected(e.target)) {
+            if (activeTextEdit && activeTextEdit.el === e.target) {
+              placeCaretFromClick(e, e.target);
+            } else {
+              startLocalizedSectionEdit(e.target, e);
+            }
+          } else {
+            if (activeTextEdit) finishActiveTextEdit(true);
+          }
+        } else {
+          if (e.target && !e.target.closest('[data-od-edit-guides-layer="true"]')) {
+            if (activeTextEdit) finishActiveTextEdit(true);
+            clearSelected();
+            if (bridgePort && activeSessionId) {
+              bridgePort.postMessage({
+                type: 'OD_BACKGROUND_CLICK',
+                session_id: activeSessionId,
+                timestamp: Date.now(),
+                payload: {}
+              });
+            }
+          }
+        }
+      }, true);
+
+      window.addEventListener('scroll', updatePositions, { passive: true });
+      window.addEventListener('resize', updatePositions, { passive: true });
+
+      // Expose engine instance for inspection, tests, and future stages
+      window.__odOverlayEngine = {
+        ensureGuidesLayer: ensureGuidesLayer,
+        ensureInlineToolbar: ensureInlineToolbar,
+        renderInlineToolbar: renderInlineToolbar,
+        hideInlineToolbar: hideInlineToolbar,
+        placeCaretFromClick: placeCaretFromClick,
+        findSemanticTarget: findSemanticTarget,
+        extractMetadata: extractMetadata,
+        setHoverTarget: renderHoverBox,
+        setSelectedTarget: renderSelectedBox,
+        clearHover: clearHover,
+        clearSelected: clearSelected,
+        clearAll: function() { clearHover(); clearSelected(); },
+        updatePositions: updatePositions,
+        getActiveHoverElement: function() { return activeHoverEl; },
+        getActiveSelectedElement: function() { return activeSelectedEl; },
+        startTextEdit: startTextEdit,
+        startLocalizedSectionEdit: startLocalizedSectionEdit,
+        buildRelativeDomPath: buildRelativeDomPath,
+        isTextLeafElement: isTextLeafElement,
+        finishActiveTextEdit: finishActiveTextEdit,
+        getActiveTextEdit: function() { return activeTextEdit; },
+        isFieldInlineEditable: isFieldInlineEditable,
+        getFieldConstraints: getFieldConstraints,
+        SCHEMA_FIELD_CONSTRAINTS: SCHEMA_FIELD_CONSTRAINTS,
+        getToolbarElement: function() { return inlineToolbar; },
+        applyConfirmedValue: function(blockId, field, itemIndex, value, targetSelector, targetOdId) {
+          if (!blockId) return false;
+          var sel = '[data-od-block-id="' + blockId + '"]';
+          var blockEl = document.querySelector(sel);
+          if (!blockEl) return false;
+          var targetEl = blockEl;
+          if (field === 'html_content' || blockEl.getAttribute('data-od-block-type') === 'open_design_section') {
+            var found = null;
+            if (targetOdId) {
+              found = blockEl.querySelector('[data-od-id="' + targetOdId + '"]');
+            }
+            if (!found && targetSelector) {
+              try {
+                found = blockEl.querySelector(targetSelector);
+              } catch (_) {}
+            }
+            if (found) targetEl = found;
+          } else if (field) {
+            var fieldSel = '[data-od-field="' + field + '"]';
+            if (itemIndex !== undefined && itemIndex !== null) {
+              fieldSel += '[data-od-item-index="' + itemIndex + '"]';
+            }
+            var fieldEl = blockEl.querySelector(fieldSel);
+            if (fieldEl) targetEl = fieldEl;
+          }
+          if (typeof value === 'string') {
+            targetEl.textContent = value;
+            if (activeTextEdit && activeTextEdit.el === targetEl) {
+              activeTextEdit.originalText = value;
+              updateCounterAndToolbar();
+            }
+          }
+          updatePositions();
+          return true;
+        },
+        rollbackValue: function(blockId, field, itemIndex, value, targetSelector, targetOdId) {
+          if (!blockId) return false;
+          var sel = '[data-od-block-id="' + blockId + '"]';
+          var blockEl = document.querySelector(sel);
+          if (!blockEl) return false;
+          var targetEl = blockEl;
+          if (field === 'html_content' || blockEl.getAttribute('data-od-block-type') === 'open_design_section') {
+            var found = null;
+            if (targetOdId) {
+              found = blockEl.querySelector('[data-od-id="' + targetOdId + '"]');
+            }
+            if (!found && targetSelector) {
+              try {
+                found = blockEl.querySelector(targetSelector);
+              } catch (_) {}
+            }
+            if (found) targetEl = found;
+          } else if (field) {
+            var fieldSel = '[data-od-field="' + field + '"]';
+            if (itemIndex !== undefined && itemIndex !== null) {
+              fieldSel += '[data-od-item-index="' + itemIndex + '"]';
+            }
+            var fieldEl = blockEl.querySelector(fieldSel);
+            if (fieldEl) targetEl = fieldEl;
+          }
+          if (typeof value === 'string') {
+            targetEl.textContent = value;
+            if (activeTextEdit && activeTextEdit.el === targetEl) {
+              activeTextEdit.originalText = value;
+              updateCounterAndToolbar();
+            }
+          }
+          updatePositions();
+          return true;
+        }
+      };
+
+      // ── Handshake Initialization (Phase 3.1 & 3.3B) ──────────────────────────
+      window.addEventListener("message", function(event) {
+        if (!event.data || typeof event.data !== "object") return;
+        if (event.data.type === "OD_BRIDGE_INIT") {
+          if (!event.ports || !event.ports[0]) return;
+          var challenge = event.data.challenge;
+          activeSessionId = event.data.session_id;
+          bridgePort = event.ports[0];
+
+          bridgePort.onmessage = function(portEvent) {
+            if (!portEvent.data || typeof portEvent.data !== "object") return;
+            var msgType = portEvent.data.type;
+            if (msgType === "OD_PING") {
+              bridgePort.postMessage({
+                type: "OD_PONG",
+                session_id: activeSessionId,
+                timestamp: Date.now()
+              });
+            } else if (msgType === "OD_PARENT_SELECT_BLOCK") {
+              var payload = portEvent.data.payload;
+              if (activeTextEdit) {
+                var isSame = payload &&
+                  payload.blockId === activeTextEdit.meta.blockId &&
+                  (payload.field || null) === (activeTextEdit.meta.field || null) &&
+                  (payload.itemIndex !== undefined ? payload.itemIndex : null) === (activeTextEdit.meta.itemIndex !== undefined ? activeTextEdit.meta.itemIndex : null);
+                if (!isSame) {
+                  finishActiveTextEdit(true);
+                }
+              }
+              if (payload && payload.blockId) {
+                var targetSelector = '[data-od-block-id="' + payload.blockId + '"]';
+                var blockEl = document.querySelector(targetSelector);
+                if (blockEl) {
+                  var targetEl = blockEl;
+                  if (payload.field) {
+                    var fieldSelector = '[data-od-field="' + payload.field + '"]';
+                    if (payload.itemIndex !== undefined && payload.itemIndex !== null) {
+                      fieldSelector += '[data-od-item-index="' + payload.itemIndex + '"]';
+                    }
+                    var fieldEl = blockEl.querySelector(fieldSelector);
+                    if (fieldEl) targetEl = fieldEl;
+                  }
+                  renderSelectedBox(targetEl);
+                  if (payload.scrollIntoView && typeof targetEl.scrollIntoView === 'function') {
+                    try {
+                      targetEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    } catch(_) {
+                      targetEl.scrollIntoView();
+                    }
+                  }
+                }
+              }
+            } else if (msgType === "OD_PARENT_CLEAR_SELECTION") {
+              if (activeTextEdit) finishActiveTextEdit(true);
+              clearSelected();
+            } else if (msgType === "OD_PARENT_EDIT_FINISH") {
+              if (activeTextEdit) {
+                var shouldCommit = !portEvent.data.payload || portEvent.data.payload.commit !== false;
+                finishActiveTextEdit(shouldCommit);
+              }
+            } else if (msgType === "OD_EDIT_APPLY_CONFIRMED") {
+              var payload = portEvent.data.payload;
+              if (payload && payload.blockId) {
+                window.__odOverlayEngine.applyConfirmedValue(
+                  payload.blockId,
+                  payload.field,
+                  payload.itemIndex,
+                  payload.appliedValue,
+                  payload.targetSelector,
+                  payload.targetOdId
+                );
+              }
+            } else if (msgType === "OD_EDIT_REJECTED") {
+              var payload = portEvent.data.payload;
+              if (payload && payload.blockId) {
+                window.__odOverlayEngine.rollbackValue(
+                  payload.blockId,
+                  payload.field,
+                  payload.itemIndex,
+                  payload.rollbackValue,
+                  payload.targetSelector,
+                  payload.targetOdId
+                );
+              }
+            } else if (msgType === "OD_EDIT_SYNC_VALUE") {
+              var payload = portEvent.data.payload;
+              if (payload && payload.blockId) {
+                window.__odOverlayEngine.applyConfirmedValue(
+                  payload.blockId,
+                  payload.field,
+                  payload.itemIndex,
+                  payload.value
+                );
+              }
+            }
+          };
+
+          bridgePort.postMessage({
+            type: "OD_BRIDGE_ACK",
+            challenge: challenge,
+            session_id: activeSessionId
+          });
+        }
+      });
+    })();
+  </script>
   {% endif %}
 </body>
 </html>
@@ -736,6 +2051,7 @@ class SafeWebsiteRenderer:
         base_origin: str,
         is_preview: bool = False,
         is_monetized: bool = False,
+        bridge_nonce: str | None = None,
     ) -> str:
         """
         Render a single page from a validated snapshot or preview model.
@@ -797,6 +2113,7 @@ class SafeWebsiteRenderer:
         sanitized_blocks: list[dict[str, Any]] = []
         footer_links: list[dict[str, str]] = []
         footer_copyright: str | None = None
+        footer_block_id: str | None = None
 
         if isinstance(raw_blocks_payload, dict):
             raw_blocks = raw_blocks_payload.get("blocks", [])
@@ -811,9 +2128,18 @@ class SafeWebsiteRenderer:
                 if not isinstance(raw_c, dict):
                     continue
 
+                # Validate and preserve actual block ID
+                raw_block_id = raw_b.get("id")
+                valid_block_id: str | None = None
+                if isinstance(raw_block_id, str):
+                    clean_id = raw_block_id.strip()
+                    if BLOCK_ID_PATTERN.match(clean_id):
+                        valid_block_id = clean_id
+
                 # Block sanitization dispatch
                 if b_type == BlockType.HERO.value:
                     sanitized_blocks.append({
+                        "id": valid_block_id,
                         "type": "hero",
                         "content": {
                             "headline": raw_c.get("headline", ""),
@@ -832,6 +2158,7 @@ class SafeWebsiteRenderer:
                     body_text = raw_c.get("body", "")
                     paragraphs = [p.strip() for p in body_text.split("\n\n") if p.strip()]
                     sanitized_blocks.append({
+                        "id": valid_block_id,
                         "type": "text_section",
                         "content": {
                             "heading": raw_c.get("heading"),
@@ -849,6 +2176,7 @@ class SafeWebsiteRenderer:
                                 "icon": it.get("icon"),
                             })
                     sanitized_blocks.append({
+                        "id": valid_block_id,
                         "type": "features_grid",
                         "content": {
                             "title": raw_c.get("title"),
@@ -866,6 +2194,7 @@ class SafeWebsiteRenderer:
                                 "caption": img.get("caption"),
                             })
                     sanitized_blocks.append({
+                        "id": valid_block_id,
                         "type": "image_gallery",
                         "content": {
                             "title": raw_c.get("title"),
@@ -876,6 +2205,7 @@ class SafeWebsiteRenderer:
                 elif b_type == BlockType.CONTACT_FORM.value:
                     fields = raw_c.get("fields", ["name", "email", "phone", "message"])
                     sanitized_blocks.append({
+                        "id": valid_block_id,
                         "type": "contact_form",
                         "content": {
                             "title": raw_c.get("title", "Contact Us"),
@@ -887,6 +2217,7 @@ class SafeWebsiteRenderer:
                 elif b_type == BlockType.CTA_BANNER.value:
                     btn = raw_c.get("button", {})
                     sanitized_blocks.append({
+                        "id": valid_block_id,
                         "type": "cta_banner",
                         "content": {
                             "title": raw_c.get("title", ""),
@@ -901,6 +2232,7 @@ class SafeWebsiteRenderer:
                 elif b_type == BlockType.AD_PLACEMENT.value:
                     # Non-billable sandbox placeholder only
                     sanitized_blocks.append({
+                        "id": valid_block_id,
                         "type": "ad_placement",
                         "content": {
                             "placement_location": raw_c.get("placement_location", "in_article"),
@@ -909,7 +2241,58 @@ class SafeWebsiteRenderer:
                         },
                     })
 
+                elif b_type == BlockType.OPEN_DESIGN_SECTION.value:
+                    raw_html = str(raw_c.get("html_content") or "")
+                    safe_html = safe_open_design_html_for_render(raw_html)
+
+                    # Sanitize tag
+                    raw_tag = str(raw_c.get("section_tag", "section")).lower().strip()
+                    section_tag = raw_tag if raw_tag in ("section", "article", "div", "aside", "header", "footer") else "section"
+
+                    # Sanitize section_id
+                    raw_id = raw_c.get("section_id")
+                    section_id = None
+                    if raw_id and isinstance(raw_id, str):
+                        clean_id = raw_id.strip()
+                        if re.match(r"^[a-zA-Z0-9_\-]+$", clean_id) and not any(p.search(clean_id) for p in SPOOFING_CLASS_OR_ID_PATTERNS):
+                            section_id = clean_id
+
+                    # Sanitize css_classes
+                    raw_classes = raw_c.get("css_classes")
+                    css_classes = None
+                    if raw_classes and isinstance(raw_classes, str):
+                        clean_cls = raw_classes.strip()
+                        if re.match(r"^[a-zA-Z0-9_\-\s]*$", clean_cls) and not any(p.search(clean_cls) for p in SPOOFING_CLASS_OR_ID_PATTERNS):
+                            css_classes = clean_cls
+
+                    # Sanitize inline styles
+                    styles_dict = raw_c.get("styles") or {}
+                    inline_style_parts: list[str] = []
+                    if isinstance(styles_dict, dict):
+                        for k, v in styles_dict.items():
+                            clean_k = str(k).strip().lower()
+                            clean_v = str(v).strip()
+                            if clean_k in ALLOWED_CSS_PROPERTIES and not any(
+                                bad in clean_v.lower()
+                                for bad in (";", "url(", "expression(", "@import", "javascript:", "<", ">", "behavior", "-moz-binding")
+                            ):
+                                inline_style_parts.append(f"{clean_k}: {clean_v}")
+
+                    sanitized_blocks.append({
+                        "id": valid_block_id,
+                        "type": "open_design_section",
+                        "content": {
+                            "section_tag": section_tag,
+                            "section_id": section_id,
+                            "css_classes": css_classes,
+                            "inline_style": "; ".join(inline_style_parts),
+                            "safe_html": safe_html,
+                        },
+                    })
+
                 elif b_type == BlockType.FOOTER.value:
+                    if valid_block_id:
+                        footer_block_id = valid_block_id
                     for lk in raw_c.get("links", []):
                         if isinstance(lk, dict):
                             footer_links.append({
@@ -922,12 +2305,189 @@ class SafeWebsiteRenderer:
         # Contact submission endpoint
         contact_action_url = f"/api/v1/website/public/{project_dict.get('slug')}/contact"
 
+        # Multilingual & hreflang resolution
+        page_lang = page_dict.get("language") or project_dict.get("primary_language") or "en"
+        current_trans_group = page_dict.get("translation_group_id")
+        hreflang_links: list[dict[str, str]] = []
+
+        if current_trans_group:
+            matching_variants = [p for p in all_pages_dict if p.get("translation_group_id") == current_trans_group]
+            distinct_langs = {p.get("language", "en") for p in matching_variants}
+            if len(distinct_langs) > 1:
+                for v in matching_variants:
+                    v_lang = v.get("language", "en")
+                    v_slug = v.get("slug", "")
+                    v_is_home = v.get("is_home", False) or v_slug == ""
+                    v_url = f"{base_origin}/" if v_is_home else f"{base_origin}/{v_slug}"
+                    hreflang_links.append({"lang": v_lang, "url": v_url})
+
+                default_page = next(
+                    (p for p in matching_variants if p.get("language") in ("en", project_dict.get("primary_language"))),
+                    matching_variants[0],
+                )
+                def_slug = default_page.get("slug", "")
+                def_url = f"{base_origin}/" if (default_page.get("is_home", False) or def_slug == "") else f"{base_origin}/{def_slug}"
+                hreflang_links.append({"lang": "x-default", "url": def_url})
+
+        # Webmaster tools verification
+        webmaster_tools = project_dict.get("webmaster_tools") or {}
+
+        # Schema.org JSON-LD structured data (strictly from verified owner facts)
+        json_ld_payloads: list[str] = []
+        business_profile = project_dict.get("business_profile") or {}
+        nap = business_profile.get("nap") or {}
+
+        if business_profile or project_name:
+            category = business_profile.get("category", "local_service")
+            schema_type = CATEGORY_SCHEMA_MAP.get(category, "LocalBusiness")
+            biz_name = business_profile.get("business_name") or project_name
+
+            biz_ld: dict[str, Any] = {
+                "@context": "https://schema.org",
+                "@type": schema_type,
+                "name": biz_name,
+                "url": canonical_url,
+            }
+            if meta_description:
+                biz_ld["description"] = meta_description
+            if business_profile.get("logo_url"):
+                biz_ld["image"] = business_profile["logo_url"]
+                biz_ld["logo"] = business_profile["logo_url"]
+            if nap.get("phone"):
+                biz_ld["telephone"] = nap["phone"]
+            if nap.get("email"):
+                biz_ld["email"] = nap["email"]
+
+            if nap.get("street_address") or nap.get("city"):
+                addr_obj: dict[str, Any] = {
+                    "@type": "PostalAddress",
+                    "addressCountry": nap.get("country", "IN"),
+                }
+                if nap.get("street_address"):
+                    addr_obj["streetAddress"] = nap["street_address"]
+                if nap.get("city"):
+                    addr_obj["addressLocality"] = nap["city"]
+                if nap.get("state_region"):
+                    addr_obj["addressRegion"] = nap["state_region"]
+                if nap.get("postal_code"):
+                    addr_obj["postalCode"] = nap["postal_code"]
+                biz_ld["address"] = addr_obj
+
+            if nap.get("latitude") is not None and nap.get("longitude") is not None:
+                biz_ld["geo"] = {
+                    "@type": "GeoCoordinates",
+                    "latitude": nap["latitude"],
+                    "longitude": nap["longitude"],
+                }
+
+            hours = business_profile.get("hours") or []
+            if hours:
+                specs = []
+                for h in hours:
+                    if not h.get("is_closed") and h.get("opens") and h.get("closes"):
+                        specs.append({
+                            "@type": "OpeningHoursSpecification",
+                            "dayOfWeek": h.get("day", "").capitalize(),
+                            "opens": h.get("opens"),
+                            "closes": h.get("closes"),
+                        })
+                if specs:
+                    biz_ld["openingHoursSpecification"] = specs
+
+            areas = business_profile.get("service_area_cities") or []
+            if areas:
+                biz_ld["areaServed"] = areas
+
+            socials = business_profile.get("social_links") or {}
+            if socials:
+                biz_ld["sameAs"] = list(socials.values())
+
+            json_ld_payloads.append(json.dumps(biz_ld, ensure_ascii=False, indent=2))
+
+        # Breadcrumbs on non-home pages
+        if not is_home:
+            crumbs_ld = {
+                "@context": "https://schema.org",
+                "@type": "BreadcrumbList",
+                "itemListElement": [
+                    {
+                        "@type": "ListItem",
+                        "position": 1,
+                        "name": "Home",
+                        "item": f"{base_origin}/",
+                    },
+                    {
+                        "@type": "ListItem",
+                        "position": 2,
+                        "name": page_title,
+                        "item": canonical_url,
+                    },
+                ],
+            }
+            json_ld_payloads.append(json.dumps(crumbs_ld, ensure_ascii=False, indent=2))
+
+        # FAQPage
+        faqs = business_profile.get("faqs") or []
+        if faqs and (is_home or "faq" in page_slug.lower()):
+            faq_ld = {
+                "@context": "https://schema.org",
+                "@type": "FAQPage",
+                "mainEntity": [
+                    {
+                        "@type": "Question",
+                        "name": f.get("question"),
+                        "acceptedAnswer": {
+                            "@type": "Answer",
+                            "text": f.get("answer"),
+                        },
+                    }
+                    for f in faqs
+                    if f.get("question") and f.get("answer")
+                ],
+            }
+            json_ld_payloads.append(json.dumps(faq_ld, ensure_ascii=False, indent=2))
+
+        # Services List
+        services = business_profile.get("services_or_products") or []
+        if services and ("service" in page_slug.lower() or "product" in page_slug.lower()):
+            item_list = []
+            for idx, s in enumerate(services):
+                item_entry: dict[str, Any] = {
+                    "@type": "Service",
+                    "name": s.get("name"),
+                }
+                if s.get("description"):
+                    item_entry["description"] = s["description"]
+                if s.get("price") is not None:
+                    item_entry["offers"] = {
+                        "@type": "Offer",
+                        "price": str(s["price"]),
+                        "priceCurrency": s.get("currency", "INR"),
+                    }
+                item_list.append({
+                    "@type": "ListItem",
+                    "position": idx + 1,
+                    "item": item_entry,
+                })
+            if item_list:
+                services_ld = {
+                    "@context": "https://schema.org",
+                    "@type": "ItemList",
+                    "name": "Services",
+                    "itemListElement": item_list,
+                }
+                json_ld_payloads.append(json.dumps(services_ld, ensure_ascii=False, indent=2))
+
         template = _jinja_env.get_template("page.html")
         rendered = template.render(
             project_name=project_name,
             theme=theme,
             font_url=font_url,
             page_title=page_title,
+            page_lang=page_lang,
+            webmaster_tools=webmaster_tools,
+            hreflang_links=hreflang_links,
+            json_ld_payloads=json_ld_payloads,
             meta_description=meta_description,
             canonical_url=canonical_url,
             home_url=home_url,
@@ -938,8 +2498,10 @@ class SafeWebsiteRenderer:
             contact_action_url=contact_action_url,
             footer_links=footer_links,
             footer_copyright=footer_copyright,
+            footer_block_id=footer_block_id,
             is_preview=is_preview,
             is_monetized=is_monetized,
+            bridge_nonce=bridge_nonce,
         )
 
         if len(rendered.encode("utf-8")) > MAX_OUTPUT_HTML_BYTES:

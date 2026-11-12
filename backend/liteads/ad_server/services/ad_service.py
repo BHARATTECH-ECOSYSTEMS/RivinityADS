@@ -29,12 +29,18 @@ class AdService:
     def engine(self) -> RecommendationEngine:
         """Lazy initialization of recommendation engine."""
         if self._engine is None:
+            ad_settings = self.settings.ad_serving
             config = RecommendationConfig(
                 max_retrieval=100,
                 enable_budget_filter=True,
                 enable_frequency_filter=True,
                 enable_quality_filter=True,
-                enable_ml_prediction=self.settings.ad_serving.enable_ml_prediction,
+                enable_ml_prediction=ad_settings.enable_ml_prediction,
+                prediction_mode=getattr(ad_settings, "prediction_mode", "statistical"),
+                model_path=getattr(ad_settings, "model_path", None),
+                feature_builder_path=getattr(ad_settings, "feature_builder_path", None),
+                model_version=getattr(ad_settings, "model_version", "v1"),
+                timeout_ms=getattr(ad_settings, "prediction_timeout_ms", 20.0),
                 fallback_ctr=0.01,
                 fallback_cvr=0.001,
                 ranking_strategy=RankingStrategy.ECPM,
@@ -98,24 +104,76 @@ class AdService:
             floor_price=floor_price,
         )
 
+        logger.info(
+            "Ad serving recommendation completed",
+            request_id=request_id,
+            count=len(candidates),
+            prediction_mode=metrics.prediction_mode,
+            model_version=metrics.model_version,
+            is_fallback=metrics.is_fallback,
+            fallback_reason=metrics.fallback_reason,
+            total_ms=metrics.total_ms,
+        )
+
         # Enforce chat surface restrictions on retrieved candidates: interstitials are never permitted
         if is_chat_surface and candidates:
             candidates = [c for c in candidates if c.creative_type != CreativeType.INTERSTITIAL.value]
 
-        # STEP 4.1 — per-request format selection
-        # Filter by requested creative_type; fall back to unfiltered if no match.
-        if request.format is not None and candidates:
-            filtered = [c for c in candidates if c.creative_type == request.format]
+        # STEP 4.1 — Per-request format selection (Task B)
+        # Determine target formats requested by caller
+        target_formats: set[int] = set()
+        if request.format is not None:
+            target_formats.add(request.format)
+        if getattr(request, "supported_formats", None):
+            target_formats.update(request.supported_formats)
+
+        if target_formats and candidates:
+            filtered = [c for c in candidates if c.creative_type in target_formats]
             if filtered:
                 candidates = filtered
             else:
-                logger.debug(
-                    "No candidates matched requested format; using unfiltered set",
-                    requested_format=request.format,
-                    candidate_types=list({c.creative_type for c in candidates}),
-                )
+                allow_fallback = getattr(request, "allow_format_fallback", False)
+                if allow_fallback:
+                    logger.info(
+                        "No candidates matched requested formats; caller explicitly allowed fallback",
+                        target_formats=list(target_formats),
+                    )
+                else:
+                    logger.info(
+                        "No candidates matched requested formats; returning no ad (fallback disabled)",
+                        target_formats=list(target_formats),
+                    )
+                    candidates = []
+
             if is_chat_surface and candidates:
                 candidates = [c for c in candidates if c.creative_type != CreativeType.INTERSTITIAL.value]
+
+        # Task G — Sandbox test inventory fallback:
+        # If caller is running in sandbox mode and no candidates were eligible, return a synthetic test ad
+        is_sandbox_req = request_id.startswith(("test_", "prev_")) or getattr(request, "is_sandbox", False)
+        if not candidates and is_sandbox_req:
+            chosen_format = request.format or (request.supported_formats[0] if getattr(request, "supported_formats", None) else 1)
+            if is_chat_surface and chosen_format == CreativeType.INTERSTITIAL.value:
+                chosen_format = 2  # native for chat surfaces
+            candidates = [
+                AdCandidate(
+                    campaign_id=999999,
+                    creative_id=999999,
+                    advertiser_id=999999,
+                    advertiser_name="Sandbox Test Advertiser",
+                    bid=1.0,
+                    bid_type=1,
+                    title="RivinityADS Sandbox Test Ad",
+                    description="This is a sandbox test creative. No billable activity or wallet deduction occurs.",
+                    image_url="https://via.placeholder.com/300x250.png?text=Sandbox+Ad",
+                    landing_url="https://example.com/sandbox-preview",
+                    creative_type=chosen_format,
+                    width=300 if chosen_format == 1 else None,
+                    height=250 if chosen_format == 1 else None,
+                    review_status="APPROVED",
+                    metadata={"is_sandbox": True, "test_mode": True},
+                )
+            ]
 
         logger.info(
             "Ad serving completed",

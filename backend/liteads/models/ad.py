@@ -12,6 +12,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -213,6 +214,8 @@ class Creative(Base, TimestampMixin):
     creative_type: Mapped[int] = mapped_column(Integer, default=CreativeType.BANNER)
     width: Mapped[int] = mapped_column(Integer, default=0)
     height: Mapped[int] = mapped_column(Integer, default=0)
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    format: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # Status
     status: Mapped[int] = mapped_column(Integer, default=Status.ACTIVE)
@@ -361,6 +364,17 @@ class AdEvent(Base, TimestampMixin):
         Boolean, server_default=text("false"), default=False, nullable=False, index=True
     )
 
+    # Phase 3: Invalid Traffic (IVT) Measurement fields
+    is_invalid: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), default=False, nullable=False, index=True
+    )
+    invalid_reason: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    invalid_details: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True
+    )
+
     # Self-referential relationship to attributed click/impression
     attributed_event: Mapped["AdEvent | None"] = relationship(
         "AdEvent", remote_side=[id], foreign_keys=[attributed_event_id], backref="conversions"
@@ -369,6 +383,7 @@ class AdEvent(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_ad_events_attribution", "campaign_id", "is_attributed", "is_test"),
         Index("ix_ad_events_click_lookup", "request_id", "event_type"),
+        Index("ix_ad_events_ivt", "is_invalid", "event_type"),
         Index(
             "uq_ad_events_order_dedup",
             "campaign_id",
@@ -460,3 +475,50 @@ class OptimizationDecision(Base, TimestampMixin):
     actor: Mapped[str] = mapped_column(String(64), nullable=False, default="system_optimizer")
     execution_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     fencing_token: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
+class AdvertiserApiKey(Base, TimestampMixin):
+    """Advertiser API key for authenticating S2S conversion postbacks and management calls.
+
+    The raw key & raw secret are shown exactly once upon creation.
+    Only hashes/encrypted secret material are persisted.
+
+    Lifecycle:
+    - status=1 (revoked_at is None) active
+    - status=0 (revoked_at is not None) revoked
+    """
+
+    __tablename__ = "advertiser_api_keys"
+    __table_args__ = (
+        CheckConstraint("rate_limit_per_minute > 0", name="ck_advertiser_api_keys_rate_limit_positive"),
+        CheckConstraint("daily_quota > 0", name="ck_advertiser_api_keys_daily_quota_positive"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    advertiser_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("advertisers.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    campaign_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    key_prefix: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    key_hash: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    secret_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_sandbox: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
+    rate_limit_per_minute: Mapped[int] = mapped_column(
+        Integer, default=60, server_default=text("60"), nullable=False
+    )
+    daily_quota: Mapped[int] = mapped_column(
+        Integer, default=10000, server_default=text("10000"), nullable=False
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    advertiser: Mapped["Advertiser"] = relationship("Advertiser", backref="api_keys", lazy="selectin")
+    campaign: Mapped["Campaign | None"] = relationship("Campaign", lazy="selectin")
+
+    @property
+    def is_active(self) -> bool:
+        return self.revoked_at is None

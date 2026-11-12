@@ -20,8 +20,10 @@ redis:
   db: 1
 
 ad_serving:
-  enable_ml_prediction: true
+  enable_ml_prediction: false
+  prediction_mode: "statistical"
   model_path: "models/lr_ctr.pt"
+  prediction_timeout_ms: 20.0
 
 logging:
   level: "DEBUG"

@@ -52,7 +52,10 @@ def downgrade() -> None:
     inspector = Inspector.from_engine(conn)
     
     if inspector.has_table('one_time_tokens'):
-        op.drop_index(op.f('ix_one_time_tokens_token_hash'), table_name='one_time_tokens')
+        index_names = {index['name'] for index in inspector.get_indexes('one_time_tokens')}
+        token_index = op.f('ix_one_time_tokens_token_hash')
+        if token_index in index_names:
+            op.drop_index(token_index, table_name='one_time_tokens')
         op.drop_table('one_time_tokens')
         
     columns = [col['name'] for col in inspector.get_columns('users')]

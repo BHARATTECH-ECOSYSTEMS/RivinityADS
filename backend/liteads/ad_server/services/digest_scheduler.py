@@ -486,3 +486,26 @@ class WeeklyDigestTask:
 
 # Singleton instance
 weekly_digest_loop = WeeklyDigestTask()
+
+
+async def main() -> None:
+    """CLI entry point for running a standalone dedicated weekly digest worker container."""
+    from liteads.common.config import get_settings
+    from liteads.common.database import init_db, close_db
+
+    settings = get_settings()
+    logger.info("Initializing database and redis connection for standalone weekly digest worker")
+    await init_db()
+    await redis_client.connect()
+
+    worker = WeeklyDigestTask()
+    try:
+        await worker._run_loop()
+    finally:
+        await redis_client.close()
+        await close_db()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+

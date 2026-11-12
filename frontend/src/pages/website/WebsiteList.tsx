@@ -1,53 +1,21 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
-import { ProjectSummary, WebsiteStatusMap } from "../../types";
+import { ProjectSummary, WebsiteStatusMap, WebsiteTemplateSummary } from "../../types";
 import {
   listWebsiteProjects,
   createWebsiteProject,
   deleteWebsiteProject,
   checkWebsiteSlug,
+  listWebsiteTemplates,
 } from "../../api/client";
+import { TemplatePreviewModal } from "../../components/website/TemplatePreviewModal";
 
-interface TemplateOption {
-  id: string;
-  name: string;
-  description: string;
-  icon: string;
-  badge?: string;
-}
-
-const TEMPLATES: TemplateOption[] = [
-  {
-    id: "business_services",
-    name: "Business & Services",
-    description: "Professional landing page with welcoming hero, feature pillars, and lead capture form.",
-    icon: "💼",
-    badge: "Popular",
-  },
-  {
-    id: "product_landing",
-    name: "Product & SaaS",
-    description: "High-converting layout with capability grid, testimonials, and prominent action banner.",
-    icon: "🚀",
-  },
-  {
-    id: "portfolio_showcase",
-    name: "Portfolio & Agency",
-    description: "Visual imagery showcase, creative gallery, and client inquiry section.",
-    icon: "🎨",
-  },
-  {
-    id: "blog_publisher",
-    name: "Editorial & Publisher",
-    description: "Typography-focused layout optimized for editorial stories, articles, and content blocks.",
-    icon: "📰",
-  },
-  {
-    id: "minimal_clean",
-    name: "Minimalist Clean",
-    description: "Distraction-free structure with crisp whitespace and clean typography.",
-    icon: "✨",
-  },
+const TEMPLATE_CATEGORIES = [
+  "All",
+  "Landing & Marketing",
+  "Publishing & Editorial",
+  "Business & Operations",
+  "Creative & Agency",
 ];
 
 export const WebsiteList: React.FC = () => {
@@ -64,11 +32,19 @@ export const WebsiteList: React.FC = () => {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
   const [createSlug, setCreateSlug] = useState("");
-  const [selectedTemplate, setSelectedTemplate] = useState("business_services");
+  const [selectedTemplate, setSelectedTemplate] = useState("saas-landing");
   const [isCheckingSlug, setIsCheckingSlug] = useState(false);
   const [slugStatus, setSlugStatus] = useState<{ available: boolean; message: string } | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const lastSlugRef = useRef<string>("");
+
+  // Templates Catalog State (Phase 2)
+  const [templates, setTemplates] = useState<WebsiteTemplateSummary[]>([]);
+  const [isLoadingTemplates, setIsLoadingTemplates] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState("All");
+  const [templateSearch, setTemplateSearch] = useState("");
+  const [previewTemplate, setPreviewTemplate] = useState<WebsiteTemplateSummary | null>(null);
 
   // Delete Modal State
   const [projectToDelete, setProjectToDelete] = useState<ProjectSummary | null>(null);
@@ -76,7 +52,23 @@ export const WebsiteList: React.FC = () => {
 
   useEffect(() => {
     loadProjects();
+    loadTemplates();
   }, []);
+
+  const loadTemplates = async () => {
+    setIsLoadingTemplates(true);
+    try {
+      const data = await listWebsiteTemplates();
+      setTemplates(data);
+      if (data.length > 0) {
+        setSelectedTemplate((prev) => prev || data[0].id);
+      }
+    } catch (err: any) {
+      console.error("Failed to load templates catalog:", err);
+    } finally {
+      setIsLoadingTemplates(false);
+    }
+  };
 
   const loadProjects = async () => {
     setIsLoading(true);
@@ -118,19 +110,29 @@ export const WebsiteList: React.FC = () => {
       setSlugStatus({ available: false, message: "Slug must be at least 3 characters" });
       return;
     }
+    lastSlugRef.current = clean;
     setIsCheckingSlug(true);
     try {
       const res = await checkWebsiteSlug(clean);
-      setSlugStatus({
-        available: res.available,
-        message: res.available
-          ? `Subdomain '${res.slug}' is available!`
-          : res.reason || `Subdomain '${res.slug}' is unavailable`,
-      });
+      if (lastSlugRef.current === clean) {
+        setSlugStatus({
+          available: res.available,
+          message: res.available
+            ? `Subdomain '${res.slug}' is available!`
+            : res.reason || `Subdomain '${res.slug}' is unavailable`,
+        });
+      }
     } catch (err: any) {
-      setSlugStatus({ available: false, message: "Could not verify slug availability" });
+      if (lastSlugRef.current === clean) {
+        setSlugStatus({
+          available: false,
+          message: err?.message || "Could not verify slug availability",
+        });
+      }
     } finally {
-      setIsCheckingSlug(false);
+      if (lastSlugRef.current === clean) {
+        setIsCheckingSlug(false);
+      }
     }
   };
 
@@ -183,6 +185,15 @@ export const WebsiteList: React.FC = () => {
       p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       p.slug.toLowerCase().includes(searchQuery.toLowerCase())
   );
+
+  const filteredTemplates = templates.filter((t) => {
+    const matchesCat = selectedCategory === "All" || t.category === selectedCategory;
+    const matchesSearch =
+      !templateSearch.trim() ||
+      t.name.toLowerCase().includes(templateSearch.toLowerCase()) ||
+      t.description.toLowerCase().includes(templateSearch.toLowerCase());
+    return matchesCat && matchesSearch;
+  });
 
   return (
     <div className="space-y-6" data-testid="website-list-page">
@@ -390,7 +401,7 @@ export const WebsiteList: React.FC = () => {
             className="card"
             style={{
               width: "100%",
-              maxWidth: "640px",
+              maxWidth: "780px",
               maxHeight: "90vh",
               overflowY: "auto",
               padding: "1.75rem",
@@ -495,58 +506,179 @@ export const WebsiteList: React.FC = () => {
                 ) : null}
               </div>
 
-              {/* Template Picker */}
+              {/* Template Picker (Phase 2 Catalog) */}
               <div>
-                <label className="form-label" style={{ marginBottom: "0.5rem" }}>
-                  Select Starting Template
-                </label>
-                <div className="space-y-2">
-                  {TEMPLATES.map((tmpl) => {
-                    const isSelected = selectedTemplate === tmpl.id;
-                    return (
-                      <div
-                        key={tmpl.id}
-                        onClick={() => setSelectedTemplate(tmpl.id)}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "0.75rem",
-                          padding: "0.75rem 1rem",
-                          borderRadius: "var(--radius-md)",
-                          border: "1px solid",
-                          borderColor: isSelected ? "var(--primary)" : "var(--border)",
-                          backgroundColor: isSelected ? "rgba(37, 99, 235, 0.05)" : "var(--bg-secondary)",
-                          cursor: "pointer",
-                          transition: "all 0.15s ease",
-                        }}
-                        data-testid={`template-option-${tmpl.id}`}
-                      >
-                        <span style={{ fontSize: "1.5rem" }}>{tmpl.icon}</span>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                            <span style={{ fontWeight: 600, fontSize: "0.875rem" }}>{tmpl.name}</span>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
+                  <label className="form-label" style={{ margin: 0 }}>
+                    Select Starting Template ({filteredTemplates.length})
+                  </label>
+                  <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                    {isLoadingTemplates ? "Loading catalog..." : "15 production templates"}
+                  </span>
+                </div>
+
+                {/* Category Filter Tabs */}
+                <div
+                  style={{
+                    display: "flex",
+                    gap: "0.35rem",
+                    overflowX: "auto",
+                    paddingBottom: "0.5rem",
+                    marginBottom: "0.75rem",
+                  }}
+                  data-testid="template-category-tabs"
+                >
+                  {TEMPLATE_CATEGORIES.map((cat) => (
+                    <button
+                      key={cat}
+                      type="button"
+                      className={`btn btn-sm ${selectedCategory === cat ? "btn-primary" : "btn-secondary"}`}
+                      style={{
+                        fontSize: "0.75rem",
+                        padding: "0.2rem 0.65rem",
+                        whiteSpace: "nowrap",
+                        borderRadius: "999px",
+                      }}
+                      onClick={() => setSelectedCategory(cat)}
+                      data-testid={`category-tab-${cat}`}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Template Search Filter */}
+                <div style={{ marginBottom: "0.75rem" }}>
+                  <input
+                    type="text"
+                    className="form-input"
+                    style={{ fontSize: "0.8125rem", padding: "0.35rem 0.65rem" }}
+                    placeholder="Search templates by name, keyword, or features..."
+                    value={templateSearch}
+                    onChange={(e) => setTemplateSearch(e.target.value)}
+                    data-testid="template-search-input"
+                  />
+                </div>
+
+                {/* Template Cards Grid */}
+                <div
+                  style={{
+                    maxHeight: "300px",
+                    overflowY: "auto",
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+                    gap: "0.75rem",
+                    padding: "2px",
+                  }}
+                  data-testid="template-catalog-grid"
+                >
+                  {isLoadingTemplates ? (
+                    <div style={{ gridColumn: "1 / -1", padding: "2rem", textAlign: "center", color: "var(--text-muted)" }}>
+                      Loading templates catalog...
+                    </div>
+                  ) : filteredTemplates.length === 0 ? (
+                    <div style={{ gridColumn: "1 / -1", padding: "2rem", textAlign: "center", color: "var(--text-muted)", fontSize: "0.875rem" }}>
+                      No templates match your search filter.
+                    </div>
+                  ) : (
+                    filteredTemplates.map((tmpl) => {
+                      const isSelected = selectedTemplate === tmpl.id;
+                      return (
+                        <div
+                          key={tmpl.id}
+                          onClick={() => setSelectedTemplate(tmpl.id)}
+                          style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            borderRadius: "var(--radius-md)",
+                            border: "1.5px solid",
+                            borderColor: isSelected ? "var(--primary)" : "var(--border)",
+                            backgroundColor: isSelected ? "rgba(37, 99, 235, 0.04)" : "var(--bg-card)",
+                            boxShadow: isSelected ? "0 0 0 1px var(--primary)" : "none",
+                            cursor: "pointer",
+                            transition: "all 0.15s ease",
+                            overflow: "hidden",
+                          }}
+                          data-testid={`template-option-${tmpl.id}`}
+                        >
+                          {/* Thumbnail / Header */}
+                          <div
+                            style={{
+                              height: "85px",
+                              backgroundColor: "#f1f5f9",
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              position: "relative",
+                              overflow: "hidden",
+                            }}
+                          >
+                            {tmpl.thumbnail_url ? (
+                              <img
+                                src={tmpl.thumbnail_url}
+                                alt={tmpl.name}
+                                style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                              />
+                            ) : (
+                              <span style={{ fontSize: "2rem" }}>🎨</span>
+                            )}
                             {tmpl.badge && (
                               <span
-                                className="wb-badge"
-                                style={{ fontSize: "0.625rem", padding: "0.1rem 0.35rem" }}
+                                style={{
+                                  position: "absolute",
+                                  top: "6px",
+                                  right: "6px",
+                                  fontSize: "0.625rem",
+                                  padding: "2px 6px",
+                                  borderRadius: "999px",
+                                  backgroundColor: "#fef3c7",
+                                  color: "#92400e",
+                                  fontWeight: 700,
+                                }}
                               >
                                 {tmpl.badge}
                               </span>
                             )}
                           </div>
-                          <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
-                            {tmpl.description}
+
+                          {/* Card Content */}
+                          <div style={{ padding: "0.75rem", flex: 1, display: "flex", flexDirection: "column" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.25rem", marginBottom: "0.25rem" }}>
+                              <h4 style={{ margin: 0, fontSize: "0.875rem", fontWeight: 700 }}>
+                                {tmpl.name}
+                              </h4>
+                              <input
+                                type="radio"
+                                name="template_id"
+                                checked={isSelected}
+                                onChange={() => setSelectedTemplate(tmpl.id)}
+                                style={{ marginTop: "2px" }}
+                              />
+                            </div>
+                            <span style={{ fontSize: "0.6875rem", color: "var(--primary)", fontWeight: 600, marginBottom: "0.35rem" }}>
+                              {tmpl.category}
+                            </span>
+                            <p style={{ fontSize: "0.75rem", color: "var(--text-secondary)", margin: "0 0 0.75rem", lineHeight: 1.4, flex: 1 }}>
+                              {tmpl.description}
+                            </p>
+
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              style={{ width: "100%", fontSize: "0.6875rem", padding: "0.25rem" }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setPreviewTemplate(tmpl);
+                              }}
+                              data-testid={`preview-template-${tmpl.id}`}
+                            >
+                              👁 Preview Layout
+                            </button>
                           </div>
                         </div>
-                        <input
-                          type="radio"
-                          name="template_id"
-                          checked={isSelected}
-                          onChange={() => setSelectedTemplate(tmpl.id)}
-                        />
-                      </div>
-                    );
-                  })}
+                      );
+                    })
+                  )}
                 </div>
               </div>
 
@@ -628,6 +760,14 @@ export const WebsiteList: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Template Preview Modal (Phase 2) */}
+      <TemplatePreviewModal
+        isOpen={previewTemplate !== null}
+        templateSummary={previewTemplate}
+        onClose={() => setPreviewTemplate(null)}
+        onSelectTemplate={(id) => setSelectedTemplate(id)}
+      />
     </div>
   );
 };

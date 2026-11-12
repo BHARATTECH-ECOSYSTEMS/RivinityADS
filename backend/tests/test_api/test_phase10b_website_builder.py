@@ -62,6 +62,11 @@ async def test_slug_check_and_reservations(client: AsyncClient, test_db):
     assert data["available"] is True
     assert data["slug"] == "fresh-brand-name"
 
+    # Alias /api/v1/website/check-slug backwards compatibility
+    res_alias = await client.get("/api/v1/website/check-slug?slug=fresh-brand-name", headers=headers)
+    assert res_alias.status_code == 200, res_alias.text
+    assert res_alias.json()["available"] is True
+
     # Reserved slug (admin, api, etc.)
     res = await client.get("/api/v1/website/slug/check?slug=admin", headers=headers)
     assert res.status_code == 200
@@ -150,6 +155,15 @@ async def test_project_crud_and_soft_deletion(client: AsyncClient, test_db):
     assert res_patch.status_code == 200
     assert res_patch.json()["name"] == "My Super Awesome Studio"
     assert res_patch.json()["theme_config"]["primary_color"] == "#10b981"
+
+    # Update project via PUT alias
+    res_put = await client.put(
+        f"/api/v1/website/projects/{project_id}",
+        json={"name": "My Studio Renamed via PUT"},
+        headers=headers,
+    )
+    assert res_put.status_code == 200
+    assert res_put.json()["name"] == "My Studio Renamed via PUT"
 
     # Soft delete project
     res_del = await client.delete(f"/api/v1/website/projects/{project_id}", headers=headers)
@@ -381,6 +395,15 @@ async def test_page_navigation_reordering(client: AsyncClient, test_db):
     ordered_pages = reorder_res.json()
     assert [p["id"] for p in ordered_pages] == [p3, home_page_id, p2]
     assert [p["order_index"] for p in ordered_pages] == [0, 1, 2]
+
+    # Reorder pages via POST alias
+    reorder_post_res = await client.post(
+        f"/api/v1/website/projects/{p_id}/pages/reorder",
+        json={"page_ids": [home_page_id, p2, p3]},
+        headers=headers,
+    )
+    assert reorder_post_res.status_code == 200
+    assert [p["id"] for p in reorder_post_res.json()] == [home_page_id, p2, p3]
 
 
 # ---------------------------------------------------------------------------

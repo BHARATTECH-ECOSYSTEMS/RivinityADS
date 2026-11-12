@@ -104,6 +104,11 @@ class ModelPredictor:
         self._lock = threading.Lock()
         self._is_loaded = False
 
+    @property
+    def is_ready(self) -> bool:
+        """Check if model is loaded and ready for online serving."""
+        return self._is_loaded and self.model is not None
+
     def load(self) -> None:
         """Load model and feature builder."""
         with self._lock:
@@ -262,17 +267,34 @@ class ModelPredictor:
             sparse_features = inputs.sparse_features
             dense_features = inputs.dense_features
         else:
-            # Fallback: expect pre-transformed features
-            sparse_features = torch.tensor(
-                [f.get("sparse_features", []) for f in features_batch],
-                dtype=torch.long,
-                device=self.device,
-            )
-            dense_features = torch.tensor(
-                [f.get("dense_features", []) for f in features_batch],
-                dtype=torch.float32,
-                device=self.device,
-            )
+            # Fallback: expect pre-transformed features or map raw dictionary to model tensors
+            if features_batch and "sparse_features" in features_batch[0]:
+                sparse_features = torch.tensor(
+                    [f.get("sparse_features", []) for f in features_batch],
+                    dtype=torch.long,
+                    device=self.device,
+                )
+                dense_features = torch.tensor(
+                    [f.get("dense_features", []) for f in features_batch],
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+            else:
+                num_sparse = len(getattr(self.model, "sparse_feature_dims", []))
+                num_dense = getattr(self.model, "dense_feature_dim", 0)
+                sparse_list = []
+                dense_list = []
+                sparse_dims = getattr(self.model, "sparse_feature_dims", [100] * num_sparse)
+                for f in features_batch:
+                    vals = list(f.values()) if f else [""]
+                    s_row = [
+                        abs(hash(str(vals[i % len(vals)]))) % sparse_dims[i]
+                        for i in range(num_sparse)
+                    ]
+                    sparse_list.append(s_row)
+                    dense_list.append([0.0] * num_dense)
+                sparse_features = torch.tensor(sparse_list, dtype=torch.long, device=self.device)
+                dense_features = torch.tensor(dense_list, dtype=torch.float32, device=self.device)
 
         # Half precision
         if self.use_fp16:

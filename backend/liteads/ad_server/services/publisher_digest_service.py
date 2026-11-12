@@ -48,6 +48,9 @@ FORMAT_NAMES = {
     CreativeType.NATIVE: "Native",
     CreativeType.VIDEO: "Video",
     CreativeType.INTERSTITIAL: "Interstitial",
+    CreativeType.DISPLAY_CARD: "Display Card",
+    CreativeType.LABEL_AD: "Label Ads",
+    CreativeType.ELEMENT_AD: "Element Ads",
 }
 
 

@@ -73,10 +73,37 @@ class ServerSettings(BaseSettings):
     reload: bool = False
     frontend_url: str = "http://localhost:5173"
     proxy_headers: bool = True
+    cors_origins: list[str] | str | None = Field(
+        default=None,
+        description="Explicit allowed CORS origins. In production, must be HTTPS.",
+    )
     trusted_proxies: list[str] | str = Field(
         default_factory=lambda: ["127.0.0.1", "::1"],
         description="List or comma-separated string of trusted proxy IP addresses or CIDR blocks",
     )
+
+    @field_validator("cors_origins", mode="after")
+    @classmethod
+    def normalize_cors_origins(cls, v: Any) -> list[str] | None:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return []
+            if v.startswith("[") and v.endswith("]"):
+                import json
+
+                try:
+                    parsed = json.loads(v)
+                    if isinstance(parsed, list):
+                        return [str(x).strip() for x in parsed if str(x).strip()]
+                except Exception:
+                    pass
+            return [x.strip() for x in v.split(",") if x.strip()]
+        elif isinstance(v, (list, tuple, set)):
+            return [str(x).strip() for x in v if str(x).strip()]
+        return None
 
     @field_validator("trusted_proxies", mode="after")
     @classmethod
@@ -106,8 +133,12 @@ class AdServingSettings(BaseSettings):
     default_num_ads: int = 1
     max_num_ads: int = 10
     timeout_ms: int = 50
-    enable_ml_prediction: bool = True
+    enable_ml_prediction: bool = False
+    prediction_mode: str = "statistical"  # "statistical", "shadow", "ml"
     model_path: str = ""  # Path to CTR model for prediction
+    feature_builder_path: str = ""
+    model_version: str = "v1"
+    prediction_timeout_ms: float = 20.0
 
 
 class FrequencySettings(BaseSettings):
@@ -164,6 +195,12 @@ class TrackingSettings(BaseSettings):
 class LayaSettings(BaseSettings):
     """Laya sidecar configuration."""
 
+    model_config = SettingsConfigDict(
+        env_prefix="LAYA_",
+        extra="ignore",
+    )
+
+    enabled: bool = True
     base_url: str = "http://laya:8000"
     timeout_ms: int = 30000
 
@@ -367,6 +404,12 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     debug: bool = False
     env: Literal["dev", "prod", "test", "staging"] = "dev"
+    enable_in_process_schedulers: bool | None = Field(
+        default=None,
+        description="Master switch for in-process background worker loops. "
+        "In dev/test, defaults to True (monolith mode). "
+        "In prod/staging, defaults to False (dedicated worker topology).",
+    )
     enable_webhook_worker: bool = Field(
         default=True,
         description="Whether to run the durable webhook outbox worker in-process within the API server. "
@@ -381,6 +424,11 @@ class Settings(BaseSettings):
         default=True,
         description="Whether to run the durable notification delivery worker in-process within the API server. "
         "Set to false (LITEADS_ENABLE_NOTIFICATION_WORKER=false) when running a dedicated worker container.",
+    )
+    enable_digest_worker: bool = Field(
+        default=True,
+        description="Whether to run the weekly digest delivery worker in-process within the API server. "
+        "Set to false (LITEADS_ENABLE_DIGEST_WORKER=false) when running a dedicated worker container.",
     )
 
     # Nested settings
@@ -415,6 +463,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_staging_prod_credentials(self) -> "Settings":
+        # Resolve in-process scheduler default based on topology
+        if self.enable_in_process_schedulers is None:
+            if self.env in ("staging", "prod"):
+                self.enable_in_process_schedulers = False
+            else:
+                self.enable_in_process_schedulers = True
+
         if self.env in ("staging", "prod"):
             # 1. Database password must not be empty or known dev default
             db_pwd = self.database.password
@@ -422,24 +477,78 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "LITEADS_DATABASE__PASSWORD must be set and non-empty in staging/prod environment"
                 )
-            if db_pwd.lower() in ("liteads_password", "postgres", "password", "admin", "root"):
+            if db_pwd.lower() in ("liteads_password", "postgres", "password", "admin", "root", "secret", "changeme"):
                 raise ValueError(
                     "Insecure default database password detected. "
                     "LITEADS_DATABASE__PASSWORD must not use known default values in staging/prod environment"
                 )
 
-            # 2. JWT & Tracking secrets cannot use example placeholder values
+            # 2. Redis password must be set and not default in production
+            if self.env == "prod":
+                redis_pwd = self.redis.password
+                if not redis_pwd:
+                    raise ValueError(
+                        "LITEADS_REDIS__PASSWORD must be set and non-empty in production environment"
+                    )
+                if redis_pwd.lower() in ("redis", "password", "admin", "root", "secret", "changeme", "liteads"):
+                    raise ValueError(
+                        "Insecure default Redis password detected in production environment"
+                    )
+
+            # 3. JWT & Tracking secrets cannot use example placeholder values or be short/weak
             jwt = self.auth.jwt_secret
-            if jwt in ("your_jwt_secret_min_32_characters_here", "your_jwt_secret_here"):
+            if not jwt or len(jwt) < 32 or jwt in (
+                "your_jwt_secret_min_32_characters_here",
+                "your_jwt_secret_here",
+                "test_jwt_secret_must_be_at_least_32_characters_long_for_validation",
+                "changeme_must_be_at_least_32_characters_long",
+            ):
                 raise ValueError(
-                    "LITEADS_AUTH__JWT_SECRET cannot use example placeholder string in staging/prod environment"
+                    "LITEADS_AUTH__JWT_SECRET must be at least 32 characters and cannot use default/placeholder strings in staging/prod"
                 )
 
             trk = self.tracking.secret
-            if trk in ("your_tracking_secret_min_32_characters_here", "your_tracking_secret_here"):
+            if not trk or len(trk) < 32 or trk in (
+                "your_tracking_secret_min_32_characters_here",
+                "your_tracking_secret_here",
+                "test_tracking_secret_must_be_at_least_32_characters_long_for_validation",
+                "changeme_must_be_at_least_32_characters_long",
+            ):
                 raise ValueError(
-                    "LITEADS_TRACKING__SECRET cannot use example placeholder string in staging/prod environment"
+                    "LITEADS_TRACKING__SECRET must be at least 32 characters and cannot use default/placeholder strings in staging/prod"
                 )
+
+            # 4. HTTPS origins enforcement
+            if self.env == "prod":
+                if self.server.frontend_url and not self.server.frontend_url.startswith("https://"):
+                    raise ValueError(
+                        f"Insecure frontend_url '{self.server.frontend_url}' in production. Must use HTTPS."
+                    )
+                if self.server.cors_origins:
+                    for origin in self.server.cors_origins:
+                        if origin == "*":
+                            raise ValueError(
+                                "Wildcard CORS origin '*' is strictly prohibited in production."
+                            )
+                        if not origin.startswith("https://"):
+                            raise ValueError(
+                                f"Insecure CORS origin '{origin}' in production. All allowed origins must use HTTPS."
+                            )
+
+            # 5. Trusted proxy configuration
+            if self.env == "prod":
+                if not self.server.trusted_proxies:
+                    raise ValueError(
+                        "LITEADS_SERVER__TRUSTED_PROXIES must be configured in production for secure client IP resolution."
+                    )
+
+            # 6. Email configuration
+            if self.env == "prod" and not self.listmonk.enabled:
+                if self.email.host in ("mailpit", "localhost", "127.0.0.1") and self.email.port == 1025:
+                    raise ValueError(
+                        "Mailpit/local plaintext SMTP is development-only and cannot be used in production."
+                    )
+
         if self.listmonk.enabled:
             self.listmonk.validate_if_enabled()
         return self

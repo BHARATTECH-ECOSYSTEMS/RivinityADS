@@ -167,7 +167,7 @@ def main():
     print("\n[Gate 2/6] Checking Alembic Migration Chain & Single Head...")
     alembic_ini = os.path.join(repo_root, "backend", "alembic.ini")
     code, out, dur2 = run_command([alembic_exec, "-c", alembic_ini, "heads"], repo_root)
-    if code == 0 and "n6f7a8b9c0d1" in out and len(out.strip().splitlines()) == 1:
+    if code == 0 and "r0a1b2c3d4e5" in out and len(out.strip().splitlines()) == 1:
         print(f"  PASS: Single migration head confirmed ({out.strip()}) in {dur2:.2f}s")
         results.append(GateResult("Alembic Single Head", f"{alembic_exec} -c backend/alembic.ini heads", "PASS", dur2, out, ""))
     else:

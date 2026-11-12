@@ -138,3 +138,5 @@ scripts/criteo/README*.md
 # Data files (keep folder structure with .gitkeep)
 /data/criteo/*.parquet
 /data/criteo/*.csv
+/data/websites/*
+!/data/websites/.gitkeep

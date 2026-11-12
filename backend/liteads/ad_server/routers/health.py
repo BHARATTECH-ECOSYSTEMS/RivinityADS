@@ -105,6 +105,7 @@ async def dependencies_check(
     Measures round-trip check latency for PostgreSQL and Redis while strictly
     avoiding the leakage of credentials, connection strings, hosts, ports, or stack traces.
     """
+    settings = get_settings()
     deps: dict[str, DependencyStatus] = {}
 
     # 1. Database check
@@ -144,6 +145,68 @@ async def dependencies_check(
             status="ok" if redis_ok else "unreachable",
             latency_ms=redis_latency,
         )
+
+    # 3. Worker queue lag & DLQ check
+    try:
+        outbox_diag = await collect_outbox_diagnostics(session=session, update_metrics=False)
+        oldest_age = max(
+            outbox_diag.webhook_queue.oldest_pending_age_seconds or 0,
+            outbox_diag.notification_queue.oldest_pending_age_seconds or 0,
+        )
+        total_failed = outbox_diag.webhook_queue.failed_count + outbox_diag.notification_queue.failed_count
+        deps["worker_queue_lag"] = DependencyStatus(
+            status="ok" if oldest_age < 300 else "degraded",
+            latency_ms=float(oldest_age),
+        )
+        deps["worker_dlq"] = DependencyStatus(
+            status="ok" if total_failed == 0 else "degraded",
+            latency_ms=float(total_failed),
+        )
+    except Exception:
+        deps["worker_queue_lag"] = DependencyStatus(status="unreachable", latency_ms=None)
+        deps["worker_dlq"] = DependencyStatus(status="unreachable", latency_ms=None)
+
+    # 4. Email provider check
+    if settings.listmonk.enabled:
+        t0 = time.perf_counter()
+        try:
+            from liteads.common.listmonk_client import get_listmonk_client
+            client = get_listmonk_client()
+            client_ok = await client.health_check()
+            email_lat = round((time.perf_counter() - t0) * 1000, 2)
+            deps["email_provider"] = DependencyStatus(
+                status="ok" if client_ok else "unreachable",
+                latency_ms=email_lat,
+            )
+        except Exception:
+            deps["email_provider"] = DependencyStatus(status="unreachable", latency_ms=None)
+    elif settings.email.host:
+        deps["email_provider"] = DependencyStatus(status="ok", latency_ms=None)
+    else:
+        deps["email_provider"] = DependencyStatus(status="unconfigured", latency_ms=None)
+
+    # 5. Payment provider check (Razorpay)
+    if settings.payment.key_id and settings.payment.key_secret:
+        deps["payment_provider"] = DependencyStatus(status="ok", latency_ms=None)
+    else:
+        deps["payment_provider"] = DependencyStatus(status="unconfigured", latency_ms=None)
+
+    # 6. Laya sidecar check
+    if settings.laya.enabled and settings.laya.base_url:
+        t0 = time.perf_counter()
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=1.0) as http_client:
+                r = await http_client.get(f"{settings.laya.base_url}/health")
+                laya_lat = round((time.perf_counter() - t0) * 1000, 2)
+                deps["laya_sidecar"] = DependencyStatus(
+                    status="ok" if r.status_code == 200 else "unreachable",
+                    latency_ms=laya_lat,
+                )
+        except Exception:
+            deps["laya_sidecar"] = DependencyStatus(status="unreachable", latency_ms=None)
+    else:
+        deps["laya_sidecar"] = DependencyStatus(status="disabled", latency_ms=None)
 
     if db_ok and redis_ok:
         overall = "healthy"

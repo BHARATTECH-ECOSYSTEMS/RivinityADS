@@ -96,6 +96,58 @@ class ApiKeyService:
         return True
 
     @staticmethod
+    async def rotate_api_key(
+        db: AsyncSession, publisher_id: int, key_id: int
+    ) -> tuple[PublisherApiKey, str]:
+        """Rotate an API key: revoke old key and generate a fresh key with identical configuration."""
+        from fastapi import HTTPException
+        stmt = select(PublisherApiKey).where(
+            PublisherApiKey.id == key_id,
+            PublisherApiKey.publisher_id == publisher_id,
+        )
+        result = await db.execute(stmt)
+        old_key = result.scalar_one_or_none()
+
+        if not old_key:
+            raise HTTPException(status_code=404, detail=f"API key {key_id} not found")
+        if old_key.revoked_at is not None:
+            raise HTTPException(status_code=400, detail="Cannot rotate an already revoked API key")
+
+        # 1. Revoke the old key
+        old_key.revoked_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        # 2. Issue a replacement key with identical configuration
+        raw_key, key_prefix, key_hash = ApiKeyService.generate_key_pair(is_sandbox=old_key.is_sandbox)
+        new_key = PublisherApiKey(
+            publisher_id=publisher_id,
+            name=f"{old_key.name} (Rotated)",
+            key_prefix=key_prefix,
+            key_hash=key_hash,
+            is_sandbox=old_key.is_sandbox,
+            rate_limit_per_minute=old_key.rate_limit_per_minute,
+            daily_quota=old_key.daily_quota,
+            revoked_at=None,
+        )
+        db.add(new_key)
+        await db.flush()
+
+        # 3. Record audit log
+        try:
+            from liteads.models.auth import AuditLog
+            db.add(
+                AuditLog(
+                    action="rotate_publisher_api_key",
+                    details=f"Rotated key {old_key.id} -> {new_key.id} ({new_key.key_prefix})",
+                )
+            )
+        except Exception:
+            pass
+
+        await db.commit()
+        await db.refresh(new_key)
+        return new_key, raw_key
+
+    @staticmethod
     async def get_key_by_prefix(db: AsyncSession, prefix: str) -> PublisherApiKey | None:
         """Retrieve an API key record by its prefix."""
         stmt = select(PublisherApiKey).where(

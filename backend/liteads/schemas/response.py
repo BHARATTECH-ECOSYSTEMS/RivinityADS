@@ -14,10 +14,13 @@ class CreativeResponse(BaseModel):
     description: str | None = Field(None, description="Ad description")
     image_url: str | None = Field(None, description="Image URL")
     video_url: str | None = Field(None, description="Video URL")
+    asset_url: str | None = Field(None, description="Direct URL to media asset (image or video)")
     landing_url: str = Field(..., description="Landing page URL")
     width: int | None = Field(None, description="Creative width")
     height: int | None = Field(None, description="Creative height")
-    creative_type: str = Field(..., description="Creative type (banner/native/video)")
+    creative_type: str = Field(..., description="Creative type (banner/native/video/interstitial/display_card/label_ad/element_ad)")
+    format: str | None = Field(None, description="Normalized format label (e.g. 'banner_300x250', 'native_card')")
+    cta_text: str | None = Field("Learn More", description="Call to action text")
 
 
 class TrackingUrls(BaseModel):
@@ -36,10 +39,13 @@ class AdResponse(BaseModel):
     campaign_id: int = Field(..., description="Campaign identifier")
     creative_id: int = Field(..., description="Creative identifier")
     ad_set_id: int | None = Field(None, description="Ad set identifier")
+    advertiser_id: int | None = Field(None, description="Advertiser identifier")
+    advertiser_name: str | None = Field(None, description="Advertiser display name")
     creative: CreativeResponse = Field(..., description="Creative content")
     tracking: TrackingUrls = Field(..., description="Tracking URLs")
-    sponsored: bool = Field(True, description="Indicates this is a sponsored ad")
+    sponsored: bool = Field(True, description="Strict boolean indicating this is sponsored content")
     disclosure_label: str = Field("Sponsored", description="Mandatory label for ad disclosure")
+    review_status: str = Field("APPROVED", description="Ad creative moderation review status")
     metadata: dict[str, Any] | None = Field(None, description="Additional metadata")
 
 

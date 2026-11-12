@@ -46,6 +46,11 @@ class RecommendationMetrics:
     rerank_ms: float = 0.0
     total_ms: float = 0.0
 
+    prediction_mode: str = "statistical"
+    model_version: str = ""
+    is_fallback: bool = False
+    fallback_reason: str | None = None
+
 
 @dataclass
 class RecommendationConfig:
@@ -61,6 +66,11 @@ class RecommendationConfig:
 
     # Prediction
     enable_ml_prediction: bool = False
+    prediction_mode: str = "statistical"  # "statistical", "shadow", "ml"
+    model_path: str | None = None
+    feature_builder_path: str | None = None
+    model_version: str = "v1"
+    timeout_ms: float = 20.0
     fallback_ctr: float = 0.01
     fallback_cvr: float = 0.001
 
@@ -144,11 +154,66 @@ class RecommendationEngine:
         return filters
 
     def _create_default_predictor(self) -> BasePredictor:
-        """Create default predictor."""
-        return StatisticalPredictor(
-            default_ctr=self.config.fallback_ctr,
-            default_cvr=self.config.fallback_cvr,
+        """
+        Create predictor based on configuration and artifact validity (Tasks A, B, F, G).
+        """
+        # 1. Statistical baseline when ML disabled or explicitly configured
+        if not self.config.enable_ml_prediction or self.config.prediction_mode == "statistical":
+            return StatisticalPredictor(
+                default_ctr=self.config.fallback_ctr,
+                default_cvr=self.config.fallback_cvr,
+                prediction_mode="statistical",
+                is_fallback=False,
+            )
+
+        # 2. Check artifact validity before creating MLPredictor
+        from liteads.ml_engine.serving.validator import validate_model_artifact
+
+        is_valid, reason = validate_model_artifact(
+            self.config.model_path,
+            self.config.feature_builder_path,
         )
+
+        if not is_valid:
+            logger.warning(
+                f"Cannot enable ML predictor ({reason}). Defaulting safely to statistical baseline.",
+                model_path=self.config.model_path,
+            )
+            return StatisticalPredictor(
+                default_ctr=self.config.fallback_ctr,
+                default_cvr=self.config.fallback_cvr,
+                prediction_mode="fallback",
+                is_fallback=True,
+                fallback_reason=f"invalid_artifact: {reason}",
+            )
+
+        # 3. Create valid ML predictor
+        from liteads.rec_engine.ranking.predictor import MLPredictor, ShadowPredictor
+
+        ml_pred = MLPredictor(
+            model_path=self.config.model_path,
+            feature_builder_path=self.config.feature_builder_path,
+            model_version=self.config.model_version,
+            timeout_ms=self.config.timeout_ms,
+            fallback_ctr=self.config.fallback_ctr,
+            fallback_cvr=self.config.fallback_cvr,
+        )
+
+        # 4. Shadow mode vs Live ML mode
+        if self.config.prediction_mode == "shadow":
+            baseline_pred = StatisticalPredictor(
+                default_ctr=self.config.fallback_ctr,
+                default_cvr=self.config.fallback_cvr,
+                prediction_mode="shadow",
+                is_fallback=False,
+            )
+            return ShadowPredictor(
+                baseline=baseline_pred,
+                shadow=ml_pred,
+                timeout_ms=self.config.timeout_ms,
+            )
+
+        return ml_pred
 
     def _create_default_rerankers(self) -> list[BaseReranker]:
         """Create default re-ranker chain."""
@@ -233,6 +298,12 @@ class RecommendationEngine:
                 for candidate, pred in zip(candidates, predictions):
                     candidate.pctr = pred.pctr
                     candidate.pcvr = pred.pcvr
+
+                if predictions:
+                    metrics.prediction_mode = getattr(predictions[0], "prediction_mode", "statistical")
+                    metrics.model_version = getattr(predictions[0], "model_version", "")
+                    metrics.is_fallback = getattr(predictions[0], "is_fallback", False)
+                    metrics.fallback_reason = getattr(predictions[0], "fallback_reason", None)
             metrics.prediction_ms = prediction_timer.elapsed_ms
 
             # 4. Ranking
@@ -280,6 +351,11 @@ class RecommendationEngine:
 def create_engine(
     session: AsyncSession,
     enable_ml: bool = False,
+    prediction_mode: str = "statistical",
+    model_path: str | None = None,
+    feature_builder_path: str | None = None,
+    model_version: str = "v1",
+    timeout_ms: float = 20.0,
     ranking_strategy: RankingStrategy = RankingStrategy.ECPM,
 ) -> RecommendationEngine:
     """
@@ -288,6 +364,11 @@ def create_engine(
     Args:
         session: Database session
         enable_ml: Whether to enable ML prediction
+        prediction_mode: Prediction mode ("statistical", "shadow", "ml")
+        model_path: Path to model checkpoint
+        feature_builder_path: Path to feature builder
+        model_version: Version identifier
+        timeout_ms: Latency budget in ms
         ranking_strategy: Ranking strategy to use
 
     Returns:
@@ -295,6 +376,11 @@ def create_engine(
     """
     config = RecommendationConfig(
         enable_ml_prediction=enable_ml,
+        prediction_mode=prediction_mode,
+        model_path=model_path,
+        feature_builder_path=feature_builder_path,
+        model_version=model_version,
+        timeout_ms=timeout_ms,
         ranking_strategy=ranking_strategy,
     )
 

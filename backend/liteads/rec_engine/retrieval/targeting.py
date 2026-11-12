@@ -132,6 +132,8 @@ class TargetingRetrieval(BaseRetrieval):
                         creative_type=creative_data.get("creative_type", 1),
                         width=creative_data.get("width"),
                         height=creative_data.get("height"),
+                        advertiser_name=campaign_data.get("advertiser_name") or campaign_data.get("name"),
+                        review_status="APPROVED",
                         metadata={
                             "sectors": targeted_sectors,
                             "freq_cap_daily": ad_set_data.get("freq_cap_daily"),
@@ -214,9 +216,11 @@ class TargetingRetrieval(BaseRetrieval):
             if not campaign.is_active:
                 continue
 
+            adv_name = campaign.advertiser.name if getattr(campaign, "advertiser", None) else None
             campaign_data: dict[str, Any] = {
                 "id": campaign.id,
                 "advertiser_id": campaign.advertiser_id,
+                "advertiser_name": adv_name,
                 "name": campaign.name,
                 "bid_type": campaign.bid_type,
                 "bid_amount": float(campaign.bid_amount),

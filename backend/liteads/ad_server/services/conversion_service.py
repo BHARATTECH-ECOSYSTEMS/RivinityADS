@@ -1,11 +1,14 @@
 """
-Conversion attribution and measurement service for Phase 11.
+Conversion attribution and measurement service for Phase 11 & Phase 1.
 
 Semantics:
 - Validates and ingests conversion events from client pixels and S2S postbacks.
 - Applies conservative last-touch (last-click) attribution within a 30-day window (2,592,000s) in UTC.
 - Enforces strict deduplication on (campaign_id, external_order_id).
+- Validates real stored eligible click events in database (a token alone with missing DB row cannot be attributed).
 - Enforces CPA billing invariants (charges wallet only on attributed non-test conversions).
+- Uses single canonical CPA billing path via BillingService.process_cpa_charge with DB-level idempotency.
+- Strictly eliminates arbitrary publisher selection fallback; applies documented direct-inventory rule when no publisher exists.
 - Test events (is_test=True) never generate billable activity or contaminate production stats.
 """
 
@@ -23,8 +26,10 @@ from liteads.ad_server.services.billing import BillingService
 from liteads.common.logger import get_logger
 from liteads.common.cache import redis_client
 from liteads.common.tracking_sig import verify_click_token, verify_conversion_sig
+from liteads.management.advertiser_api_key_service import AdvertiserApiKeyService
 from liteads.models.ad import AdEvent, AdSet, Advertiser, Campaign, CampaignAssignment, Creative
 from liteads.models.base import EventType
+from liteads.models.finance import Transaction
 from liteads.models.publisher import AdSlot, Publisher
 
 logger = get_logger(__name__)
@@ -83,6 +88,8 @@ class ConversionService:
         user_id: str | None = None,
         signature: str | None = None,
         is_test: bool = False,
+        is_s2s: bool = False,
+        api_key_advertiser_id: int | None = None,
         ip_address: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> ConversionResult:
@@ -95,6 +102,14 @@ class ConversionService:
             if timestamp
             else now_utc.replace(tzinfo=None)
         )
+
+        # S2S postback mandatory signature check
+        if is_s2s and not signature:
+            raise HTTPException(status_code=400, detail="Missing conversion signature")
+        if is_s2s and not timestamp:
+            raise HTTPException(status_code=400, detail="Missing timestamp for signature verification")
+        if is_s2s and not order_id:
+            raise HTTPException(status_code=400, detail="Missing order_id for S2S postback")
 
         # 1. Validate currency code
         currency_clean = (currency or "INR").strip().upper()
@@ -149,18 +164,28 @@ class ConversionService:
             )
             click_event = click_res.scalar_one_or_none()
 
-            if token_within_window:
-                is_attributed = True
-                attribution_reason = "last_click"
-                if click_event:
-                    attributed_event_id = click_event.id
-                    resolved_ad_set_id = click_event.ad_set_id
+            # Task C & Phase 3: Require real stored eligible non-invalid click row in DB
+            if click_event:
+                attributed_event_id = click_event.id
+                resolved_ad_set_id = click_event.ad_set_id
+                resolved_campaign_id = resolved_campaign_id or click_event.campaign_id
+                resolved_creative_id = resolved_creative_id or click_event.creative_id
+
+                click_dt = click_event.event_time
+                age_delta = event_dt - click_dt
+                if getattr(click_event, "is_invalid", False):
+                    is_attributed = False
+                    attribution_reason = "click_invalid_ivt"
+                elif token_within_window and timedelta(seconds=0) <= age_delta <= timedelta(seconds=ATTRIBUTION_WINDOW_SECONDS):
+                    is_attributed = True
+                    attribution_reason = "last_click"
+                else:
+                    is_attributed = False
+                    attribution_reason = "outside_window"
             else:
+                # Token verified cryptographically, but click was NOT recorded in database
                 is_attributed = False
-                attribution_reason = "outside_window"
-                if click_event:
-                    attributed_event_id = click_event.id
-                    resolved_ad_set_id = click_event.ad_set_id
+                attribution_reason = "click_not_found"
 
         elif request_id:
             # Query the database for click matching request_id
@@ -188,7 +213,10 @@ class ConversionService:
                 # Check 30-day attribution window (event_dt - click_dt)
                 click_dt = click_event.event_time
                 age_delta = event_dt - click_dt
-                if timedelta(seconds=0) <= age_delta <= timedelta(seconds=ATTRIBUTION_WINDOW_SECONDS):
+                if getattr(click_event, "is_invalid", False):
+                    is_attributed = False
+                    attribution_reason = "click_invalid_ivt"
+                elif timedelta(seconds=0) <= age_delta <= timedelta(seconds=ATTRIBUTION_WINDOW_SECONDS):
                     is_attributed = True
                     attribution_reason = "last_click"
                 else:
@@ -210,6 +238,11 @@ class ConversionService:
             campaign = await self.session.get(Campaign, resolved_campaign_id)
             if not campaign:
                 raise HTTPException(status_code=404, detail=f"Campaign {resolved_campaign_id} not found")
+
+        # Tenant isolation check if API key advertiser was provided
+        if campaign and api_key_advertiser_id is not None:
+            if campaign.advertiser_id != api_key_advertiser_id:
+                raise HTTPException(status_code=403, detail="API key belongs to another advertiser")
 
         # 5. Check order deduplication if external_order_id is provided
         clean_order_id = order_id.strip() if order_id else None
@@ -244,10 +277,17 @@ class ConversionService:
                     message="Duplicate order conversion deduplicated idempotently",
                 )
 
-        # 6. Verify S2S Signature if provided
+        # 6. Verify S2S Signature if provided or required
         if signature:
             ts_for_sig = timestamp or int(now_utc.timestamp())
             val_for_sig = float(val_decimal) if val_decimal is not None else 0.0
+
+            candidate_secrets: list[str] = []
+            if campaign and campaign.advertiser_id:
+                candidate_secrets = await AdvertiserApiKeyService.get_active_secrets_for_advertiser(
+                    self.session, campaign.advertiser_id, campaign.id
+                )
+
             verify_conversion_sig(
                 campaign_id=resolved_campaign_id or 0,
                 order_id=clean_order_id or "",
@@ -255,10 +295,22 @@ class ConversionService:
                 currency=currency_clean,
                 timestamp=ts_for_sig,
                 signature=signature,
+                secrets=candidate_secrets,
+                advertiser_id=campaign.advertiser_id if campaign else None,
+                click_id=request_id or click_token,
             )
 
         # 7. Financial Invariant & CPA Billing
         cost = Decimal("0")
+        is_preview_traffic = (
+            is_test
+            or (extra and (extra.get("is_preview") or extra.get("is_sandbox")))
+            or (request_id and request_id.startswith(("prev_", "test_preview_")))
+            or (click_event and click_event.request_id.startswith(("prev_", "test_preview_")))
+        )
+        if is_preview_traffic:
+            is_test = True
+
         if is_attributed and not is_test and campaign:
             # Check if CPA bidding (bid_type == 3)
             bid_type = campaign.bid_type
@@ -271,57 +323,49 @@ class ConversionService:
 
             if bid_type == 3:  # CPA
                 cost = Decimal(bid_amount)
-                # Find publisher to credit if click was associated with a slot
-                publisher_id = None
-                if click_event:
-                    # Check extra or ad slot if stored
-                    pass
 
-                if campaign.advertiser_id and cost > 0:
-                    ref_key = f"conv:{resolved_campaign_id}:{clean_order_id or request_id or int(now_utc.timestamp())}"
-                    pub_id_to_bill = None
+                # Task D: Resolve real publisher; never fall back to arbitrary publisher
+                pub_id_to_bill = None
+                if click_event:
+                    # Find slot/publisher from prior Transaction
+                    tx_res = await self.session.execute(
+                        select(Transaction.publisher_id).where(
+                            Transaction.reference_id.like(f"%{click_event.request_id}%"),
+                            Transaction.publisher_id.is_not(None),
+                        ).limit(1)
+                    )
+                    pub_id_to_bill = tx_res.scalar_one_or_none()
+
+                if not pub_id_to_bill:
                     camp_assign = await self.session.execute(
                         select(CampaignAssignment).where(CampaignAssignment.campaign_id == campaign.id).limit(1)
                     )
                     assign = camp_assign.scalar_one_or_none()
                     if assign:
                         pub_id_to_bill = assign.publisher_id
-                    else:
-                        pub_res = await self.session.execute(select(Publisher).limit(1))
-                        pub = pub_res.scalar_one_or_none()
-                        if pub:
-                            pub_id_to_bill = pub.id
 
-                    if pub_id_to_bill:
-                        bill_success = await BillingService.process_impression_charge(
-                            self.session,
-                            advertiser_id=campaign.advertiser_id,
+                # Task E: Single canonical CPA billing path via BillingService.process_cpa_charge
+                if campaign.advertiser_id and cost > 0:
+                    bill_success = await BillingService.process_cpa_charge(
+                        self.session,
+                        advertiser_id=campaign.advertiser_id,
+                        campaign_id=campaign.id,
+                        cost=cost,
+                        currency=currency_clean,
+                        publisher_id=pub_id_to_bill,
+                        order_id=clean_order_id,
+                        request_id=request_id,
+                    )
+                    if not bill_success:
+                        logger.warning(
+                            "Billing failed for CPA conversion: insufficient funds",
                             campaign_id=campaign.id,
-                            publisher_id=pub_id_to_bill,
                             cost=cost,
-                            reference_id=ref_key,
                         )
-                        if not bill_success:
-                            logger.warning(
-                                "Billing failed for CPA conversion: insufficient funds",
-                                campaign_id=campaign.id,
-                                cost=cost,
-                            )
-                            raise HTTPException(
-                                status_code=402,
-                                detail="Insufficient advertiser balance for CPA conversion charge",
-                            )
-                    else:
-                        # Direct advertiser charge when no publisher is in system
-                        adv = await self.session.get(Advertiser, campaign.advertiser_id, with_for_update=True)
-                        if not adv or adv.balance < cost:
-                            raise HTTPException(
-                                status_code=402,
-                                detail="Insufficient advertiser balance for CPA conversion charge",
-                            )
-                        adv.balance -= cost
-                        campaign.spent_today += cost
-                        campaign.spent_total += cost
+                        raise HTTPException(
+                            status_code=402,
+                            detail="Insufficient advertiser balance for CPA conversion charge",
+                        )
 
         # 8. Insert conversion AdEvent
         gen_request_id = request_id or f"conv_{clean_order_id or now_utc.strftime('%Y%m%d%H%M%S%f')}"
@@ -345,6 +389,7 @@ class ConversionService:
             attributed_event_id=attributed_event_id,
             external_order_id=clean_order_id,
             is_test=is_test,
+            is_invalid=False,
         )
 
         try:

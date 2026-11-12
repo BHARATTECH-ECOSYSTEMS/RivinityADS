@@ -65,11 +65,19 @@ async def verify_dns_txt(domain: str, expected_token: str) -> tuple[bool, Option
     """
     record_name = f"_rivinity-challenge.{domain}"
     resolver = dns.asyncresolver.Resolver()
-    resolver.timeout = 5.0
-    resolver.lifetime = 10.0
+    resolver.timeout = 2.5
+    resolver.lifetime = 5.0
     
     try:
-        answers = await resolver.resolve(record_name, "TXT")
+        try:
+            answers = await resolver.resolve(record_name, "TXT")
+        except (dns.resolver.Timeout, dns.resolver.LifetimeTimeout):
+            # Fall back to public resolvers if local network resolvers time out (e.g. stale VPN / corporate DNS)
+            fallback_resolver = dns.asyncresolver.Resolver(configure=False)
+            fallback_resolver.nameservers = ["8.8.8.8", "1.1.1.1"]
+            fallback_resolver.timeout = 3.0
+            fallback_resolver.lifetime = 5.0
+            answers = await fallback_resolver.resolve(record_name, "TXT")
         for rdata in answers:
             # rdata.strings is a tuple of bytes
             txt_strings = [s.decode('utf-8') for s in rdata.strings]
@@ -136,13 +144,14 @@ class DomainVerificationService:
         if domain_record.status == VerificationStatus.VERIFIED:
             return domain_record
             
-        domain_record.last_checked_at = datetime.now(timezone.utc)
+        now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+        domain_record.last_checked_at = now_utc
         
         is_verified, error_msg = await verify_dns_txt(domain_record.domain, domain_record.verification_token)
         
         if is_verified:
             domain_record.status = VerificationStatus.VERIFIED
-            domain_record.verified_at = datetime.now(timezone.utc)
+            domain_record.verified_at = now_utc
             domain_record.last_error = None
         else:
             domain_record.status = VerificationStatus.FAILED

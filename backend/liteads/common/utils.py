@@ -128,12 +128,14 @@ class Timer:
     @property
     def elapsed_ms(self) -> float:
         """Get elapsed time in milliseconds."""
-        return (self.end_time - self.start_time) * 1000
+        end = self.end_time if self.end_time > 0 else time.perf_counter()
+        return (end - self.start_time) * 1000
 
     @property
     def elapsed_s(self) -> float:
         """Get elapsed time in seconds."""
-        return self.end_time - self.start_time
+        end = self.end_time if self.end_time > 0 else time.perf_counter()
+        return end - self.start_time
 
 
 def retry(

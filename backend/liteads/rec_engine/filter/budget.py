@@ -209,6 +209,25 @@ class BudgetFilter(BaseFilter):
                     spent_total=0.0,
                 )
 
+        # If any campaign had no cache or missing budget info, fall back to authoritative DB
+        missing_ids = [cid for cid, b in result.items() if b.budget_daily is None and b.budget_total is None]
+        if missing_ids and self.session:
+            try:
+                from sqlalchemy import select
+                from liteads.models import Campaign
+                db_stmt = select(Campaign).where(Campaign.id.in_(missing_ids))
+                c_res = await self.session.execute(db_stmt)
+                for camp in c_res.scalars().all():
+                    result[camp.id] = BudgetInfo(
+                        campaign_id=camp.id,
+                        budget_daily=float(camp.budget_daily) if camp.budget_daily else None,
+                        budget_total=float(camp.budget_total) if camp.budget_total else None,
+                        spent_today=float(camp.spent_today) if camp.spent_today else 0.0,
+                        spent_total=float(camp.spent_total) if camp.spent_total else 0.0,
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to query campaign budgets from database: {e}")
+
         return result
 
     async def _get_budget(self, campaign_id: int) -> BudgetInfo:

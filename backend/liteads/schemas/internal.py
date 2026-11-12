@@ -38,6 +38,10 @@ class AdCandidate:
     width: int | None = None
     height: int | None = None
 
+    # Advertiser info
+    advertiser_name: str | None = None
+    review_status: str = "APPROVED"
+
     # Extra info
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -108,6 +112,9 @@ class PredictionResult:
     pcvr: float = 0.0
     model_version: str = ""
     latency_ms: float = 0.0
+    prediction_mode: str = "statistical"  # "statistical", "shadow", "ml", "fallback"
+    is_fallback: bool = False
+    fallback_reason: str | None = None
 
 
 @dataclass

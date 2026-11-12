@@ -1,0 +1,305 @@
+# RivinityADS Production Docker Compose (Phase 7)
+# Enforces:
+# - Fail-closed production secrets and explicit LITEADS_ENV=prod
+# - Dedicated worker topology (in-process schedulers disabled on API server)
+# - Explicit migration release container (alembic upgrade head before API workers)
+# - Zero development services (Mailpit omitted entirely)
+# - Internal database & cache isolation (PostgreSQL and Redis unexposed on host)
+# - Modern TLS reverse proxy (Nginx with HTTP->HTTPS redirect and strict headers)
+# - Secured monitoring (anonymous access disabled, Prometheus unexposed)
+# - Pinned, immutable container images
+
+services:
+  # ── 1. Database Migration Release Job (Runs once before API starts) ────────
+  migration:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      - LITEADS_ENV=prod
+      - LITEADS_DATABASE__HOST=${LITEADS_DATABASE__HOST:-postgres}
+      - LITEADS_DATABASE__PORT=${LITEADS_DATABASE__PORT:-5432}
+      - LITEADS_DATABASE__NAME=${LITEADS_DATABASE__NAME:-liteads}
+      - LITEADS_DATABASE__USER=${LITEADS_DATABASE__USER:-liteads}
+      - LITEADS_DATABASE__PASSWORD=${LITEADS_DATABASE__PASSWORD:?LITEADS_DATABASE__PASSWORD must be set}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - liteads-internal
+
+  # ── 2. Ad Server API (Horizontally scalable, zero in-process schedulers) ───
+  ad-server:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile
+    environment:
+      - LITEADS_ENV=prod
+      - LITEADS_DATABASE__HOST=${LITEADS_DATABASE__HOST:-postgres}
+      - LITEADS_DATABASE__PORT=${LITEADS_DATABASE__PORT:-5432}
+      - LITEADS_DATABASE__NAME=${LITEADS_DATABASE__NAME:-liteads}
+      - LITEADS_DATABASE__USER=${LITEADS_DATABASE__USER:-liteads}
+      - LITEADS_DATABASE__PASSWORD=${LITEADS_DATABASE__PASSWORD:?LITEADS_DATABASE__PASSWORD must be set}
+      - LITEADS_REDIS__HOST=${LITEADS_REDIS__HOST:-redis}
+      - LITEADS_REDIS__PORT=${LITEADS_REDIS__PORT:-6379}
+      - LITEADS_REDIS__PASSWORD=${LITEADS_REDIS__PASSWORD:?LITEADS_REDIS__PASSWORD must be set}
+      - LITEADS_AUTH__JWT_SECRET=${LITEADS_AUTH__JWT_SECRET:?LITEADS_AUTH__JWT_SECRET must be set}
+      - LITEADS_TRACKING__SECRET=${LITEADS_TRACKING__SECRET:?LITEADS_TRACKING__SECRET must be set}
+      - LITEADS_SERVER__FRONTEND_URL=${LITEADS_SERVER__FRONTEND_URL:?LITEADS_SERVER__FRONTEND_URL (HTTPS) must be set}
+      - LITEADS_SERVER__TRUSTED_PROXIES=${LITEADS_SERVER__TRUSTED_PROXIES:-127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+      - LITEADS_SERVER__CORS_ORIGINS=${LITEADS_SERVER__CORS_ORIGINS:-}
+      # Dedicated worker topology: API server handles web traffic only
+      - LITEADS_ENABLE_IN_PROCESS_SCHEDULERS=false
+      - LITEADS_ENABLE_WEBHOOK_WORKER=false
+      - LITEADS_ENABLE_OPTIMIZATION_WORKER=false
+      - LITEADS_ENABLE_NOTIFICATION_WORKER=false
+      - LITEADS_ENABLE_DIGEST_WORKER=false
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - LAYA_BASE_URL=http://laya:8000
+      - RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID:-}
+      - RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET:-}
+      - RAZORPAY_WEBHOOK_SECRET=${RAZORPAY_WEBHOOK_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - liteads-internal
+
+  # ── 3. Dedicated Webhook Outbox Worker ─────────────────────────────────────
+  webhook-worker:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile
+    command: ["python", "-m", "liteads.ad_server.services.webhook_worker"]
+    environment:
+      - LITEADS_ENV=prod
+      - LITEADS_DATABASE__HOST=${LITEADS_DATABASE__HOST:-postgres}
+      - LITEADS_DATABASE__PORT=${LITEADS_DATABASE__PORT:-5432}
+      - LITEADS_DATABASE__NAME=${LITEADS_DATABASE__NAME:-liteads}
+      - LITEADS_DATABASE__USER=${LITEADS_DATABASE__USER:-liteads}
+      - LITEADS_DATABASE__PASSWORD=${LITEADS_DATABASE__PASSWORD:?LITEADS_DATABASE__PASSWORD must be set}
+      - LITEADS_REDIS__HOST=${LITEADS_REDIS__HOST:-redis}
+      - LITEADS_REDIS__PORT=${LITEADS_REDIS__PORT:-6379}
+      - LITEADS_REDIS__PASSWORD=${LITEADS_REDIS__PASSWORD:?LITEADS_REDIS__PASSWORD must be set}
+      - LITEADS_AUTH__JWT_SECRET=${LITEADS_AUTH__JWT_SECRET}
+      - LITEADS_TRACKING__SECRET=${LITEADS_TRACKING__SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks:
+      - liteads-internal
+
+  # ── 4. Dedicated Campaign Optimization Worker ──────────────────────────────
+  optimization-worker:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile
+    command: ["python", "-m", "liteads.ad_server.services.optimization_worker"]
+    environment:
+      - LITEADS_ENV=prod
+      - LITEADS_DATABASE__HOST=${LITEADS_DATABASE__HOST:-postgres}
+      - LITEADS_DATABASE__PORT=${LITEADS_DATABASE__PORT:-5432}
+      - LITEADS_DATABASE__NAME=${LITEADS_DATABASE__NAME:-liteads}
+      - LITEADS_DATABASE__USER=${LITEADS_DATABASE__USER:-liteads}
+      - LITEADS_DATABASE__PASSWORD=${LITEADS_DATABASE__PASSWORD:?LITEADS_DATABASE__PASSWORD must be set}
+      - LITEADS_REDIS__HOST=${LITEADS_REDIS__HOST:-redis}
+      - LITEADS_REDIS__PORT=${LITEADS_REDIS__PORT:-6379}
+      - LITEADS_REDIS__PASSWORD=${LITEADS_REDIS__PASSWORD:?LITEADS_REDIS__PASSWORD must be set}
+      - LAYA_BASE_URL=http://laya:8000
+      - LITEADS_OPTIMIZATION__MODE=${LITEADS_OPTIMIZATION__MODE:-autonomous}
+      - LITEADS_OPTIMIZATION__KILL_SWITCH=${LITEADS_OPTIMIZATION__KILL_SWITCH:-false}
+      - LITEADS_OPTIMIZATION__INTERVAL_SECONDS=${LITEADS_OPTIMIZATION__INTERVAL_SECONDS:-900}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks:
+      - liteads-internal
+
+  # ── 5. Dedicated Notification Delivery Worker ──────────────────────────────
+  notification-worker:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile
+    command: ["python", "-m", "liteads.ad_server.services.notification_worker"]
+    environment:
+      - LITEADS_ENV=prod
+      - LITEADS_DATABASE__HOST=${LITEADS_DATABASE__HOST:-postgres}
+      - LITEADS_DATABASE__PORT=${LITEADS_DATABASE__PORT:-5432}
+      - LITEADS_DATABASE__NAME=${LITEADS_DATABASE__NAME:-liteads}
+      - LITEADS_DATABASE__USER=${LITEADS_DATABASE__USER:-liteads}
+      - LITEADS_DATABASE__PASSWORD=${LITEADS_DATABASE__PASSWORD:?LITEADS_DATABASE__PASSWORD must be set}
+      - LITEADS_REDIS__HOST=${LITEADS_REDIS__HOST:-redis}
+      - LITEADS_REDIS__PORT=${LITEADS_REDIS__PORT:-6379}
+      - LITEADS_REDIS__PASSWORD=${LITEADS_REDIS__PASSWORD:?LITEADS_REDIS__PASSWORD must be set}
+      - LITEADS_EMAIL__HOST=${LITEADS_EMAIL__HOST:-smtp.sendgrid.net}
+      - LITEADS_EMAIL__PORT=${LITEADS_EMAIL__PORT:-587}
+      - LITEADS_EMAIL__USER=${LITEADS_EMAIL__USER:-apikey}
+      - LITEADS_EMAIL__PASSWORD=${LITEADS_EMAIL__PASSWORD:-}
+      - LITEADS_EMAIL__USE_TLS=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks:
+      - liteads-internal
+
+  # ── 6. Dedicated Weekly Digest Worker ───────────────────────────────────────
+  digest-worker:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile
+    command: ["python", "-m", "liteads.ad_server.services.digest_scheduler"]
+    environment:
+      - LITEADS_ENV=prod
+      - LITEADS_DATABASE__HOST=${LITEADS_DATABASE__HOST:-postgres}
+      - LITEADS_DATABASE__PORT=${LITEADS_DATABASE__PORT:-5432}
+      - LITEADS_DATABASE__NAME=${LITEADS_DATABASE__NAME:-liteads}
+      - LITEADS_DATABASE__USER=${LITEADS_DATABASE__USER:-liteads}
+      - LITEADS_DATABASE__PASSWORD=${LITEADS_DATABASE__PASSWORD:?LITEADS_DATABASE__PASSWORD must be set}
+      - LITEADS_REDIS__HOST=${LITEADS_REDIS__HOST:-redis}
+      - LITEADS_REDIS__PORT=${LITEADS_REDIS__PORT:-6379}
+      - LITEADS_REDIS__PASSWORD=${LITEADS_REDIS__PASSWORD:?LITEADS_REDIS__PASSWORD must be set}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks:
+      - liteads-internal
+
+  # ── 7. Production PostgreSQL Database (Pinned: 15.8-alpine) ─────────────────
+  postgres:
+    image: postgres:15.8-alpine
+    environment:
+      POSTGRES_USER: ${LITEADS_DATABASE__USER:-liteads}
+      POSTGRES_PASSWORD: ${LITEADS_DATABASE__PASSWORD:?LITEADS_DATABASE__PASSWORD must be set}
+      POSTGRES_DB: ${LITEADS_DATABASE__NAME:-liteads}
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${LITEADS_DATABASE__USER:-liteads} -d ${LITEADS_DATABASE__NAME:-liteads}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - liteads-internal
+
+  # ── 8. Production Redis Cache (Pinned: 7.2.6-alpine) ────────────────────────
+  redis:
+    image: redis:7.2.6-alpine
+    command: >
+      sh -c '
+        exec redis-server --requirepass "$$LITEADS_REDIS__PASSWORD" --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru --protected-mode yes
+      '
+    environment:
+      - LITEADS_REDIS__PASSWORD=${LITEADS_REDIS__PASSWORD:?LITEADS_REDIS__PASSWORD must be set}
+    volumes:
+      - redis_prod_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$LITEADS_REDIS__PASSWORD\" ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - liteads-internal
+
+  # ── 9. Production Nginx TLS Reverse Proxy (Pinned: 1.27.2-alpine) ───────────
+  nginx:
+    image: nginx:1.27.2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deployment/nginx/nginx.prod.conf:/etc/nginx/nginx.conf:ro
+      - certs_data:/etc/nginx/certs:ro
+      - certbot_webroot:/var/www/certbot:ro
+    depends_on:
+      - ad-server
+    restart: unless-stopped
+    networks:
+      - liteads-internal
+
+  # ── 10. Prometheus Monitoring (Pinned: v2.54.1, Private Network Only) ───────
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./deployment/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deployment/prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheus_prod_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    networks:
+      - liteads-internal
+    profiles:
+      - monitoring
+
+  # ── 11. Grafana Dashboard (Pinned: 11.2.0, Anonymous Access Disabled) ──────
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+    volumes:
+      - grafana_prod_data:/var/lib/grafana
+      - ./deployment/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./deployment/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./deployment/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - liteads-internal
+    profiles:
+      - monitoring
+
+volumes:
+  postgres_prod_data:
+  redis_prod_data:
+  certs_data:
+  certbot_webroot:
+  prometheus_prod_data:
+  grafana_prod_data:
+
+networks:
+  liteads-internal:
+    driver: bridge
+    internal: false
+

@@ -81,7 +81,11 @@ export default function AdvertiserDomains() {
     try {
       const updated = await verifyAdvertiserDomain(domainRecord.id);
       setDomains((current) => current.map((item) => item.id === updated.id ? updated : item));
-      setNotice(updated.status === "VERIFIED" ? `${updated.domain} is verified.` : updated.last_error ?? "DNS verification did not pass.");
+      if (updated.status === "VERIFIED") {
+        setNotice(`${updated.domain} is verified.`);
+      } else {
+        setError(updated.last_error ?? "DNS verification did not pass.");
+      }
     } catch (err) {
       setError(errorMessage(err, "Could not verify the domain."));
     } finally {

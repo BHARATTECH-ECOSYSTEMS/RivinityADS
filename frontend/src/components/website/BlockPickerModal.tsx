@@ -5,6 +5,7 @@ interface BlockPickerModalProps {
   isOpen: boolean;
   onClose: () => void;
   onAddBlock: (block: BlockItem) => void;
+  onOpenAIGenerator?: () => void;
 }
 
 interface BlockCatalogEntry {
@@ -140,12 +141,25 @@ const BLOCK_CATALOG: BlockCatalogEntry[] = [
       ],
     },
   },
+  {
+    type: "open_design_section",
+    title: "Open Design Visual Section",
+    description: "Modular HTML/CSS section layout generated from Open Design design systems.",
+    icon: "🎨",
+    defaultContent: {
+      section_tag: "section",
+      section_id: "custom-section",
+      css_classes: "od-custom-section",
+      html_content: '<div class="od-custom-wrap"><p>Open Design Visual Component Section</p></div>',
+    },
+  },
 ];
 
 export const BlockPickerModal: React.FC<BlockPickerModalProps> = ({
   isOpen,
   onClose,
   onAddBlock,
+  onOpenAIGenerator,
 }) => {
   if (!isOpen) return null;
 
@@ -206,6 +220,49 @@ export const BlockPickerModal: React.FC<BlockPickerModalProps> = ({
             ✕
           </button>
         </div>
+
+        {onOpenAIGenerator && (
+          <div
+            style={{
+              marginBottom: "1rem",
+              padding: "1rem",
+              borderRadius: "var(--radius-md)",
+              background: "linear-gradient(135deg, rgba(37, 99, 235, 0.08) 0%, rgba(124, 58, 237, 0.08) 100%)",
+              border: "1px solid rgba(124, 58, 237, 0.25)",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: "1rem",
+            }}
+          >
+            <div>
+              <div style={{ fontWeight: 700, fontSize: "0.875rem", display: "flex", alignItems: "center", gap: "0.35rem" }}>
+                <span>✨</span>
+                <span>Generate Section with AI</span>
+              </div>
+              <p style={{ margin: "0.2rem 0 0", fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                Describe your desired layout, copy, and preset in plain English.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => {
+                onClose();
+                onOpenAIGenerator();
+              }}
+              style={{
+                whiteSpace: "nowrap",
+                fontSize: "0.75rem",
+                background: "linear-gradient(135deg, var(--primary) 0%, #7c3aed 100%)",
+                borderColor: "transparent",
+              }}
+              data-testid="picker-open-ai-generator-btn"
+            >
+              ✨ Open AI Generator
+            </button>
+          </div>
+        )}
 
         <div
           style={{
