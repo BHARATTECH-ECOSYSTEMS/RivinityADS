@@ -5,9 +5,14 @@ Authoritative source of truth for inspecting the Alembic migration tree,
 validating single-head integrity, and deriving the current head revision.
 """
 
+import logging
 import os
 import sys
 from pathlib import Path
+
+# Silence alembic plugin loading logs on stdout/stderr
+logging.getLogger("alembic.runtime.plugins").setLevel(logging.WARNING)
+logging.getLogger("alembic").setLevel(logging.WARNING)
 
 # Prevent local directory shadowing of standard library modules (like email)
 curr_dir = os.path.dirname(os.path.abspath(__file__))

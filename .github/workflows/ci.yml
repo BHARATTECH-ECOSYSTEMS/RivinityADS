@@ -15,6 +15,7 @@ jobs:
     name: Backend Quality & Regression Gates
     runs-on: ubuntu-latest
     env:
+      PYTHONPATH: "backend"
       LITEADS_AUTH__JWT_SECRET: "test_jwt_secret_must_be_at_least_32_characters_long_for_validation"
       LITEADS_TRACKING__SECRET: "test_tracking_secret_must_be_at_least_32_characters_long_for_validation"
     steps:
@@ -35,16 +36,15 @@ jobs:
 
       - name: Validate Alembic Migration Head
         run: |
-          export PYTHONPATH="backend"
           EXPECTED_HEAD=$(python -m liteads.common.alembic_utils | tail -n 1)
           echo "Authoritative Alembic Head from Graph: $EXPECTED_HEAD"
-          HEAD_OUTPUT=$(alembic -c backend/alembic.ini heads)
+          HEAD_OUTPUT=$(python -m alembic -c backend/alembic.ini heads)
           echo "Current Alembic Head: $HEAD_OUTPUT"
           if [[ "$HEAD_OUTPUT" != *"$EXPECTED_HEAD"* ]]; then
             echo "ERROR: Expected migration head $EXPECTED_HEAD, got: $HEAD_OUTPUT"
             exit 1
           fi
-          HEAD_COUNT=$(echo "$HEAD_OUTPUT" | wc -l)
+          HEAD_COUNT=$(echo "$HEAD_OUTPUT" | grep -v '^[[:space:]]*$' | wc -l)
           if [ "$HEAD_COUNT" -ne 1 ]; then
             echo "ERROR: Multiple migration heads detected!"
             exit 1
@@ -53,6 +53,7 @@ jobs:
       - name: Run Core & Regression Pytest Suites
         run: |
           pytest backend/tests/test_api/test_phase0_migration_truthfulness.py \
+                 backend/tests/test_api/test_phase7_ad_quality_and_admin_ops.py \
                  backend/tests/test_api/test_phase11_conversion_measurement.py \
                  backend/tests/test_api/test_phase10f_monetization_consent.py \
                  backend/tests/test_api/test_phase10g_security_e2e.py \

@@ -101,3 +101,16 @@ def test_postgres_service_healthcheck_in_ci():
         "Postgres service in CI workflow must use explicit healthcheck: pg_isready -U liteads -d liteads"
     )
 
+
+def test_drift_prevention_dynamic_head_matches():
+    """Verify that dynamic head matches the actual terminal revision in the migration graph."""
+    ini_path = find_alembic_ini()
+    config = Config(str(ini_path))
+    script = ScriptDirectory.from_config(config)
+    head_from_script = script.get_current_head()
+    authoritative_head = get_authoritative_alembic_head()
+    assert authoritative_head == head_from_script, (
+        f"Dynamic head {authoritative_head} does not match script directory head {head_from_script}"
+    )
+
+
