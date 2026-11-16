@@ -301,15 +301,54 @@ class OptimizationLoopTask:
             logger.info("Campaign ineligible for optimization (<500 impressions)", campaign_id=campaign.id)
             return
 
+        settings = get_settings()
         try:
             decision = await laya_client.decide(context.state)
         except Exception as e:
             logger.warning("Laya decision failed", campaign_id=campaign.id, error=str(e))
+            try:
+                executor = OptimizationExecutor(session, mode=settings.optimization.mode)
+                dummy_policy = OptimizationPolicyResult(
+                    accepted=False,
+                    reason=f"Laya sidecar error: {e}",
+                    action=None,
+                    confidence=0.0,
+                    autopilot=bool(campaign.autopilot),
+                )
+                await executor._record_decision_audit(
+                    campaign=campaign,
+                    policy_result=dummy_policy,
+                    mode=settings.optimization.mode,
+                    outcome="failed",
+                    reason=f"Laya sidecar error: {e}",
+                    actor="system_optimizer",
+                    execution_status="FAILED",
+                    fencing_token=fencing_token,
+                    auto_commit=True,
+                )
+            except Exception as audit_err:
+                logger.warning("Failed to record Laya failure audit", error=str(audit_err))
             return
 
         policy_result = policy_service.evaluate(campaign, context, decision)
         if not policy_result.accepted:
             logger.info("Laya decision rejected by policy", campaign_id=campaign.id, reason=policy_result.reason)
+            try:
+                executor = OptimizationExecutor(session, mode=settings.optimization.mode)
+                await executor._record_decision_audit(
+                    campaign=campaign,
+                    policy_result=policy_result,
+                    mode=settings.optimization.mode,
+                    outcome="rejected",
+                    reason=policy_result.reason,
+                    target_payload=getattr(decision, "target_payload", None),
+                    actor="system_optimizer",
+                    execution_status="REJECTED",
+                    fencing_token=fencing_token,
+                    auto_commit=True,
+                )
+            except Exception as audit_err:
+                logger.warning("Failed to record policy rejection audit", error=str(audit_err))
             return
 
         # 2. FENCED MUTATION WITH CANONICAL ROW-LEVEL LOCKING (Advertiser -> Campaign)

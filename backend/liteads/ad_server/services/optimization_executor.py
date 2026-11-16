@@ -111,17 +111,12 @@ class OptimizationExecutor:
         settings = get_settings()
         effective_mode = mode or self.mode
         if effective_mode is None:
-            if policy_result.autopilot:
+            if settings.optimization.mode in ("shadow", "limited_pilot", "suggestions_only"):
+                effective_mode = settings.optimization.mode
+            elif policy_result.autopilot and getattr(campaign, "autopilot", False) and settings.optimization.mode == "autopilot":
                 effective_mode = "autopilot"
             else:
-                try:
-                    camp_autopilot = bool(getattr(campaign, "autopilot", False))
-                except Exception:
-                    camp_autopilot = False
-                if camp_autopilot:
-                    effective_mode = "autopilot"
-                else:
-                    effective_mode = settings.optimization.mode
+                effective_mode = settings.optimization.mode
 
         if not policy_result.accepted:
             await self._record_decision_audit(
@@ -215,7 +210,36 @@ class OptimizationExecutor:
         # 3. LIMITED PILOT MODE: Bounded autopilot for explicitly opted-in pilot campaigns
         if effective_mode == "limited_pilot":
             pilot_ids = settings.optimization.pilot_campaign_ids
-            is_pilot_campaign = (not pilot_ids) or (campaign.id in pilot_ids)
+            # CRITICAL FAIL-CLOSED RULE (Phase 6): An empty pilot allowlist means ZERO eligible pilot campaigns.
+            if not pilot_ids:
+                logger.warning(
+                    "Limited pilot mode active but pilot_campaign_ids is empty; failing closed to suggestions_only",
+                    campaign_id=campaign.id,
+                )
+                await self._execute_autopilot_off(
+                    campaign,
+                    action_payload,
+                    evidence=evidence,
+                    actor=actor,
+                    fencing_token=fencing_token,
+                    owner_token=owner_token,
+                    auto_commit=auto_commit,
+                )
+                await self._record_decision_audit(
+                    campaign=campaign,
+                    policy_result=policy_result,
+                    mode="limited_pilot",
+                    outcome="suggested",
+                    reason="Pilot allowlist is empty: zero campaigns eligible under limited_pilot (failed closed)",
+                    target_payload=target_payload,
+                    evidence=evidence,
+                    actor=actor,
+                    fencing_token=fencing_token,
+                    auto_commit=auto_commit,
+                )
+                return
+
+            is_pilot_campaign = campaign.id in pilot_ids
             if campaign.autopilot and is_pilot_campaign:
                 # Check pilot spend delta limit
                 if policy_result.proposed_budget_delta is not None:
@@ -589,6 +613,18 @@ class OptimizationExecutor:
                     owner_token=owner_token,
                     auto_commit=auto_commit,
                 )
+                await self._record_decision_audit(
+                    campaign=campaign,
+                    policy_result=policy_result,
+                    mode="autopilot" if self.mode == "autopilot" else "limited_pilot",
+                    outcome="suggested",
+                    reason="improve_creative requires human review (routed to suggestions)",
+                    target_payload=target_payload,
+                    actor=actor,
+                    campaign_id=campaign_id,
+                    fencing_token=fencing_token,
+                    auto_commit=auto_commit,
+                )
                 return
             elif action == "no_change":
                 return
@@ -846,3 +882,114 @@ class OptimizationExecutor:
                 await self.session.commit()
         except Exception as e:
             logger.warning("Failed to persist optimization decision audit record", error=str(e))
+
+    async def revert_decision(
+        self,
+        decision_id: str,
+        actor: str = "operator",
+        auto_commit: bool = True,
+    ) -> dict[str, Any]:
+        """
+        Revert an applied optimization decision atomically with full audit trail (Phase 6).
+        Restores previous budget or removes added targeting rule.
+        """
+        stmt = select(OptimizationDecision).where(OptimizationDecision.decision_id == decision_id)
+        res = await self.session.execute(stmt)
+        decision = res.scalar_one_or_none()
+        if decision is None:
+            raise OptimizationExecutionError(f"Optimization decision {decision_id} not found")
+
+        if decision.outcome != "applied":
+            raise OptimizationExecutionError(
+                f"Cannot revert decision {decision_id} with outcome '{decision.outcome}'; only 'applied' decisions can be reverted"
+            )
+
+        campaign = await self.session.get(Campaign, decision.campaign_id, with_for_update=True)
+        if campaign is None:
+            raise OptimizationExecutionError(f"Campaign {decision.campaign_id} not found for revert")
+
+        change = decision.change_applied or {}
+        revert_detail: dict[str, Any] = {}
+
+        if decision.action in ("increase_budget_20", "decrease_budget_20"):
+            if "budget_before" not in change:
+                raise OptimizationExecutionError("Missing budget_before in decision change record to revert")
+            old_budget = campaign.budget_daily
+            reverted_budget = Decimal(str(change["budget_before"]))
+            campaign.budget_daily = reverted_budget
+            revert_detail = {
+                "action": "revert_budget",
+                "budget_from": float(old_budget),
+                "budget_to": float(reverted_budget),
+            }
+        elif decision.action == "shift_to_new_geo":
+            added_geo = change.get("added_geo")
+            if not added_geo and decision.target_payload:
+                added_geo = decision.target_payload.get("geo")
+            if added_geo:
+                rule_stmt = select(TargetingRule).where(
+                    TargetingRule.campaign_id == campaign.id,
+                    TargetingRule.rule_type == "geo",
+                )
+                rule_res = await self.session.execute(rule_stmt)
+                for rule in rule_res.scalars().all():
+                    val = rule.rule_value
+                    if val == added_geo or (isinstance(val, dict) and val.get("geo") == added_geo) or str(val).strip('"\'') == str(added_geo).strip('"\'') or val in (added_geo, [added_geo]):
+                        await self.session.delete(rule)
+                        break
+                revert_detail = {"action": "revert_geo", "removed_geo": added_geo}
+        elif decision.action == "shift_to_new_sector":
+            added_sector = change.get("added_sector")
+            if not added_sector and decision.target_payload:
+                added_sector = decision.target_payload.get("sector")
+            if added_sector:
+                rule_stmt = select(TargetingRule).where(
+                    TargetingRule.campaign_id == campaign.id,
+                    TargetingRule.rule_type == "sector",
+                )
+                rule_res = await self.session.execute(rule_stmt)
+                for rule in rule_res.scalars().all():
+                    val = rule.rule_value
+                    if val == added_sector or (isinstance(val, dict) and val.get("sector") == added_sector) or str(val).strip('"\'') == str(added_sector).strip('"\'') or val in (added_sector, [added_sector]):
+                        await self.session.delete(rule)
+                        break
+                revert_detail = {"action": "revert_sector", "removed_sector": added_sector}
+        else:
+            raise OptimizationExecutionError(f"Action '{decision.action}' does not support automatic revert")
+
+        # Mark original decision as reverted
+        decision.outcome = "reverted"
+        decision.updated_at = utc_now()
+
+        # Log CampaignChangeLog
+        changelog = CampaignChangeLog(
+            campaign_id=campaign.id,
+            action={"action": f"revert_{decision.action}", "revert_of": decision_id, "detail": revert_detail},
+        )
+        self.session.add(changelog)
+
+        # Audit decision for revert
+        revert_audit = OptimizationDecision(
+            decision_id=str(uuid.uuid4()),
+            campaign_id=campaign.id,
+            mode=decision.mode,
+            action=f"revert_{decision.action}",
+            confidence=decision.confidence,
+            policy_version="v1.0",
+            outcome="reverted",
+            reason=f"Reverted decision {decision_id} by {actor}",
+            target_payload=decision.target_payload,
+            evidence=decision.evidence,
+            change_applied=revert_detail,
+            actor=actor,
+            execution_status="SUCCESS",
+            fencing_token=decision.fencing_token,
+        )
+        self.session.add(revert_audit)
+
+        if auto_commit:
+            await self.session.commit()
+        else:
+            await self.session.flush()
+
+        return revert_detail

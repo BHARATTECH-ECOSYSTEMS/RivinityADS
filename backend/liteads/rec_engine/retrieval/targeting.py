@@ -8,12 +8,13 @@ from typing import Any
 from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from liteads.common.cache import CacheKeys, redis_client
 from liteads.common.logger import get_logger
 from liteads.common.utils import json_dumps, json_loads
-from liteads.models import Campaign, Creative, Status, TargetingRule
+from liteads.models import AdSet, Campaign, Creative, Status, TargetingRule
 from liteads.models.base import ModerationStatus
 from liteads.rec_engine.retrieval.base import BaseRetrieval
 from liteads.schemas.internal import AdCandidate, UserContext
@@ -200,7 +201,16 @@ class TargetingRetrieval(BaseRetrieval):
         # Query from database
         stmt = (
             select(Campaign)
+            .options(
+                selectinload(Campaign.advertiser),
+                selectinload(Campaign.ad_sets).selectinload(AdSet.creatives),
+                selectinload(Campaign.ad_sets).selectinload(AdSet.targeting_rules),
+                selectinload(Campaign.creatives),
+                selectinload(Campaign.targeting_rules),
+                selectinload(Campaign.assignments),
+            )
             .where(Campaign.status == Status.ACTIVE)
+            .execution_options(populate_existing=True)
             .limit(1000)
         )
 

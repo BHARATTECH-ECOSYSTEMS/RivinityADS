@@ -80,6 +80,12 @@ import type {
   PublisherLinkInput,
   MonetizationConsentInput,
   UnpublishProjectResponse,
+  ReadinessIssue,
+  CampaignReadinessResponse,
+  OperationalExceptionsResponse,
+  AuditLogItem,
+  PublisherSafetySummary,
+  PublisherEarningsBreakdown,
 } from "../types";
 
 export const WebsiteMonetizationStatusCode = {
@@ -140,6 +146,8 @@ export type {
   PublisherLinkInput,
   MonetizationConsentInput,
   UnpublishProjectResponse,
+  ReadinessIssue,
+  CampaignReadinessResponse,
 };
 const BASE_URL = (import.meta.env?.VITE_API_BASE_URL as string | undefined) ?? "";
 let memoryToken: string | null = null;
@@ -275,6 +283,8 @@ export const getCampaign = (id: number) => apiFetch<Campaign>(`/api/v1/campaign/
 export const updateCampaign = (id: number, payload: Partial<Campaign>) => apiFetch<Campaign>(`/api/v1/campaign/${id}`, { method: "PATCH", body: JSON.stringify(payload) });
 export const setCampaignStatus = (id: number, status: number) => updateCampaign(id, { status });
 export const activateCampaign = (id: number) => apiFetch<Campaign>(`/api/v1/campaign/${id}/activate`, { method: "POST" });
+export const getCampaignReadiness = (campaignId: number): Promise<CampaignReadinessResponse> =>
+  apiFetch<CampaignReadinessResponse>(`/api/v1/campaign/${campaignId}/readiness`);
 export const listCreatives = (campaignId: number, adSetId?: number) => {
   const params = new URLSearchParams({ campaign_id: campaignId.toString() });
   if (adSetId !== undefined && adSetId !== null) params.append("ad_set_id", adSetId.toString());
@@ -484,7 +494,22 @@ export const getReferenceCities = (country: string, state: string) => apiFetch<s
 export const getReferencePincodes = (country: string, state: string, city: string) => apiFetch<string[]>(`/api/v1/reference/locations/pincodes?country=${country}&state=${state}&city=${city}`);
 
 // Finance APIs
-export interface TransactionResponse { id: number; type: number; amount: number; currency: string; advertiser_id?: number | null; publisher_id?: number | null; campaign_id?: number | null; reference_id?: string | null; description?: string | null; created_at: string; }
+export interface TransactionResponse {
+  id: number;
+  type: number;
+  amount: number;
+  currency: string;
+  advertiser_id?: number | null;
+  publisher_id?: number | null;
+  campaign_id?: number | null;
+  reference_id?: string | null;
+  provider_event_id?: string | null;
+  rev_share_rate?: number | null;
+  hold_until?: string | null;
+  is_cleared?: boolean;
+  description?: string | null;
+  created_at: string;
+}
 export interface LedgerResponse { balance: number; transactions: TransactionResponse[]; }
 export interface PaymentOrderResponse { order_id: string; amount: number; currency: string; qr_image_url: string | null; }
 export const getAdvertiserLedger = (advertiserId: number) => apiFetch<LedgerResponse>(`/api/v1/finance/advertiser/${advertiserId}/ledger`);
@@ -492,6 +517,75 @@ export const depositFunds = (advertiserId: number, amount: number, referenceId?:
 export const createAdvertiserPaymentRequest = (advertiserId: number, amount: number) => apiFetch<PaymentOrderResponse>(`/api/v1/finance/advertiser/${advertiserId}/payment-request`, { method: "POST", body: JSON.stringify({ amount }) });
 export const getPublisherLedger = (publisherId: number) => apiFetch<LedgerResponse>(`/api/v1/finance/publisher/${publisherId}/ledger`);
 export const requestPayout = (publisherId: number, amount: number, referenceId?: string) => apiFetch<TransactionResponse>(`/api/v1/finance/publisher/${publisherId}/payout`, { method: "POST", body: JSON.stringify({ amount, reference_id: referenceId }) });
+
+export interface UnresolvedDiscrepancy {
+  queue_id: string;
+  status: string;
+  entity_type: string;
+  entity_id: number | null;
+  name: string;
+  metric: string;
+  expected_value: number;
+  actual_value: number;
+  delta: number;
+  severity: "WARNING" | "CRITICAL";
+  reference_id?: string | null;
+  provider_event_id?: string | null;
+  reason: string;
+  detected_at: string;
+}
+
+export interface ReconciliationReport {
+  status: string;
+  start_date: string;
+  end_date: string;
+  total_event_spend: number;
+  total_ledger_spend: number;
+  spend_delta: number;
+  total_ivt_events: number;
+  ivt_suppressed_spend: number;
+  discrepancies: Array<{
+    entity_type: string;
+    entity_id: number | null;
+    name: string;
+    metric: string;
+    expected_value: number;
+    actual_value: number;
+    delta: number;
+    severity: string;
+    details: string;
+  }>;
+  unresolved_queue: UnresolvedDiscrepancy[];
+  alerts: string[];
+}
+
+export const runReconciliation = (params?: { start_date?: string; end_date?: string; advertiser_id?: number; publisher_id?: number }) =>
+  apiFetch<ReconciliationReport>("/api/v1/finance/reconcile", { method: "POST", body: JSON.stringify(params || {}) });
+
+export const getAuditLedger = (params?: {
+  start_date?: string;
+  end_date?: string;
+  reference?: string;
+  provider_event_id?: string;
+  advertiser_id?: number;
+  publisher_id?: number;
+  campaign_id?: number;
+  type?: number;
+  is_cleared?: boolean;
+}) => {
+  const query = new URLSearchParams();
+  if (params?.start_date) query.set("start_date", params.start_date);
+  if (params?.end_date) query.set("end_date", params.end_date);
+  if (params?.reference) query.set("reference", params.reference);
+  if (params?.provider_event_id) query.set("provider_event_id", params.provider_event_id);
+  if (params?.advertiser_id) query.set("advertiser_id", String(params.advertiser_id));
+  if (params?.publisher_id) query.set("publisher_id", String(params.publisher_id));
+  if (params?.campaign_id) query.set("campaign_id", String(params.campaign_id));
+  if (params?.type) query.set("type", String(params.type));
+  if (params?.is_cleared !== undefined) query.set("is_cleared", String(params.is_cleared));
+  const qs = query.toString();
+  return apiFetch<TransactionResponse[]>(`/api/v1/finance/ledger/audit${qs ? `?${qs}` : ""}`);
+};
 // API Keys
 export interface ApiKey { id: number; publisher_id: number; name: string; key_prefix: string; is_sandbox: boolean; rate_limit_per_minute: number; daily_quota: number; last_used_at: string | null; status: number; created_at: string; revoked_at: string | null; }
 export interface ApiKeyCreateInput { name: string; is_sandbox?: boolean; rate_limit_per_minute?: number; daily_quota?: number; }
@@ -592,6 +686,91 @@ export const retryWebhookDelivery = (webhookId: number, deliveryId: number) =>
 // Suggestions
 export const getCampaignSuggestions = (campaignId: number) => apiFetch<Suggestion[]>(`/api/v1/campaign/${campaignId}/suggestions`);
 export const updateSuggestionStatus = (suggestionId: number, status: string) => apiFetch<Suggestion>(`/api/v1/suggestion/${suggestionId}`, { method: "PATCH", body: JSON.stringify({ status }) });
+
+// Phase 6: Optimization & Laya Operator Governance
+export interface OptimizationStatus {
+  global_mode: "shadow" | "suggestions_only" | "limited_pilot" | "autopilot" | string;
+  kill_switch: boolean;
+  enabled: boolean;
+  pilot_campaign_ids: number[];
+  pilot_count: number;
+  cooldown_seconds: number;
+  max_daily_changes: number;
+  pilot_max_budget_delta_amount: number;
+  laya_base_url: string;
+  laya_enabled: boolean;
+  loop_is_running: boolean;
+}
+
+export interface OptimizationDecisionRecord {
+  id: number;
+  decision_id: string;
+  campaign_id: number;
+  mode: string;
+  action: string | null;
+  confidence: number | null;
+  policy_version: string;
+  outcome: "applied" | "suggested" | "shadow_logged" | "rejected" | "failed" | "reverted" | string;
+  reason: string | null;
+  target_payload: Record<string, any> | null;
+  evidence: Record<string, any> | null;
+  change_applied: Record<string, any> | null;
+  actor: string;
+  execution_status: string | null;
+  fencing_token: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CampaignOptimizationState {
+  campaign_id: number;
+  campaign_name: string;
+  autopilot: boolean;
+  is_pilot_eligible: boolean;
+  effective_mode: string;
+  in_cooldown: boolean;
+  daily_changes_count: number;
+  max_daily_changes: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  spent_today: number;
+  spent_total: number;
+  daily_budget: number;
+  last_decision: OptimizationDecisionRecord | null;
+  can_revert: boolean;
+}
+
+export interface DecisionRevertResult {
+  decision_id: string;
+  campaign_id: number;
+  status: string;
+  detail: Record<string, any>;
+}
+
+export const getOptimizationStatus = (): Promise<OptimizationStatus> =>
+  apiFetch<OptimizationStatus>("/api/v1/optimization/status");
+
+export const listOptimizationDecisions = (params?: {
+  campaignId?: number;
+  outcome?: string;
+  mode?: string;
+  limit?: number;
+}): Promise<OptimizationDecisionRecord[]> => {
+  const q = new URLSearchParams();
+  if (params?.campaignId) q.set("campaign_id", String(params.campaignId));
+  if (params?.outcome) q.set("outcome", params.outcome);
+  if (params?.mode) q.set("mode", params.mode);
+  if (params?.limit) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return apiFetch<OptimizationDecisionRecord[]>(`/api/v1/optimization/decisions${qs ? `?${qs}` : ""}`);
+};
+
+export const revertOptimizationDecision = (decisionId: string): Promise<DecisionRevertResult> =>
+  apiFetch<DecisionRevertResult>(`/api/v1/optimization/decisions/${decisionId}/revert`, { method: "POST" });
+
+export const getCampaignOptimizationState = (campaignId: number): Promise<CampaignOptimizationState> =>
+  apiFetch<CampaignOptimizationState>(`/api/v1/campaign/${campaignId}/optimization-state`);
 
 // Chat API
 export const createChatSession = () => apiFetch<ChatSessionResponse>("/api/v1/chat/session", { method: "POST" });
@@ -1012,7 +1191,7 @@ export const launchMarketingCampaign = (campaignId: number, confirmed: boolean):
 export const getCampaignAnalytics = (campaignId: number): Promise<CampaignAnalytics> =>
   apiFetch<CampaignAnalytics>(`/api/v1/email-marketing/campaigns/${campaignId}/analytics`);
 
-// Channel Connectors API (Phase 5)
+// Channel Connectors API (Phase 5 & Phase 2)
 export interface ChannelCapabilities {
   provider: string;
   connector_type: "advertiser_management" | "publisher_delivery";
@@ -1020,6 +1199,9 @@ export interface ChannelCapabilities {
   supports_account_discovery: boolean;
   supports_campaign_management: boolean;
   supports_reporting_sync: boolean;
+  adapter_mode?: "LIVE" | "SIMULATED" | "EXPERIMENTAL";
+  is_experimental?: boolean;
+  is_simulated?: boolean;
   supported_objectives: string[];
   supported_bidding_strategies: string[];
   supported_targeting: string[];
@@ -1045,7 +1227,11 @@ export interface ChannelConnection {
   external_organization_id?: string | null;
   credentials_prefix: string;
   status: string;
+  adapter_mode?: string;
+  token_state?: string | null;
+  last_verified_at?: string | null;
   last_sync_at?: string | null;
+  sync_cursor?: string | null;
   last_error?: string | null;
   capabilities?: ChannelCapabilities | null;
   created_at: string;
@@ -1069,6 +1255,11 @@ export interface ExternalCampaign {
   total_spend?: number | null;
   currency: string;
   local_campaign_id?: number | null;
+  remote_object_status?: string | null;
+  moderation_status?: string | null;
+  provider_request_id?: string | null;
+  remote_resource_name?: string | null;
+  sync_status?: string;
 }
 
 export interface CampaignCreateParams {
@@ -1101,6 +1292,9 @@ export interface ExternalReportRow {
   conversions: number;
   spend: number;
   currency: string;
+  is_synced?: boolean;
+  provider_reported_at?: string | null;
+  is_simulated?: boolean;
 }
 
 export const getChannelCapabilities = (provider: string): Promise<ChannelCapabilities> =>
@@ -1232,4 +1426,36 @@ export const updateWebmasterTools = (
     method: "PUT",
     body: JSON.stringify(config),
   });
+
+// ── Phase 7 Operations, Exceptions, Safety & Audit ────────────────────────────
+
+export const getOperationalExceptions = (): Promise<OperationalExceptionsResponse> =>
+  apiFetch<OperationalExceptionsResponse>("/api/v1/admin/dashboard/operational-exceptions");
+
+export const getAdminAuditLogs = (params?: {
+  action?: string;
+  user_id?: number;
+  limit?: number;
+  offset?: number;
+}): Promise<AuditLogItem[]> => {
+  const query = new URLSearchParams();
+  if (params?.action) query.set("action", params.action);
+  if (params?.user_id) query.set("user_id", String(params.user_id));
+  if (params?.limit) query.set("limit", String(params.limit));
+  if (params?.offset) query.set("offset", String(params.offset));
+  const qs = query.toString();
+  return apiFetch<AuditLogItem[]>(`/api/v1/admin/audit-logs${qs ? `?${qs}` : ""}`);
+};
+
+export const getPublisherSafetySummary = (publisherId: number): Promise<PublisherSafetySummary> =>
+  apiFetch<PublisherSafetySummary>(`/api/v1/publisher/${publisherId}/safety-summary`);
+
+export const getPublisherEarningsBreakdown = (publisherId: number): Promise<PublisherEarningsBreakdown> =>
+  apiFetch<PublisherEarningsBreakdown>(`/api/v1/publisher/${publisherId}/earnings-breakdown`);
+
+export const resubmitCreative = (creativeId: number): Promise<Creative> =>
+  apiFetch<Creative>(`/api/v1/moderation/creatives/${creativeId}/resubmit`, {
+    method: "POST",
+  });
+
 

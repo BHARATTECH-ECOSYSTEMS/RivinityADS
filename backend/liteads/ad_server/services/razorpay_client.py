@@ -3,6 +3,8 @@ Razorpay payment client abstraction.
 """
 
 from decimal import Decimal
+import hashlib
+import hmac
 from typing import Any
 
 import razorpay
@@ -114,7 +116,7 @@ class RazorpayClient:
             raise RazorpayClientError("Could not create QR code payment request") from e
 
     def verify_webhook_signature(self, body: bytes, signature: str) -> bool:
-        """Verify the Razorpay webhook signature."""
+        """Verify the Razorpay webhook signature against raw request bytes."""
         settings = get_settings()
         secret = settings.payment.webhook_secret
         if not secret:
@@ -122,12 +124,14 @@ class RazorpayClient:
             return False
             
         try:
-            self._client.utility.verify_webhook_signature(
-                body.decode("utf-8"),
-                signature,
-                secret
-            )
-            return True
+            if isinstance(body, str):
+                body_bytes = body.encode("utf-8")
+            else:
+                body_bytes = body
+
+            key_bytes = secret.encode("utf-8")
+            dig = hmac.new(key=key_bytes, msg=body_bytes, digestmod=hashlib.sha256).hexdigest()
+            return hmac.compare_digest(dig, signature)
         except Exception as e:
             logger.error(f"Razorpay webhook signature verification failed: {e}")
             return False

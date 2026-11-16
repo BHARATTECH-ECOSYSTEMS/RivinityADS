@@ -106,7 +106,7 @@ class Campaign(Base, TimestampMixin):
 
     # Relationships
     advertiser: Mapped["Advertiser"] = relationship(
-        "Advertiser", back_populates="campaigns"
+        "Advertiser", back_populates="campaigns", lazy="selectin"
     )
     creatives: Mapped[list["Creative"]] = relationship(
         "Creative", back_populates="campaign", lazy="selectin"

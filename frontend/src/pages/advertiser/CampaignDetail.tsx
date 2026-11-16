@@ -14,8 +14,11 @@ import {
   getCampaignSuggestions,
   updateSuggestionStatus,
   listAdvertiserDomains,
+  getCampaignOptimizationState,
+  revertOptimizationDecision,
   type AdvertiserReporting,
   type AdvertiserDomain,
+  type CampaignOptimizationState,
 } from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import {
@@ -74,6 +77,11 @@ export default function CampaignDetail() {
   const [activationLoading, setActivationLoading] = useState(false);
   const [updatingAutopilot, setUpdatingAutopilot] = useState(false);
 
+  // Optimization state & revert
+  const [optState, setOptState] = useState<CampaignOptimizationState | null>(null);
+  const [revertingOpt, setRevertingOpt] = useState(false);
+  const [optRevertMessage, setOptRevertMessage] = useState<{ type: "success" | "danger"; message: string } | null>(null);
+
   // Selected Ad Set for inspection and creative creation
   const [selectedAdSetId, setSelectedAdSetId] = useState<number | null>(null);
 
@@ -110,7 +118,7 @@ export default function CampaignDetail() {
   const reload = async () => {
     if (!campaignId) return;
     try {
-      const [nextCampaign, nextAdSets, nextCreatives, nextReporting, nextSuggestions, nextDomains] =
+      const [nextCampaign, nextAdSets, nextCreatives, nextReporting, nextSuggestions, nextDomains, nextOptState] =
         await Promise.all([
           getCampaign(campaignId),
           listAdSets(campaignId).catch(() => []),
@@ -123,6 +131,7 @@ export default function CampaignDetail() {
             return [];
           }),
           listAdvertiserDomains().catch(() => []),
+          getCampaignOptimizationState(campaignId).catch(() => null),
         ]);
 
       setCampaign(nextCampaign);
@@ -131,6 +140,7 @@ export default function CampaignDetail() {
       if (nextReporting) setReporting(nextReporting);
       setSuggestions(nextSuggestions);
       setDomains(nextDomains);
+      setOptState(nextOptState);
 
       if (nextAdSets.length > 0 && !selectedAdSetId) {
         setSelectedAdSetId(nextAdSets[0].id);
@@ -151,10 +161,31 @@ export default function CampaignDetail() {
       const nextState = !campaign.autopilot;
       const updated = await updateCampaign(campaign.id, { autopilot: nextState });
       setCampaign(updated);
+      void reload();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Could not update autopilot");
     } finally {
       setUpdatingAutopilot(false);
+    }
+  };
+
+  const handleRevertOptimization = async (decisionId: string) => {
+    setRevertingOpt(true);
+    setOptRevertMessage(null);
+    try {
+      await revertOptimizationDecision(decisionId);
+      setOptRevertMessage({
+        type: "success",
+        message: `Optimization decision #${decisionId.slice(0, 8)} successfully reverted.`,
+      });
+      await reload();
+    } catch (err: any) {
+      setOptRevertMessage({
+        type: "danger",
+        message: err.message || "Failed to revert optimization decision",
+      });
+    } finally {
+      setRevertingOpt(false);
     }
   };
 
@@ -680,6 +711,17 @@ export default function CampaignDetail() {
         )}
       </Card>
 
+      {optRevertMessage && (
+        <Alert
+          variant={optRevertMessage.type}
+          title={optRevertMessage.type === "success" ? "Decision Reverted" : "Revert Failed"}
+          onClose={() => setOptRevertMessage(null)}
+          style={{ marginBottom: "var(--space-4)" }}
+        >
+          {optRevertMessage.message}
+        </Alert>
+      )}
+
       {/* AI Autopilot Card */}
       <Card style={{ marginBottom: "var(--space-6)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -700,6 +742,116 @@ export default function CampaignDetail() {
             {campaign.autopilot ? "Autopilot: ACTIVE" : "Autopilot: OFF"}
           </Button>
         </div>
+
+        {/* Operating Mode and Gating Info */}
+        {optState && (
+          <div style={{ marginTop: "var(--space-4)", paddingTop: "var(--space-4)", borderTop: "1px solid var(--color-border)" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "var(--space-3)", marginBottom: "var(--space-3)" }}>
+              <div style={{ padding: "var(--space-2) var(--space-3)", background: "var(--color-bg-subtle)", borderRadius: "var(--radius-sm)" }}>
+                <span className="text-muted" style={{ fontSize: "11px", textTransform: "uppercase" }}>System Mode</span>
+                <div style={{ fontWeight: 600, fontSize: "var(--font-size-sm)", marginTop: "2px" }}>
+                  {optState.effective_mode.toUpperCase()}
+                </div>
+              </div>
+
+              <div style={{ padding: "var(--space-2) var(--space-3)", background: "var(--color-bg-subtle)", borderRadius: "var(--radius-sm)" }}>
+                <span className="text-muted" style={{ fontSize: "11px", textTransform: "uppercase" }}>Pilot Eligibility</span>
+                <div style={{ fontWeight: 600, fontSize: "var(--font-size-sm)", marginTop: "2px" }}>
+                  {optState.is_pilot_eligible ? (
+                    <span style={{ color: "var(--color-success)" }}>Enrolled in Pilot</span>
+                  ) : (
+                    <span style={{ color: "var(--color-text-muted)" }}>Suggestions Only</span>
+                  )}
+                </div>
+              </div>
+
+              <div style={{ padding: "var(--space-2) var(--space-3)", background: "var(--color-bg-subtle)", borderRadius: "var(--radius-sm)" }}>
+                <span className="text-muted" style={{ fontSize: "11px", textTransform: "uppercase" }}>Changes Today</span>
+                <div style={{ fontWeight: 600, fontSize: "var(--font-size-sm)", marginTop: "2px" }}>
+                  {optState.daily_changes_count} / {optState.max_daily_changes} max
+                </div>
+              </div>
+
+              <div style={{ padding: "var(--space-2) var(--space-3)", background: "var(--color-bg-subtle)", borderRadius: "var(--radius-sm)" }}>
+                <span className="text-muted" style={{ fontSize: "11px", textTransform: "uppercase" }}>Evidence Gate</span>
+                <div style={{ fontWeight: 600, fontSize: "var(--font-size-sm)", marginTop: "2px" }}>
+                  {optState.impressions >= 500 ? (
+                    <span style={{ color: "var(--color-success)" }}>Sufficient ({optState.impressions} imps)</span>
+                  ) : (
+                    <span style={{ color: "var(--color-warning)" }}>Low ({optState.impressions} / 500 imps)</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {optState.impressions < 500 && (
+              <div style={{ fontSize: "var(--font-size-xs)", color: "var(--color-text-muted)", marginBottom: "var(--space-3)" }}>
+                ℹ️ <strong>Evidence Gate:</strong> Campaign requires at least 500 impressions before automated adjustments or suggestions can be generated.
+              </div>
+            )}
+
+            {/* Latest Autonomous Decision Banner */}
+            {optState.last_decision && (
+              <div
+                style={{
+                  border: "1px solid var(--color-border)",
+                  borderRadius: "var(--radius-md)",
+                  padding: "var(--space-3)",
+                  background: "var(--color-bg)",
+                  marginTop: "var(--space-3)",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "var(--space-2)" }}>
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", marginBottom: "4px" }}>
+                      <span style={{ fontSize: "11px", fontWeight: 700, textTransform: "uppercase", color: "var(--color-text-muted)" }}>
+                        Latest Optimizer Decision:
+                      </span>
+                      <StatusBadge
+                        status={
+                          optState.last_decision.outcome === "applied"
+                            ? "active"
+                            : optState.last_decision.outcome === "suggested"
+                            ? "pending"
+                            : optState.last_decision.outcome === "reverted"
+                            ? "paused"
+                            : optState.last_decision.outcome === "rejected"
+                            ? "warning"
+                            : "error"
+                        }
+                        label={optState.last_decision.outcome.toUpperCase()}
+                        size="sm"
+                      />
+                    </div>
+                    <div style={{ fontSize: "var(--font-size-sm)", fontWeight: 600 }}>
+                      Action: <code>{optState.last_decision.action || "no_action"}</code>
+                      {optState.last_decision.confidence != null && (
+                        <span style={{ marginLeft: "var(--space-2)", color: "var(--color-text-muted)" }}>
+                          ({Math.round(optState.last_decision.confidence * 100)}% confidence)
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: "var(--font-size-xs)", color: "var(--color-text-muted)", marginTop: "4px" }}>
+                      {optState.last_decision.reason || "Autonomous policy evaluation."}
+                    </div>
+                  </div>
+
+                  {optState.last_decision.outcome === "applied" && optState.can_revert && (
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      onClick={() => handleRevertOptimization(optState.last_decision!.decision_id)}
+                      disabled={revertingOpt}
+                      isLoading={revertingOpt}
+                    >
+                      Revert Applied Action
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </Card>
 
       {/* AI Suggestions Card */}

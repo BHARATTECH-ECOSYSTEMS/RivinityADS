@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, Numeric, String, Text, func, text, JSON
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, Numeric, String, Text, func, text, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from liteads.models.base import Base, TimestampMixin, TransactionType
@@ -35,6 +35,12 @@ class Transaction(Base):
     
     # E.g. Stripe charge ID, payout reference, or internal tracking string
     reference_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True, unique=True)
+    provider_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    rev_share_rate: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)
+    hold_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    is_cleared: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
+    )
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -117,6 +123,8 @@ class PlatformSettings(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     # The percentage of spend that goes to the publisher (e.g. 0.70)
     publisher_rev_share: Mapped[Decimal] = mapped_column(Numeric(4, 3), default=Decimal("0.700"), nullable=False)
+    # Configurable hold window for publisher earnings settlement in hours (default: 0 = immediate)
+    earnings_hold_hours: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=func.now(), onupdate=func.now(), nullable=False
     )

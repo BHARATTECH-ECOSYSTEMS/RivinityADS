@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from liteads.models.ad import AdEvent, Advertiser, Campaign
 from liteads.models.base import EventType, TransactionType
-from liteads.models.finance import Transaction, PublisherPayout
+from liteads.models.finance import Transaction, PublisherPayout, PaymentRequest
 from liteads.models.publisher import Publisher, PublisherDailyStat
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ DISCREPANCY_THRESHOLD = Decimal("0.01")  # ₹0.01 tolerance for minor rounding
 
 @dataclass
 class DiscrepancyItem:
-    entity_type: str  # "advertiser", "publisher", "campaign", "global"
+    entity_type: str  # "advertiser", "publisher", "campaign", "provider", "global"
     entity_id: int | None
     name: str
     metric: str
@@ -39,6 +39,8 @@ class DiscrepancyItem:
     delta: Decimal
     severity: str  # "WARNING", "CRITICAL"
     details: str
+    reference_id: str | None = None
+    provider_event_id: str | None = None
 
 
 @dataclass
@@ -52,6 +54,7 @@ class ReconciliationReport:
     total_ivt_events: int
     ivt_suppressed_spend: Decimal
     discrepancies: list[dict[str, Any]] = field(default_factory=list)
+    unresolved_queue: list[dict[str, Any]] = field(default_factory=list)
     alerts: list[str] = field(default_factory=list)
 
 
@@ -206,7 +209,66 @@ class ReconciliationService:
                     )
                 )
 
-        # 4. IVT Metrics Summary
+        # 4. Payment Provider vs Ledger Audit
+        # Check paid PaymentRequests have matching DEPOSIT transactions
+        paid_pr_query = select(PaymentRequest).where(
+            PaymentRequest.created_at >= start_dt,
+            PaymentRequest.created_at <= end_dt,
+            PaymentRequest.status == "paid",
+        )
+        if advertiser_id:
+            paid_pr_query = paid_pr_query.where(PaymentRequest.advertiser_id == advertiser_id)
+        paid_prs = (await self.session.execute(paid_pr_query)).scalars().all()
+
+        for pr in paid_prs:
+            tx_match_query = select(Transaction).where(
+                Transaction.reference_id == pr.provider_order_id,
+                Transaction.type == TransactionType.DEPOSIT,
+            )
+            matching_tx = (await self.session.execute(tx_match_query)).scalar_one_or_none()
+            if not matching_tx:
+                discrepancy_list.append(
+                    DiscrepancyItem(
+                        entity_type="provider",
+                        entity_id=pr.advertiser_id,
+                        name=f"Razorpay Order {pr.provider_order_id}",
+                        metric="provider_deposit_missing",
+                        expected_value=pr.amount,
+                        actual_value=Decimal("0.00"),
+                        delta=pr.amount,
+                        severity="CRITICAL",
+                        reference_id=pr.provider_order_id,
+                        provider_event_id=pr.provider_order_id,
+                        details=(
+                            f"Payment order {pr.provider_order_id} marked 'paid' in database "
+                            f"lacks a matching DEPOSIT transaction in the ledger."
+                        ),
+                    )
+                )
+                alerts.append(f"Missing ledger deposit for paid order {pr.provider_order_id}")
+            elif abs(matching_tx.amount - pr.amount) > DISCREPANCY_THRESHOLD:
+                delta = abs(matching_tx.amount - pr.amount)
+                discrepancy_list.append(
+                    DiscrepancyItem(
+                        entity_type="provider",
+                        entity_id=pr.advertiser_id,
+                        name=f"Razorpay Order {pr.provider_order_id}",
+                        metric="provider_deposit_amount_mismatch",
+                        expected_value=pr.amount,
+                        actual_value=matching_tx.amount,
+                        delta=delta,
+                        severity="CRITICAL",
+                        reference_id=pr.provider_order_id,
+                        provider_event_id=pr.provider_order_id,
+                        details=(
+                            f"Payment order {pr.provider_order_id} amount ₹{pr.amount} does not match "
+                            f"ledger transaction amount ₹{matching_tx.amount} (Δ ₹{delta})."
+                        ),
+                    )
+                )
+                alerts.append(f"Deposit amount mismatch for order {pr.provider_order_id}: Δ ₹{delta}")
+
+        # 5. IVT Metrics Summary
         ivt_count_query = select(
             func.count()
         ).where(
@@ -216,8 +278,46 @@ class ReconciliationService:
         )
         total_ivt_events = int((await self.session.execute(ivt_count_query)).scalar() or 0)
 
-        # Calculate would-be cost of IVT (if it hadn't been zeroed) or count
+        # 6. Unresolved Discrepancies Queue (strictly never silently auto-balanced)
         status = "BALANCED" if len(discrepancy_list) == 0 else "DISCREPANCY_DETECTED"
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        formatted_discrepancies = [
+            {
+                "entity_type": d.entity_type,
+                "entity_id": d.entity_id,
+                "name": d.name,
+                "metric": d.metric,
+                "expected_value": float(d.expected_value),
+                "actual_value": float(d.actual_value),
+                "delta": float(d.delta),
+                "severity": d.severity,
+                "reference_id": d.reference_id,
+                "provider_event_id": d.provider_event_id,
+                "details": d.details,
+            }
+            for d in discrepancy_list
+        ]
+
+        unresolved_queue = [
+            {
+                "queue_id": f"unres_{i+1}",
+                "status": "UNRESOLVED",
+                "entity_type": d.entity_type,
+                "entity_id": d.entity_id,
+                "name": d.name,
+                "metric": d.metric,
+                "expected_value": float(d.expected_value),
+                "actual_value": float(d.actual_value),
+                "delta": float(d.delta),
+                "severity": d.severity,
+                "reference_id": d.reference_id,
+                "provider_event_id": d.provider_event_id,
+                "reason": d.details,
+                "detected_at": now_iso,
+            }
+            for i, d in enumerate(discrepancy_list)
+        ]
 
         return ReconciliationReport(
             status=status,
@@ -228,20 +328,8 @@ class ReconciliationService:
             spend_delta=spend_delta,
             total_ivt_events=total_ivt_events,
             ivt_suppressed_spend=Decimal("0.00"),
-            discrepancies=[
-                {
-                    "entity_type": d.entity_type,
-                    "entity_id": d.entity_id,
-                    "name": d.name,
-                    "metric": d.metric,
-                    "expected_value": float(d.expected_value),
-                    "actual_value": float(d.actual_value),
-                    "delta": float(d.delta),
-                    "severity": d.severity,
-                    "details": d.details,
-                }
-                for d in discrepancy_list
-            ],
+            discrepancies=formatted_discrepancies,
+            unresolved_queue=unresolved_queue,
             alerts=alerts,
         )
 

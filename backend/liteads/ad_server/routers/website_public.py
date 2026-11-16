@@ -573,7 +573,7 @@ async def submit_contact_form(
     }
 
 
-# ── Public Visitor Consent Endpoint (Phase 10F) ───────────────────────────
+# ── Public Visitor Consent Endpoint (Phase 10F & Phase 1) ─────────────────
 
 @router.post(
     "/api/v1/website/public/{site_slug}/consent",
@@ -587,7 +587,16 @@ async def record_visitor_consent(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> VisitorConsentResponse:
-    """Record visitor consent choices with privacy hashing (no raw PII persisted)."""
+    """Record visitor consent choices with privacy hashing and signed proof (Phase 1).
+    
+    Guarantees:
+    - Default to Denied: Omitted/missing categories strictly evaluate to False.
+    - Idempotency: Duplicate submissions with identical state reuse existing record.
+    - Privacy: Client IP and User-Agent are hashed with SHA-256 (no raw PII persisted).
+    - Tamper-Evident Proof: Returns site-scoped HMAC-signed consent token.
+    """
+    from liteads.common.tracking_sig import sign_consent_token
+
     project, _, _ = await _resolve_published_site_and_snapshot(site_slug, session)
 
     client_ip = resolve_client_ip(request)
@@ -595,27 +604,65 @@ async def record_visitor_consent(
     ip_hash = hashlib.sha256(client_ip.encode("utf-8")).hexdigest() if client_ip else None
     ua_hash = hashlib.sha256(ua.encode("utf-8")).hexdigest() if ua else None
 
-    is_advertising_granted = payload.categories.get("advertising", True)
+    # Default to Denied: All non-essential categories (advertising, analytics) default to False
+    raw_categories = payload.categories or {}
+    is_advertising_granted = bool(raw_categories.get("advertising", False))
+    is_analytics_granted = bool(raw_categories.get("analytics", False))
+    clean_categories = {
+        "necessary": True,
+        "advertising": is_advertising_granted,
+        "analytics": is_analytics_granted,
+    }
 
-    log = WebsiteConsentLog(
-        project_id=project.id,
-        consent_type="visitor_consent",
-        consent_scope=payload.categories,
-        version=payload.version,
-        is_granted=is_advertising_granted,
-        client_ip_hash=ip_hash,
-        user_agent_hash=ua_hash,
-        recorded_at=datetime.now(timezone.utc),
+    # Idempotent write: reuse recent identical record if scope and hashes match
+    existing_stmt = (
+        select(WebsiteConsentLog)
+        .where(
+            WebsiteConsentLog.project_id == project.id,
+            WebsiteConsentLog.consent_type == "visitor_consent",
+            WebsiteConsentLog.client_ip_hash == ip_hash,
+            WebsiteConsentLog.user_agent_hash == ua_hash,
+            WebsiteConsentLog.version == payload.version,
+            WebsiteConsentLog.is_granted == is_advertising_granted,
+        )
+        .order_by(WebsiteConsentLog.recorded_at.desc())
+        .limit(1)
     )
-    session.add(log)
-    await session.commit()
-    await session.refresh(log)
+    existing_log = (await session.execute(existing_stmt)).scalar_one_or_none()
+    if existing_log and existing_log.consent_scope == clean_categories:
+        log = existing_log
+    else:
+        log = WebsiteConsentLog(
+            project_id=project.id,
+            consent_type="visitor_consent",
+            consent_scope=clean_categories,
+            version=payload.version,
+            is_granted=is_advertising_granted,
+            client_ip_hash=ip_hash,
+            user_agent_hash=ua_hash,
+            recorded_at=datetime.now(timezone.utc),
+        )
+        session.add(log)
+        await session.commit()
+        await session.refresh(log)
+
+    expires_at = int(time.time()) + 604800  # 7 days
+    consent_token = sign_consent_token(
+        site_slug=project.slug,
+        project_id=project.id,
+        is_granted=is_advertising_granted,
+        version=payload.version,
+        ttl_seconds=604800,
+    )
 
     return VisitorConsentResponse(
         success=True,
-        message="Visitor consent recorded successfully",
+        message="Visitor consent recorded successfully" if is_advertising_granted else "Visitor consent declined",
         consent_id=log.id,
-        categories=payload.categories,
+        categories=clean_categories,
+        is_granted=is_advertising_granted,
+        consent_token=consent_token,
+        expires_at=expires_at,
     )
 
 

@@ -166,17 +166,27 @@ def main():
     # ── Gate 2: Alembic Migration Chain & Single Head ────────────────────────
     print("\n[Gate 2/6] Checking Alembic Migration Chain & Single Head...")
     alembic_ini = os.path.join(repo_root, "backend", "alembic.ini")
+    head_code, expected_head, _ = run_command(
+        [py_exec, "-m", "liteads.common.alembic_utils"],
+        repo_root,
+        env_vars={"PYTHONPATH": os.path.join(repo_root, "backend")},
+    )
+    expected_head_lines = [l.strip() for l in expected_head.strip().splitlines() if l.strip() and not l.strip().startswith("setup plugin")]
+    expected_head = expected_head_lines[-1] if expected_head_lines else ""
     code, out, dur2 = run_command([alembic_exec, "-c", alembic_ini, "heads"], repo_root)
-    if code == 0 and "r0a1b2c3d4e5" in out and len(out.strip().splitlines()) == 1:
-        print(f"  PASS: Single migration head confirmed ({out.strip()}) in {dur2:.2f}s")
+    out_heads = [l.strip() for l in out.strip().splitlines() if l.strip() and not l.strip().startswith("setup plugin")]
+    if code == 0 and head_code == 0 and expected_head and any(expected_head in line for line in out_heads) and len(out_heads) == 1:
+        print(f"  PASS: Single migration head confirmed ({expected_head}) in {dur2:.2f}s")
         results.append(GateResult("Alembic Single Head", f"{alembic_exec} -c backend/alembic.ini heads", "PASS", dur2, out, ""))
     else:
-        print(f"  FAIL: Multiple heads or unexpected migration state: {out}")
-        results.append(GateResult("Alembic Single Head", f"{alembic_exec} -c backend/alembic.ini heads", "FAIL", dur2, out, "Unexpected migration head"))
+        print(f"  FAIL: Multiple heads or unexpected migration state (expected {expected_head}): {out}")
+        results.append(GateResult("Alembic Single Head", f"{alembic_exec} -c backend/alembic.ini heads", "FAIL", dur2, out, f"Expected {expected_head}, got {out}"))
 
     # ── Gate 3: Backend Core & Regression Pytest Suite ───────────────────────
     print("\n[Gate 3/6] Running Backend Core & Security/Financial Regression Suites...")
     backend_test_targets = [
+        "backend/tests/test_api/test_phase0_migration_truthfulness.py",
+        "backend/tests/test_api/test_phase7_ad_quality_and_admin_ops.py",
         "backend/tests/test_api/test_phase11_conversion_measurement.py",
         "backend/tests/test_api/test_phase10f_monetization_consent.py",
         "backend/tests/test_api/test_phase10g_security_e2e.py",

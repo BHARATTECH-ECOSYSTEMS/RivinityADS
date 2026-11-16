@@ -118,6 +118,66 @@ class SuggestionStatusPatch(BaseModel):
     status: str
 
 
+class OptimizationStatusResponse(BaseModel):
+    global_mode: str
+    kill_switch: bool
+    enabled: bool
+    pilot_campaign_ids: list[int]
+    pilot_count: int
+    cooldown_seconds: int
+    max_daily_changes: int
+    pilot_max_budget_delta_amount: float
+    laya_base_url: str
+    laya_enabled: bool
+    loop_is_running: bool
+
+
+class OptimizationDecisionResponse(ORMModel):
+    id: int
+    decision_id: str
+    campaign_id: int
+    mode: str
+    action: str | None = None
+    confidence: Decimal | None = None
+    policy_version: str
+    outcome: str
+    reason: str | None = None
+    target_payload: dict[str, Any] | None = None
+    evidence: dict[str, Any] | None = None
+    change_applied: dict[str, Any] | None = None
+    actor: str
+    execution_status: str | None = None
+    fencing_token: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CampaignOptimizationStateResponse(BaseModel):
+    campaign_id: int
+    campaign_name: str
+    autopilot: bool
+    is_pilot_eligible: bool
+    effective_mode: str
+    in_cooldown: bool
+    daily_changes_count: int
+    max_daily_changes: int
+    impressions: int
+    clicks: int
+    conversions: int
+    spent_today: Decimal
+    spent_total: Decimal
+    daily_budget: Decimal
+    last_decision: OptimizationDecisionResponse | None = None
+    can_revert: bool = False
+
+
+class DecisionRevertResponse(BaseModel):
+    decision_id: str
+    campaign_id: int
+    status: str
+    detail: dict[str, Any]
+
+
 class AdSetCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     status: int = Field(default=1, ge=0, le=5)
@@ -697,3 +757,68 @@ class PlacementHealthResponse(BaseModel):
     total_placements: int
     placements: list[PlacementHealthItemSchema]
     benchmarks: dict[str, FormatBenchmarkSchema] = {}
+
+
+# ── Phase 7 — Operations, Audit, & Exception Queues ─────────────────────────
+
+class AuditLogResponse(BaseModel):
+    id: int
+    user_id: int | None = None
+    action: str
+    ip_address: str | None = None
+    details: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class SLAItem(BaseModel):
+    id: int | str
+    type: str  # "creative_moderation", "payout_review", "dispute"
+    title: str
+    entity_name: str | None = None
+    created_at: datetime
+    sla_deadline: datetime
+    sla_status: str  # "ON_TRACK", "AT_RISK", "BREACHED"
+    time_remaining_minutes: int
+    details: dict[str, Any] = {}
+
+
+class OperationalAlert(BaseModel):
+    code: str
+    severity: str  # "high", "medium", "low"
+    title: str
+    description: str
+    entity_type: str  # "publisher", "property", "slot", "campaign", "webhook", "payout"
+    entity_id: int | str | None = None
+    count: int = 1
+
+
+class OperationalExceptionsResponse(BaseModel):
+    stale_integrations: list[OperationalAlert] = []
+    no_fill_slots: list[OperationalAlert] = []
+    unusual_ctrs: list[OperationalAlert] = []
+    spend_spikes: list[OperationalAlert] = []
+    webhook_payout_failures: list[OperationalAlert] = []
+    moderation_queue: list[SLAItem] = []
+    finance_queue: list[SLAItem] = []
+    total_exceptions_count: int = 0
+
+
+class WarningCategorySchema(BaseModel):
+    title: str
+    description: str
+    count: int
+    severity: str
+
+
+class PublisherSafetySummaryResponse(BaseModel):
+    publisher_id: int
+    quality_score: int
+    total_events: int
+    valid_events: int
+    invalid_events: int
+    invalid_rate_pct: float
+    warning_categories: list[WarningCategorySchema] = []
+    recommendations: list[str] = []
+

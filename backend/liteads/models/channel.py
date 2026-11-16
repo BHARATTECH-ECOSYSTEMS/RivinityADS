@@ -66,10 +66,19 @@ class ChannelConnection(Base, TimestampMixin):
     credentials_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     credentials_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
 
-    # Status: CONNECTED, SYNCING, ERROR, DISCONNECTED, REVOKED
+    # Status: CONNECTED, SIMULATED, CONNECTING, ERROR, DISCONNECTED, REVOKED
     status: Mapped[str] = mapped_column(
         String(32), default="CONNECTED", server_default="CONNECTED", nullable=False
     )
+    # Explicit adapter mode: LIVE, SIMULATED, EXPERIMENTAL
+    adapter_mode: Mapped[str] = mapped_column(
+        String(32), default="LIVE", server_default="LIVE", nullable=False
+    )
+    last_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    token_state: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    sync_cursor: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    remote_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -85,6 +94,8 @@ class ChannelConnection(Base, TimestampMixin):
 
     @property
     def is_connected(self) -> bool:
+        if self.adapter_mode == "SIMULATED" or self.status == "SIMULATED":
+            return False
         return self.status in ("CONNECTED", "SYNCING")
 
 
@@ -116,11 +127,19 @@ class ExternalCampaignMapping(Base, TimestampMixin):
     external_campaign_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     external_campaign_name: Mapped[str] = mapped_column(String(255), nullable=False)
     external_status: Mapped[str] = mapped_column(String(64), nullable=False)  # ACTIVE, PAUSED, ARCHIVED, DRAFT
+    remote_object_status: Mapped[str | None] = mapped_column(String(64), nullable=True)  # CONFIRMED_ACTIVE, CONFIRMED_PAUSED, etc.
+    moderation_status: Mapped[str | None] = mapped_column(String(64), nullable=True)  # APPROVED, UNDER_REVIEW, DISAPPROVED, etc.
+    provider_request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    remote_resource_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sync_status: Mapped[str] = mapped_column(
+        String(32), default="SYNCED", server_default="SYNCED", nullable=False
+    )
     objective: Mapped[str | None] = mapped_column(String(64), nullable=True)
     daily_budget: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
     total_spend: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
     currency: Mapped[str] = mapped_column(String(3), default="USD", server_default="USD", nullable=False)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), unique=True, index=True, nullable=True)
+    reporting_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_sync_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), nullable=False
     )

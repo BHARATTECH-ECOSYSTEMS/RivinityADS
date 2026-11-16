@@ -33,11 +33,17 @@ class BaseAdvertiserConnector(ABC):
 
     provider: str
     channel_name: str
+    adapter_mode: str = "LIVE"
 
     def __init__(self, credentials: dict[str, Any], account_id: str, organization_id: str | None = None):
         self.credentials = credentials
         self.account_id = account_id
         self.organization_id = organization_id
+
+    async def verify_credentials(self) -> tuple[bool, str | None, dict[str, Any]]:
+        """Verify authentication, token validity, and remote provider account access."""
+        ok, err = await self.test_connection()
+        return ok, err, {}
 
     @abstractmethod
     async def test_connection(self) -> tuple[bool, str | None]:

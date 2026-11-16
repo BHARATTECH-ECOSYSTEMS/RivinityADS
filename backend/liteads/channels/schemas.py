@@ -3,8 +3,26 @@ Pydantic schemas for channel adapters and connector APIs (Phase 5).
 """
 
 from datetime import date, datetime
+from enum import Enum
 from typing import Any
 from pydantic import BaseModel, Field
+
+
+class AdapterMode(str, Enum):
+    """Operational mode of the provider adapter."""
+    LIVE = "LIVE"
+    SIMULATED = "SIMULATED"
+    EXPERIMENTAL = "EXPERIMENTAL"
+
+
+class AdapterStatus(str, Enum):
+    """Explicit lifecycle status of the connection."""
+    SIMULATED = "SIMULATED"
+    CONNECTING = "CONNECTING"
+    CONNECTED = "CONNECTED"
+    ERROR = "ERROR"
+    DISCONNECTED = "DISCONNECTED"
+    REVOKED = "REVOKED"
 
 
 class ChannelCapabilities(BaseModel):
@@ -16,6 +34,9 @@ class ChannelCapabilities(BaseModel):
     supports_account_discovery: bool = True
     supports_campaign_management: bool = True
     supports_reporting_sync: bool = True
+    adapter_mode: str = "LIVE"  # "LIVE", "SIMULATED", "EXPERIMENTAL"
+    is_experimental: bool = False
+    is_simulated: bool = False
     supported_objectives: list[str] = Field(default_factory=list)
     supported_bidding_strategies: list[str] = Field(default_factory=list)
     supported_targeting: list[str] = Field(default_factory=list)
@@ -46,6 +67,11 @@ class ExternalCampaign(BaseModel):
     total_spend: float | None = None
     currency: str = "USD"
     local_campaign_id: int | None = None
+    remote_object_status: str | None = None  # "CONFIRMED_ACTIVE", "CONFIRMED_PAUSED", etc.
+    moderation_status: str | None = None     # "APPROVED", "UNDER_REVIEW", "DISAPPROVED"
+    provider_request_id: str | None = None
+    remote_resource_name: str | None = None
+    sync_status: str = "SYNCED"
 
 
 class CampaignCreateParams(BaseModel):
@@ -84,6 +110,9 @@ class ExternalReportRow(BaseModel):
     conversions: int = 0
     spend: float = 0.0
     currency: str = "USD"
+    is_synced: bool = True
+    provider_reported_at: datetime | None = None
+    is_simulated: bool = False
 
 
 # API Request/Response Schemas
@@ -108,6 +137,9 @@ class ConnectAdvertiserResponse(BaseModel):
     external_account_id: str
     credentials_prefix: str
     status: str
+    adapter_mode: str = "LIVE"
+    token_state: str | None = None
+    last_verified_at: datetime | None = None
     capabilities: ChannelCapabilities
     created_at: datetime
 
@@ -122,7 +154,11 @@ class ConnectionDetailsResponse(BaseModel):
     external_organization_id: str | None = None
     credentials_prefix: str
     status: str
+    adapter_mode: str = "LIVE"
+    token_state: str | None = None
+    last_verified_at: datetime | None = None
     last_sync_at: datetime | None = None
+    sync_cursor: str | None = None
     last_error: str | None = None
     capabilities: ChannelCapabilities | None = None
     created_at: datetime

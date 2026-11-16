@@ -52,9 +52,10 @@ class AdResponse(BaseModel):
 class AdListResponse(BaseModel):
     """Ad list response schema."""
 
-    request_id: str = Field(..., description="Request identifier")
+    request_id: str = Field(default="", description="Request identifier")
     ads: list[AdResponse] = Field(default_factory=list, description="List of ads")
-    count: int = Field(..., description="Number of ads returned")
+    count: int = Field(default=0, description="Number of ads returned")
+    total: int = Field(default=0, description="Total ads count")
 
     model_config = {
         "json_schema_extra": {

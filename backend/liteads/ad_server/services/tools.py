@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional, Any
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from pydantic import BaseModel
 
 from liteads.models.auth import User
@@ -537,9 +537,17 @@ async def update_targeting(
 
     try:
         # Delete existing targeting rules for geo and sector scoped to target_ad_set_id
+        if ad_set_id is None:
+            scope_condition = or_(
+                TargetingRule.ad_set_id == target_ad_set_id,
+                TargetingRule.ad_set_id.is_(None),
+            )
+        else:
+            scope_condition = TargetingRule.ad_set_id == target_ad_set_id
+
         query = select(TargetingRule).where(
             TargetingRule.campaign_id == campaign_id,
-            TargetingRule.ad_set_id == target_ad_set_id,
+            scope_condition,
             TargetingRule.rule_type.in_(["geo", "sector"])
         )
         result = await session.execute(query)

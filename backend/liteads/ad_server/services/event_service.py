@@ -6,6 +6,7 @@ Handles recording ad events (impressions, clicks, conversions).
 
 from datetime import datetime, timezone
 from decimal import Decimal
+import hashlib
 from typing import Any
 
 from fastapi import HTTPException
@@ -119,6 +120,77 @@ class EventService:
                 if not pub_obj or pub_obj.status != Status.ACTIVE:
                     logger.warning("Event on inactive publisher; billable charge suppressed", publisher_id=publisher_id)
                     cost = Decimal("0")
+
+            # 4. Phase 1: Visitor Consent Gate for Website Placements
+            # Events on website placements strictly require verified visitor consent.
+            # Client-supplied arbitrary booleans (e.g. extra.consent = True) are explicitly NOT trusted.
+            # Server verifies stored WebsiteConsentLog or cryptographic consent_token.
+            if slot and slot.property_id and not is_sandbox_event:
+                from liteads.models.website import WebsiteProject, WebsiteConsentLog
+                from liteads.common.tracking_sig import verify_consent_token
+
+                proj_stmt = select(WebsiteProject).where(WebsiteProject.property_id == slot.property_id)
+                proj_obj = (await self.session.execute(proj_stmt)).scalar_one_or_none()
+
+                if proj_obj:
+                    has_visitor_consent = False
+                    consent_tok = extra.get("consent_token") if extra else None
+                    if consent_tok:
+                        try:
+                            tok_info = verify_consent_token(
+                                consent_tok,
+                                expected_site_slug=proj_obj.slug,
+                                expected_project_id=proj_obj.id,
+                            )
+                            if tok_info.get("is_granted"):
+                                has_visitor_consent = True
+                        except Exception as e:
+                            logger.warning("Consent token validation failed for event", error=str(e), slot_id=slot_id)
+                            has_visitor_consent = False
+                    else:
+                        # Inspect server-side trusted consent log (using hashed IP/UA or latest project record)
+                        ip_raw = extra.get("ip_address") or extra.get("client_ip") or extra.get("ip") if extra else None
+                        ip_h = hashlib.sha256(ip_raw.encode("utf-8")).hexdigest() if ip_raw else None
+                        if ip_h:
+                            c_stmt = (
+                                select(WebsiteConsentLog)
+                                .where(
+                                    WebsiteConsentLog.project_id == proj_obj.id,
+                                    WebsiteConsentLog.consent_type == "visitor_consent",
+                                    WebsiteConsentLog.client_ip_hash == ip_h,
+                                )
+                                .order_by(WebsiteConsentLog.recorded_at.desc())
+                                .limit(1)
+                            )
+                            c_log = (await self.session.execute(c_stmt)).scalar_one_or_none()
+                            if c_log and c_log.is_granted:
+                                has_visitor_consent = True
+                        else:
+                            c_stmt = (
+                                select(WebsiteConsentLog)
+                                .where(
+                                    WebsiteConsentLog.project_id == proj_obj.id,
+                                    WebsiteConsentLog.consent_type == "visitor_consent",
+                                )
+                                .order_by(WebsiteConsentLog.recorded_at.desc())
+                                .limit(1)
+                            )
+                            c_log = (await self.session.execute(c_stmt)).scalar_one_or_none()
+                            if c_log and c_log.is_granted:
+                                has_visitor_consent = True
+
+                    if not has_visitor_consent:
+                        logger.warning(
+                            "Event on website placement lacks valid visitor consent; billable spend suppressed",
+                            slot_id=slot_id,
+                            project_id=proj_obj.id,
+                        )
+                        cost = Decimal("0")
+                        if extra and extra.get("reject_unconsented"):
+                            raise HTTPException(
+                                status_code=403,
+                                detail="Visitor consent required for billable ad events on this website.",
+                            )
 
             # Phase 3 IVT Assessment:
             from liteads.ad_server.services.ivt_service import IVTService
@@ -377,8 +449,10 @@ class EventService:
         delta_impressions = 1 if event_type == EventType.IMPRESSION else 0
         delta_clicks = 1 if event_type == EventType.CLICK else 0
         delta_conversions = 1 if event_type == EventType.CONVERSION else 0
-        rev_share = await BillingService.get_rev_share(self.session)
-        delta_earnings = cost * rev_share
+        rev_share = await BillingService.get_publisher_rev_share(self.session, slot.publisher_id)
+        delta_earnings = (cost * rev_share).quantize(Decimal("0.000001")) if cost > Decimal("0") else Decimal("0.000000")
+        hold_hours = await BillingService.get_hold_hours(self.session)
+        delta_cleared = delta_earnings if hold_hours == 0 else Decimal("0.000000")
 
         # Database-atomic upsert across supported dialects
         dialect_name = self.session.get_bind().dialect.name
@@ -391,6 +465,7 @@ class EventService:
                 clicks=delta_clicks,
                 conversions=delta_conversions,
                 earnings=delta_earnings,
+                cleared_earnings=delta_cleared,
                 created_at=now_utc,
                 updated_at=now_utc,
             )
@@ -401,6 +476,7 @@ class EventService:
                     "clicks": PublisherDailyStat.clicks + stmt.excluded.clicks,
                     "conversions": PublisherDailyStat.conversions + stmt.excluded.conversions,
                     "earnings": PublisherDailyStat.earnings + stmt.excluded.earnings,
+                    "cleared_earnings": PublisherDailyStat.cleared_earnings + stmt.excluded.cleared_earnings,
                     "updated_at": now_utc,
                 },
             )
@@ -414,6 +490,7 @@ class EventService:
                 clicks=delta_clicks,
                 conversions=delta_conversions,
                 earnings=delta_earnings,
+                cleared_earnings=delta_cleared,
                 created_at=now_utc,
                 updated_at=now_utc,
             )
@@ -424,6 +501,7 @@ class EventService:
                     "clicks": PublisherDailyStat.clicks + stmt.excluded.clicks,
                     "conversions": PublisherDailyStat.conversions + stmt.excluded.conversions,
                     "earnings": PublisherDailyStat.earnings + stmt.excluded.earnings,
+                    "cleared_earnings": PublisherDailyStat.cleared_earnings + stmt.excluded.cleared_earnings,
                     "updated_at": now_utc,
                 },
             )
@@ -446,12 +524,14 @@ class EventService:
                     clicks=0,
                     conversions=0,
                     earnings=Decimal("0.000000"),
+                    cleared_earnings=Decimal("0.000000"),
                 )
                 self.session.add(stat)
             stat.impressions += delta_impressions
             stat.clicks += delta_clicks
             stat.conversions += delta_conversions
             stat.earnings += delta_earnings
+            stat.cleared_earnings += delta_cleared
 
     async def _update_stats(self, campaign_id: int | None, event_type: int, ad_set_id: int | None = None) -> None:
         """Update real-time statistics in Redis."""

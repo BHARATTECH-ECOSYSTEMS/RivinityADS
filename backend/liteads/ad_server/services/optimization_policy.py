@@ -10,7 +10,7 @@ from decimal import Decimal
 import math
 
 from liteads.models.ad import Campaign
-from liteads.models.base import ModerationStatus
+from liteads.models.base import ModerationStatus, BidType
 from liteads.ad_server.services.optimization_prep import OptimizationPrepResult
 from liteads.ad_server.services.laya_client import LayaDecisionResult
 from liteads.ad_server.services.placement_analyzer import (
@@ -68,9 +68,12 @@ class OptimizationPolicyService:
         
         # 1. Eligibility Check
         if not prep_result.eligible:
+            reason = prep_result.reason or "Campaign is ineligible for optimization"
+            if "fewer than 500 impressions" in reason or "below threshold" in reason.lower():
+                reason = "insufficient evidence: " + reason
             return OptimizationPolicyResult(
                 accepted=False,
-                reason=prep_result.reason or "Campaign is ineligible for optimization",
+                reason=reason,
                 action=action,
                 confidence=confidence,
                 autopilot=autopilot
@@ -124,8 +127,45 @@ class OptimizationPolicyService:
                 confidence=confidence,
                 autopilot=autopilot
             )
-            
-        # 5. Action-specific Guardrails
+
+        # 5. Minimum Data & Objective-Aware Gates (Phase 6)
+        bid_type = getattr(campaign, "bid_type", None)
+        if bid_type == BidType.CPA:
+            if action == "increase_budget_20":
+                conversions = getattr(campaign, "conversions", 0) or 0
+                if conversions <= 0:
+                    return OptimizationPolicyResult(
+                        accepted=False,
+                        reason="insufficient evidence: CPA campaigns require recorded conversions before increasing budget",
+                        action=action,
+                        confidence=confidence,
+                        autopilot=autopilot,
+                    )
+                spent = Decimal(str(getattr(campaign, "spent_total", 0) or 0))
+                bid_target = Decimal(str(getattr(campaign, "bid_amount", 0) or 0))
+                if bid_target > Decimal("0") and conversions > 0:
+                    effective_cpa = spent / Decimal(str(conversions))
+                    if effective_cpa > bid_target * Decimal("1.2"):
+                        return OptimizationPolicyResult(
+                            accepted=False,
+                            reason=f"CPA objective violation: effective CPA ({float(effective_cpa):.2f}) exceeds target bid ({float(bid_target):.2f})",
+                            action=action,
+                            confidence=confidence,
+                            autopilot=autopilot,
+                        )
+        elif bid_type == BidType.CPC:
+            if action == "increase_budget_20":
+                clicks = getattr(campaign, "clicks", 0) or 0
+                if clicks <= 0:
+                    return OptimizationPolicyResult(
+                        accepted=False,
+                        reason="insufficient evidence: CPC campaigns require recorded clicks before increasing budget",
+                        action=action,
+                        confidence=confidence,
+                        autopilot=autopilot,
+                    )
+
+        # 6. Action-specific Guardrails
         target_payload = getattr(decision, "target_payload", None)
         if action in ("increase_budget_20", "decrease_budget_20"):
             return self._evaluate_budget_action(action, campaign, confidence, autopilot)

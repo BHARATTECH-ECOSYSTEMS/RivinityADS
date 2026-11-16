@@ -858,8 +858,8 @@ class MonetizationStatusResponse(BaseModel):
 
 class VisitorConsentPayload(BaseModel):
     categories: dict[str, bool] = Field(
-        default_factory=lambda: {"advertising": True, "analytics": True},
-        description="Visitor opted consent categories",
+        default_factory=lambda: {"advertising": False, "analytics": False},
+        description="Visitor opted consent categories (defaults to denied)",
     )
     version: str = Field(default="v1.0", max_length=32)
 
@@ -869,6 +869,9 @@ class VisitorConsentResponse(BaseModel):
     message: str
     consent_id: int
     categories: dict[str, bool]
+    is_granted: bool = False
+    consent_token: str | None = None
+    expires_at: int | None = None
 
 
 # ── Tenant-Scoped Storage Schemas ──────────────────────────────────────────

@@ -1,6 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { listSlots, requestAds, type SlotData } from "../../api/client";
+import { 
+  listSlots, 
+  requestAds, 
+  type SlotData,
+  listPublisherProperties,
+  type PublisherProperty 
+} from "../../api/client";
 import { useAuth } from "../../auth/AuthContext";
 import type { AdResponse } from "../../types";
 import {
@@ -10,13 +16,13 @@ import {
   Button,
   StatusBadge,
   Alert,
-  LoadingSkeleton,
   EmptyState,
 } from "../../components/ui";
 
 export default function Integration() {
   const { session } = useAuth();
   const [slots, setSlots] = useState<SlotData[]>([]);
+  const [properties, setProperties] = useState<PublisherProperty[]>([]);
   const [selectedSlot, setSelectedSlot] = useState<string>("");
   const [copiedTab, setCopiedTab] = useState<string | null>(null);
   const [ad, setAd] = useState<AdResponse | null>(null);
@@ -26,20 +32,26 @@ export default function Integration() {
   const [activeSnippetTab, setActiveSnippetTab] = useState<"iframe" | "sdk" | "s2s">("iframe");
 
   useEffect(() => {
-    const fetchSlots = async () => {
+    const fetchData = async () => {
       try {
         const publisherId = session?.user?.publisher_id;
-        const data = await listSlots(publisherId || undefined);
-        setSlots(data);
-        if (data.length > 0) setSelectedSlot(data[0].slot_id);
+        const [slotsData, propsData] = await Promise.all([
+          listSlots(publisherId || undefined),
+          publisherId ? listPublisherProperties(publisherId) : Promise.resolve([])
+        ]);
+        setSlots(slotsData);
+        setProperties(propsData);
+        if (slotsData.length > 0) setSelectedSlot(slotsData[0].slot_id);
       } catch {
-        // Fallback if slots inaccessible
+        // Fallback if data inaccessible
       }
     };
-    void fetchSlots();
+    void fetchData();
   }, [session?.user?.publisher_id]);
 
   const currentSlot = slots.find((s) => s.slot_id === selectedSlot);
+  const currentProperty = properties.find((p) => p.id === currentSlot?.property_id);
+  const isPropertyVerified = currentProperty ? currentProperty.verification_status === "VERIFIED" : true;
 
   const apiBase =
     (import.meta.env?.VITE_API_BASE_URL as string | undefined) ??
@@ -174,16 +186,31 @@ print("Ad Response:", json.dumps(ad, indent=2))`
     <PageContainer>
       <PageHeader
         eyebrow="Integration Guide"
-        title="Publisher Integration"
-        description="Embed ad units into your web pages, mobile apps, or backend conversational AI pipelines."
+        title="Publisher Integration &amp; Ad Delivery"
+        description="Embed ad units into your web pages, mobile applications, or backend conversational AI pipelines."
         actions={
-          <Link to="/publisher/preview" className="btn btn-secondary btn-sm">
-            Live Ad Preview →
-          </Link>
+          <div style={{ display: "flex", gap: "8px" }}>
+            <Link to="/publisher/properties" className="btn btn-secondary btn-sm">
+              Properties &amp; Verification →
+            </Link>
+            <Link to="/publisher/ad-units" className="btn btn-secondary btn-sm">
+              Ad Units →
+            </Link>
+          </div>
         }
       />
 
-      {/* Slot Selector Banner */}
+      {/* Unverified Property Prerequisite Notice */}
+      {currentSlot && currentProperty && !isPropertyVerified && (
+        <Alert variant="warning" title="Property Verification Required" style={{ marginBottom: "20px" }}>
+          This placement slot is bound to property <strong>{currentProperty.name}</strong> (<code style={{ fontFamily: "var(--font-mono)" }}>{currentProperty.domain}</code>), which is currently unverified. The ad server will reject live traffic with HTTP 403 Forbidden until domain ownership is verified.{" "}
+          <Link to="/publisher/properties" style={{ textDecoration: "underline", fontWeight: 600 }}>
+            Complete Domain Verification in Properties →
+          </Link>
+        </Alert>
+      )}
+
+      {/* Slot Selector & Status Banner */}
       <Card style={{ marginBottom: "24px" }}>
         <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", gap: "16px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "12px", flex: 1, minWidth: "280px" }}>
@@ -209,14 +236,23 @@ print("Ad Response:", json.dumps(ad, indent=2))`
             </select>
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
             {currentSlot && (
-              <div style={{ display: "flex", gap: "6px" }}>
+              <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
                 <StatusBadge 
                   status={currentSlot.status === 1 ? "active" : "paused"} 
                   label={currentSlot.status === 1 ? "Active Slot" : "Paused"}
-                  size="sm"
+                  size="sm" 
                 />
+                {currentProperty ? (
+                  <StatusBadge 
+                    variant={isPropertyVerified ? "success" : "warning"} 
+                    label={isPropertyVerified ? `Domain Verified (${currentProperty.domain})` : `Unverified Domain (${currentProperty.domain})`} 
+                    size="sm" 
+                  />
+                ) : (
+                  <StatusBadge variant="default" label="Global / Unassigned Domain" size="sm" />
+                )}
                 {currentSlot.is_chat_surface && (
                   <StatusBadge status="info" label="Chat AI Surface" size="sm" />
                 )}
@@ -234,6 +270,45 @@ print("Ad Response:", json.dumps(ad, indent=2))`
           </div>
         </div>
       </Card>
+
+      {/* Delivery Architecture Overview */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "16px", marginBottom: "24px" }}>
+        <Card style={{ padding: "16px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: 700, fontSize: "0.875rem" }}>
+            <span style={{ fontSize: "1.125rem" }}>🖼️</span> Standard Web Iframe
+          </div>
+          <p style={{ fontSize: "0.8125rem", color: "var(--color-text-secondary)", margin: "8px 0 0" }}>
+            Zero JavaScript dependencies. Isolated CSS &amp; DOM sandbox preventing host collision. Direct server-rendered creative.
+          </p>
+          <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)", marginTop: "6px" }}>
+            Best for: Standard blog sidebars, editorial headers, and CMS widgets.
+          </div>
+        </Card>
+
+        <Card style={{ padding: "16px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: 700, fontSize: "0.875rem" }}>
+            <span style={{ fontSize: "1.125rem" }}>⚡</span> Dynamic JavaScript SDK
+          </div>
+          <p style={{ fontSize: "0.8125rem", color: "var(--color-text-secondary)", margin: "8px 0 0" }}>
+            Asynchronous tag with visitor consent handshake (CMP compliance), dynamic container sizing, and responsive lazy loading.
+          </p>
+          <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)", marginTop: "6px" }}>
+            Best for: Single Page Applications (SPAs), Next.js / Vite apps, and dynamic feeds.
+          </div>
+        </Card>
+
+        <Card style={{ padding: "16px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: 700, fontSize: "0.875rem" }}>
+            <span style={{ fontSize: "1.125rem" }}>🤖</span> Server-to-Server (S2S) HMAC
+          </div>
+          <p style={{ fontSize: "0.8125rem", color: "var(--color-text-secondary)", margin: "8px 0 0" }}>
+            Cryptographically signed requests using HMAC-SHA256, API keys, and timestamps. Protects platform identity and visitor privacy.
+          </p>
+          <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)", marginTop: "6px" }}>
+            Best for: Conversational AI chatbots, LLM tools, mobile backend relays.
+          </div>
+        </Card>
+      </div>
 
       {/* Integration Snippets Card */}
       <Card
@@ -360,6 +435,56 @@ print("Ad Response:", json.dumps(ad, indent=2))`
             </pre>
           </div>
         )}
+      </Card>
+
+      {/* Supported Formats & Conversational AI Surface Guide */}
+      <Card
+        title="Supported Formats &amp; Placement Specifications"
+        subtitle="Match ad placement dimensions and opt into Conversational AI surfaces."
+        style={{ marginBottom: "24px" }}
+      >
+        <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1.8fr", gap: "24px", alignItems: "start" }}>
+          <div>
+            <h4 style={{ fontSize: "0.875rem", fontWeight: 700, margin: "0 0 8px" }}>Standard IAB Display Sizes</h4>
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8125rem", padding: "6px 0", borderBottom: "1px solid var(--border-color)" }}>
+                <span>Medium Rectangle</span>
+                <code style={{ fontFamily: "var(--font-mono)" }}>300 × 250 px</code>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8125rem", padding: "6px 0", borderBottom: "1px solid var(--border-color)" }}>
+                <span>Leaderboard</span>
+                <code style={{ fontFamily: "var(--font-mono)" }}>728 × 90 px</code>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8125rem", padding: "6px 0", borderBottom: "1px solid var(--border-color)" }}>
+                <span>Wide Skyscraper</span>
+                <code style={{ fontFamily: "var(--font-mono)" }}>160 × 600 px</code>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8125rem", padding: "6px 0", borderBottom: "1px solid var(--border-color)" }}>
+                <span>Mobile Leaderboard</span>
+                <code style={{ fontFamily: "var(--font-mono)" }}>320 × 50 px</code>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8125rem", padding: "6px 0" }}>
+                <span>Billboard</span>
+                <code style={{ fontFamily: "var(--font-mono)" }}>970 × 250 px</code>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ background: "var(--color-bg-subtle)", padding: "16px", borderRadius: "var(--radius-md)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", fontWeight: 700, fontSize: "0.875rem", color: "var(--color-primary)" }}>
+              <span>💬</span> Conversational AI Surfaces (Chat AI)
+            </div>
+            <p style={{ fontSize: "0.8125rem", color: "var(--color-text-secondary)", margin: "8px 0 12px" }}>
+              Placements flagged with <code>is_chat_surface: true</code> are optimized for conversational AI engines, chatbot dialogues, and AI assistant interfaces.
+            </p>
+            <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "0.75rem", color: "var(--color-text-secondary)", lineHeight: 1.6 }}>
+              <li>Context-aware sector affinity matching against user queries.</li>
+              <li>Native card rendering designed for assistant text streams.</li>
+              <li>Strict privacy hashing: user identifiers are irreversibly hashed before ad matching.</li>
+              <li>Eligible for premium dynamic pricing and conversational advertiser bids.</li>
+            </ul>
+          </div>
+        </div>
       </Card>
 
       {/* Live Sandbox Ad Request Result */}

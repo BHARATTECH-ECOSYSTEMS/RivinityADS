@@ -26,9 +26,9 @@ from liteads.models.publisher import Publisher
 from liteads.models.finance import Transaction
 from liteads.ad_server.services.conversion_service import ConversionService
 from liteads.common.tracking_sig import sign_click_token
+from liteads.common.alembic_utils import get_authoritative_alembic_head
 
 TEST_DB_NAME = "liteads_phase11_pg_audit_db"
-EXPECTED_HEAD = "r0a1b2c3d4e5"
 PRE_CHANGE_REVISION = "09062f9ba9c2"
 GEO_TARGET_CONSTRAINT = ("uq_geo_location_full", ("country", "state_code", "city", "pincode"))
 GEO_LEGACY_CONSTRAINT = ("uq_country_pincode", ("country", "pincode"))
@@ -139,6 +139,8 @@ async def main():
 
     print("=== Step 1: Setting up isolated PostgreSQL test database ===")
     alembic_ini = find_alembic_ini()
+    expected_head = get_authoritative_alembic_head(alembic_ini)
+    print(f"Authoritative Alembic head from migration graph: {expected_head}")
     baseline_sql = open(find_baseline_sql(), encoding="utf-8").read()
 
     try:
@@ -166,8 +168,11 @@ async def main():
 
         print("\n=== Step 3: Running clean Alembic upgrade to head ===")
         print(await run_alembic(alembic_ini, TEST_DB_NAME, "upgrade", "head"))
-        print(await run_alembic(alembic_ini, TEST_DB_NAME, "current"))
-        assert EXPECTED_HEAD in await run_alembic(alembic_ini, TEST_DB_NAME, "current")
+        current_out = await run_alembic(alembic_ini, TEST_DB_NAME, "current")
+        print(current_out)
+        assert expected_head in current_out, (
+            f"Alembic current output {current_out!r} does not contain expected head {expected_head!r}"
+        )
         geo_conn = await asyncpg.connect(
             host=host,
             port=port,
@@ -176,10 +181,17 @@ async def main():
             database=TEST_DB_NAME,
         )
         try:
+            # Verify the alembic_version table in PostgreSQL matches the authoritative head
+            db_version = await geo_conn.fetchval("SELECT version_num FROM alembic_version")
+            assert db_version == expected_head, (
+                f"Isolated PostgreSQL alembic_version {db_version!r} does not match expected head {expected_head!r}"
+            )
+            print(f"PASS: Isolated PostgreSQL alembic_version matches authoritative head: {db_version}")
+
             await assert_geo_constraint(geo_conn, GEO_TARGET_CONSTRAINT, GEO_LEGACY_CONSTRAINT[0])
             print(
                 "PASS: Clean PostgreSQL upgrade reached "
-                f"{EXPECTED_HEAD} with {GEO_TARGET_CONSTRAINT[0]} on "
+                f"{expected_head} with {GEO_TARGET_CONSTRAINT[0]} on "
                 f"{GEO_TARGET_CONSTRAINT[1]}."
             )
         finally:
@@ -337,6 +349,17 @@ async def main():
 
         # ── Test 2: Concurrent Duplicate Postbacks ──
         print("\n=== Test 2: Concurrent Duplicate Postbacks Resolution ===")
+        async with async_session_factory() as session:
+            click_concurrent = AdEvent(
+                request_id="req_concurrent",
+                campaign_id=camp_id,
+                creative_id=creat_id,
+                event_type=EventType.CLICK,
+                event_time=now,
+            )
+            session.add(click_concurrent)
+            await session.commit()
+
         tok_concurrent = sign_click_token("req_concurrent", camp_id, creat_id)
 
         async def postback_worker(worker_id: int):
@@ -363,6 +386,14 @@ async def main():
         # ── Test 3: Transaction Rollback on Billing Failure ──
         print("\n=== Test 3: Transaction Rollback on Insufficient Funds ===")
         async with async_session_factory() as session:
+            click_fail = AdEvent(
+                request_id="req_fail_charge",
+                campaign_id=camp_id,
+                creative_id=creat_id,
+                event_type=EventType.CLICK,
+                event_time=now,
+            )
+            session.add(click_fail)
             adv_obj = await session.get(Advertiser, adv_id)
             adv_obj.balance = Decimal("10.0000")  # Cost is 50, balance is only 10
             await session.commit()
@@ -394,6 +425,14 @@ async def main():
         # ── Test 4: Financial Ledger and Wallet Consistency ──
         print("\n=== Test 4: Financial Ledger and Wallet Consistency ===")
         async with async_session_factory() as session:
+            click_success = AdEvent(
+                request_id="req_success_charge",
+                campaign_id=camp_id,
+                creative_id=creat_id,
+                event_type=EventType.CLICK,
+                event_time=now,
+            )
+            session.add(click_success)
             adv_obj = await session.get(Advertiser, adv_id)
             adv_obj.balance = Decimal("500.0000")
             camp_obj = await session.get(Campaign, camp_id)
@@ -422,7 +461,7 @@ async def main():
             assert camp_after.spent_total == prev_spent_total + Decimal("50.0000"), f"Expected {prev_spent_total + Decimal('50.0000')}, got {camp_after.spent_total}"
             assert pub_after.balance == prev_pub_bal + Decimal("35.0000"), f"Expected {prev_pub_bal + Decimal('35.0000')}, got {pub_after.balance}"
 
-            q_tx = select(Transaction).where(Transaction.reference_id == f"conv:{camp_id}:ORD-LEDGER-VERIFY-1")
+            q_tx = select(Transaction).where(Transaction.reference_id == f"cpa:{camp_id}:ORD-LEDGER-VERIFY-1")
             tx = (await session.execute(q_tx)).scalar_one_or_none()
             assert tx is not None, "Missing spend transaction record in ledger"
             assert tx.amount == Decimal("-50.0000"), f"Expected -50.0000, got {tx.amount}"
@@ -449,7 +488,7 @@ async def main():
             print("PASS: Repeated request deduplicated idempotently with strictly zero duplicate charge!")
 
         await engine.dispose()
-        print(f"\nALL POSTGRESQL CONCURRENCY & LEDGER AUDIT TESTS PASSED (HEAD {EXPECTED_HEAD})!")
+        print(f"\nALL POSTGRESQL CONCURRENCY & LEDGER AUDIT TESTS PASSED (HEAD {expected_head})!")
         return 0
 
     finally:

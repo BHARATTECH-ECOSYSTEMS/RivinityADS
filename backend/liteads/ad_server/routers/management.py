@@ -3,6 +3,7 @@
 import csv
 import hashlib
 import io
+import json
 import secrets
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -12,9 +13,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from liteads.common.config import get_settings
 from liteads.common.database import get_session
 from liteads.common.security import current_user, verified_user, require_roles
-from liteads.ad_server.services.campaign_activation import activate_campaign_logic, CampaignActivationError
+from liteads.ad_server.services.campaign_activation import (
+    activate_campaign_logic,
+    CampaignActivationError,
+    validate_campaign_readiness,
+    CampaignReadinessResponse,
+)
 from liteads.ad_server.services.creative_moderation import CreativeModerationService
 from liteads.ad_server.services.domain_verification import DomainVerificationService
 from liteads.ad_server.services.placement_analyzer import PlacementAnalyzerService
@@ -81,14 +88,30 @@ from liteads.schemas.management import (
     PublisherAssignmentResponse,
     SuggestionResponse,
     SuggestionStatusPatch,
+    OptimizationStatusResponse,
+    OptimizationDecisionResponse,
+    CampaignOptimizationStateResponse,
+    DecisionRevertResponse,
     FormatBenchmarkSchema,
     PlacementHealthItemSchema,
     PlacementHealthResponse,
+    AuditLogResponse,
+    SLAItem,
+    OperationalAlert,
+    OperationalExceptionsResponse,
+    PublisherSafetySummaryResponse,
+    WarningCategorySchema,
 )
-from liteads.ad_server.services.optimization_executor import OptimizationExecutor
+from liteads.schemas.finance import PublisherEarningsBreakdownResponse
+from liteads.ad_server.services.destination_validator import DestinationValidator
+from liteads.ad_server.services.ivt_service import IVTService
+from liteads.ad_server.services.billing import BillingService
+from liteads.models.auth import AuditLog
+from liteads.models.finance import BillingDispute, PublisherPayout
+from liteads.ad_server.services.optimization_executor import OptimizationExecutor, OptimizationExecutionError
 from liteads.ad_server.services.optimization_policy import OptimizationPolicyResult
 from liteads.ad_server.services.rate_limit_service import RateLimitService
-from liteads.models.ad import Suggestion
+from liteads.models.ad import Suggestion, OptimizationDecision, CampaignChangeLog
 
 router = APIRouter(dependencies=[Depends(verified_user)])
 
@@ -223,8 +246,24 @@ async def update_campaign(
     if campaign is None:
         raise _not_found("Campaign", campaign_id)
     _assert_advertiser_access(user, campaign.advertiser_id)
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+    prev_status = campaign.status
+    for key, value in updates.items():
         setattr(campaign, key, value)
+    if "status" in updates and campaign.status != prev_status:
+        session.add(
+            AuditLog(
+                user_id=user.id,
+                action="campaign_status_updated",
+                details=json.dumps({
+                    "campaign_id": campaign.id,
+                    "advertiser_id": campaign.advertiser_id,
+                    "previous_status": int(prev_status) if prev_status is not None else None,
+                    "new_status": int(campaign.status) if campaign.status is not None else None,
+                    "actor_email": user.email,
+                }),
+            )
+        )
     await session.commit()
     await session.refresh(campaign)
     return campaign
@@ -254,6 +293,29 @@ async def activate_campaign(
     await session.commit()
     await session.refresh(campaign)
     return campaign
+
+
+@router.get(
+    "/campaign/{campaign_id}/readiness",
+    response_model=CampaignReadinessResponse,
+    dependencies=[Depends(require_roles("admin", "advertiser"))],
+)
+@router.get(
+    "/campaign/{campaign_id}/validate",
+    response_model=CampaignReadinessResponse,
+    dependencies=[Depends(require_roles("admin", "advertiser"))],
+)
+async def get_campaign_readiness_endpoint(
+    campaign_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> CampaignReadinessResponse:
+    """Retrieve server-authoritative campaign readiness state, blockers, warnings, and summary."""
+    campaign = await session.get(Campaign, campaign_id)
+    if campaign is None:
+        raise _not_found("Campaign", campaign_id)
+    _assert_advertiser_access(user, campaign.advertiser_id)
+    return await validate_campaign_readiness(session, campaign_id, campaign.advertiser_id)
 
 
 
@@ -470,6 +532,11 @@ async def create_creative(
             await session.flush()
         data["ad_set_id"] = default_ad_set.id
     
+    if payload.landing_url:
+        dest_val = await DestinationValidator.check_destination(payload.landing_url, perform_fetch=False)
+        if not dest_val.is_valid:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid landing destination: {dest_val.reason}")
+
     if payload.landing_url and user.role == "advertiser":
         domain_service = DomainVerificationService(session)
         is_verified = await domain_service.is_url_verified_for_advertiser(user.advertiser_id, payload.landing_url)
@@ -527,28 +594,64 @@ async def update_creative(
         if ad_set.campaign_id != creative.campaign_id:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="AdSet does not belong to creative campaign")
 
+    orig_title = creative.title
+    orig_description = creative.description
+    orig_image_url = creative.image_url
+    orig_video_url = creative.video_url
+    orig_landing_url = creative.landing_url
+    orig_mod_status = creative.moderation_status
+
     for key, value in updates.items():
         setattr(creative, key, value)
         
+    if "landing_url" in updates and creative.landing_url:
+        dest_val = await DestinationValidator.check_destination(creative.landing_url, perform_fetch=False)
+        if not dest_val.is_valid:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid landing destination: {dest_val.reason}")
+
     if "landing_url" in updates and user.role == "advertiser":
         domain_service = DomainVerificationService(session)
         is_verified = await domain_service.is_url_verified_for_advertiser(user.advertiser_id, creative.landing_url)
         if not is_verified:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Landing URL domain is not verified")
         
-    # If sensitive fields changed, re-evaluate moderation
-    if any(k in updates for k in ("title", "description", "image_url", "video_url", "landing_url")):
-        decision = await CreativeModerationService.moderate_creative(
-            title=creative.title,
-            description=creative.description,
-            image_url=creative.image_url,
-            video_url=creative.video_url,
-            landing_url=creative.landing_url
+    # Content equivalence check: if substantive fields changed
+    sensitive_fields_changed = any(k in updates for k in ("title", "description", "image_url", "video_url", "landing_url"))
+    if sensitive_fields_changed:
+        is_equivalent = CreativeModerationService.are_contents_equivalent(
+            orig_title, orig_description, orig_image_url, orig_video_url, orig_landing_url,
+            creative.title, creative.description, creative.image_url, creative.video_url, creative.landing_url,
         )
-        creative.moderation_status = decision.status
-        creative.moderation_reason = decision.reason
-        creative.moderated_at = None
-        creative.moderated_by_id = None
+        if orig_mod_status == ModerationStatus.APPROVED and not is_equivalent:
+            creative.moderation_status = ModerationStatus.PENDING_REVIEW
+            creative.moderation_reason = "Content modified; re-review required"
+            creative.moderated_at = None
+            creative.moderated_by_id = None
+            session.add(
+                AuditLog(
+                    user_id=user.id,
+                    action="creative_content_modified_reset",
+                    details=json.dumps({
+                        "creative_id": creative.id,
+                        "campaign_id": creative.campaign_id,
+                        "previous_status": int(orig_mod_status),
+                        "new_status": int(ModerationStatus.PENDING_REVIEW),
+                        "actor_email": user.email,
+                    }),
+                )
+            )
+        elif not is_equivalent or orig_mod_status != ModerationStatus.APPROVED:
+            decision = await CreativeModerationService.moderate_creative(
+                title=creative.title,
+                description=creative.description,
+                image_url=creative.image_url,
+                video_url=creative.video_url,
+                landing_url=creative.landing_url
+            )
+            creative.moderation_status = decision.status
+            creative.moderation_reason = decision.reason
+            creative.moderated_at = None
+            creative.moderated_by_id = None
         
     # Force status to PENDING if it's not approved and user wants it ACTIVE
     if creative.moderation_status != ModerationStatus.APPROVED and creative.status == Status.ACTIVE:
@@ -649,13 +752,29 @@ async def get_publisher(publisher_id: int, user: User = Depends(verified_user), 
 async def update_publisher(
     publisher_id: int,
     payload: PublisherUpdate,
+    user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session),
 ) -> Publisher:
     publisher = await session.get(Publisher, publisher_id)
     if publisher is None:
         raise _not_found("Publisher", publisher_id)
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+    prev_status = publisher.status
+    for key, value in updates.items():
         setattr(publisher, key, value)
+    if "status" in updates and publisher.status != prev_status:
+        session.add(
+            AuditLog(
+                user_id=user.id,
+                action="publisher_status_updated",
+                details=json.dumps({
+                    "publisher_id": publisher.id,
+                    "previous_status": int(prev_status) if prev_status is not None else None,
+                    "new_status": int(publisher.status) if publisher.status is not None else None,
+                    "actor_email": user.email,
+                }),
+            )
+        )
     await session.commit()
     await session.refresh(publisher)
     return publisher
@@ -1445,7 +1564,22 @@ async def update_publisher_property(
     if "name" in updates and updates["name"] is not None:
         property_obj.name = updates["name"]
     if "status" in updates and updates["status"] is not None:
+        prev_status = property_obj.status
         property_obj.status = updates["status"]
+        if property_obj.status != prev_status:
+            session.add(
+                AuditLog(
+                    user_id=user.id,
+                    action="property_status_updated",
+                    details=json.dumps({
+                        "property_id": property_obj.id,
+                        "publisher_id": property_obj.publisher_id,
+                        "previous_status": int(prev_status) if prev_status is not None else None,
+                        "new_status": int(property_obj.status) if property_obj.status is not None else None,
+                        "actor_email": user.email,
+                    }),
+                )
+            )
 
     await session.commit()
     await session.refresh(property_obj)
@@ -2032,3 +2166,517 @@ async def revoke_advertiser_api_key(
     )
     if not success:
         raise HTTPException(status_code=404, detail="API key not found or already revoked")
+
+
+# ── Phase 6: Optimization & Laya Operator Governance Endpoints ───────────────
+
+@router.get(
+    "/optimization/status",
+    response_model=OptimizationStatusResponse,
+    dependencies=[Depends(require_roles("admin"))],
+    summary="Get global optimization and Laya sidecar status",
+)
+async def get_optimization_status() -> OptimizationStatusResponse:
+    settings = get_settings()
+    from liteads.ad_server.services.optimization_scheduler import optimization_loop
+    return OptimizationStatusResponse(
+        global_mode=settings.optimization.mode,
+        kill_switch=settings.optimization.kill_switch,
+        enabled=settings.optimization.enabled,
+        pilot_campaign_ids=settings.optimization.pilot_campaign_ids,
+        pilot_count=len(settings.optimization.pilot_campaign_ids),
+        cooldown_seconds=settings.optimization.cooldown_seconds,
+        max_daily_changes=settings.optimization.max_daily_changes_per_campaign,
+        pilot_max_budget_delta_amount=settings.optimization.pilot_max_budget_delta_amount,
+        laya_base_url=settings.laya.base_url,
+        laya_enabled=settings.laya.enabled,
+        loop_is_running=optimization_loop.is_running,
+    )
+
+
+@router.get(
+    "/optimization/decisions",
+    response_model=list[OptimizationDecisionResponse],
+    dependencies=[Depends(require_roles("admin", "advertiser"))],
+    summary="List optimization decision audit records",
+)
+async def list_optimization_decisions(
+    campaign_id: int | None = Query(default=None),
+    outcome: str | None = Query(default=None),
+    mode: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[OptimizationDecision]:
+    stmt = select(OptimizationDecision).order_by(OptimizationDecision.id.desc()).limit(limit)
+
+    if campaign_id is not None:
+        camp = await session.get(Campaign, campaign_id)
+        if not camp:
+            raise _not_found("Campaign", campaign_id)
+        _assert_advertiser_access(user, camp.advertiser_id)
+        stmt = stmt.where(OptimizationDecision.campaign_id == campaign_id)
+    elif user.role != "admin":
+        adv_stmt = select(Campaign.id).where(Campaign.advertiser_id == user.advertiser_id)
+        adv_camps = (await session.execute(adv_stmt)).scalars().all()
+        stmt = stmt.where(OptimizationDecision.campaign_id.in_(adv_camps))
+
+    if outcome is not None:
+        stmt = stmt.where(OptimizationDecision.outcome == outcome)
+    if mode is not None:
+        stmt = stmt.where(OptimizationDecision.mode == mode)
+
+    res = await session.execute(stmt)
+    return list(res.scalars().all())
+
+
+@router.post(
+    "/optimization/decisions/{decision_id}/revert",
+    response_model=DecisionRevertResponse,
+    dependencies=[Depends(require_roles("admin", "advertiser"))],
+    summary="Revert an applied optimization action",
+)
+async def revert_optimization_decision_endpoint(
+    decision_id: str,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> DecisionRevertResponse:
+    stmt = select(OptimizationDecision).where(OptimizationDecision.decision_id == decision_id)
+    res = await session.execute(stmt)
+    decision = res.scalar_one_or_none()
+    if not decision:
+        raise HTTPException(status_code=404, detail=f"Optimization decision {decision_id} not found")
+
+    camp = await session.get(Campaign, decision.campaign_id)
+    if not camp:
+        raise _not_found("Campaign", decision.campaign_id)
+    _assert_advertiser_access(user, camp.advertiser_id)
+
+    executor = OptimizationExecutor(session)
+    try:
+        detail = await executor.revert_decision(
+            decision_id=decision_id,
+            actor=user.email or f"user_{user.id}",
+            auto_commit=True,
+        )
+        return DecisionRevertResponse(
+            decision_id=decision_id,
+            campaign_id=camp.id,
+            status="reverted",
+            detail=detail,
+        )
+    except OptimizationExecutionError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get(
+    "/campaign/{campaign_id}/optimization-state",
+    response_model=CampaignOptimizationStateResponse,
+    dependencies=[Depends(require_roles("admin", "advertiser"))],
+    summary="Get detailed optimization and autopilot state for a campaign",
+)
+async def get_campaign_optimization_state(
+    campaign_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> CampaignOptimizationStateResponse:
+    camp = await session.get(Campaign, campaign_id)
+    if not camp:
+        raise _not_found("Campaign", campaign_id)
+    _assert_advertiser_access(user, camp.advertiser_id)
+
+    settings = get_settings()
+    pilot_ids = settings.optimization.pilot_campaign_ids
+    is_pilot_eligible = bool(pilot_ids and camp.id in pilot_ids)
+    effective_mode = settings.optimization.mode
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    cooldown = timedelta(seconds=settings.optimization.cooldown_seconds)
+    day_ago = now - timedelta(hours=24)
+
+    recent_log_stmt = select(CampaignChangeLog).where(
+        CampaignChangeLog.campaign_id == camp.id,
+        CampaignChangeLog.created_at >= now - cooldown,
+    )
+    in_cooldown = (await session.execute(recent_log_stmt)).scalars().first() is not None
+
+    count_stmt = select(func.count(CampaignChangeLog.id)).where(
+        CampaignChangeLog.campaign_id == camp.id,
+        CampaignChangeLog.created_at >= day_ago,
+    )
+    daily_changes_count = (await session.execute(count_stmt)).scalar() or 0
+
+    last_dec_stmt = (
+        select(OptimizationDecision)
+        .where(OptimizationDecision.campaign_id == camp.id)
+        .order_by(OptimizationDecision.id.desc())
+        .limit(1)
+    )
+    last_dec = (await session.execute(last_dec_stmt)).scalar_one_or_none()
+
+    can_revert = bool(last_dec and last_dec.outcome == "applied")
+    last_dec_resp = OptimizationDecisionResponse.model_validate(last_dec) if last_dec else None
+
+    return CampaignOptimizationStateResponse(
+        campaign_id=camp.id,
+        campaign_name=camp.name,
+        autopilot=bool(camp.autopilot),
+        is_pilot_eligible=is_pilot_eligible,
+        effective_mode=effective_mode,
+        in_cooldown=in_cooldown,
+        daily_changes_count=daily_changes_count,
+        max_daily_changes=settings.optimization.max_daily_changes_per_campaign,
+        impressions=camp.impressions,
+        clicks=camp.clicks,
+        conversions=camp.conversions,
+        spent_today=camp.spent_today,
+        spent_total=camp.spent_total,
+        daily_budget=camp.budget_daily,
+        last_decision=last_dec_resp,
+        can_revert=can_revert,
+    )
+
+
+# ── Phase 7 Operations, Exceptions & Publisher Safety Endpoints ───────────────
+
+@router.get(
+    "/admin/audit-logs",
+    response_model=list[AuditLogResponse],
+    dependencies=[Depends(require_roles("admin"))],
+    summary="Query immutable audit log of administrative and sensitive actions",
+)
+async def list_audit_logs(
+    action: str | None = Query(default=None, description="Filter by action name"),
+    user_id: int | None = Query(default=None, description="Filter by actor user ID"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> list[AuditLog]:
+    stmt = select(AuditLog).order_by(AuditLog.id.desc())
+    if action:
+        stmt = stmt.where(AuditLog.action == action)
+    if user_id is not None:
+        stmt = stmt.where(AuditLog.user_id == user_id)
+    stmt = stmt.offset(offset).limit(limit)
+    res = await session.execute(stmt)
+    return list(res.scalars().all())
+
+
+@router.get(
+    "/admin/dashboard/operational-exceptions",
+    response_model=OperationalExceptionsResponse,
+    dependencies=[Depends(require_roles("admin"))],
+    summary="Operational exception queues and SLA status tracking",
+)
+async def get_operational_exceptions(
+    session: AsyncSession = Depends(get_session),
+) -> OperationalExceptionsResponse:
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    stale_integrations: list[OperationalAlert] = []
+    no_fill_slots: list[OperationalAlert] = []
+    unusual_ctrs: list[OperationalAlert] = []
+    spend_spikes: list[OperationalAlert] = []
+    webhook_payout_failures: list[OperationalAlert] = []
+    moderation_queue: list[SLAItem] = []
+    finance_queue: list[SLAItem] = []
+
+    # 1. Moderation Exception Queue with SLA (24h window)
+    pending_creatives_stmt = (
+        select(Creative)
+        .where(Creative.moderation_status == ModerationStatus.PENDING_REVIEW)
+        .order_by(Creative.created_at.asc())
+        .limit(50)
+    )
+    pending_creatives = (await session.execute(pending_creatives_stmt)).scalars().all()
+    for cr in pending_creatives:
+        created = cr.created_at.replace(tzinfo=None) if cr.created_at else now
+        deadline = created + timedelta(hours=24)
+        rem_sec = (deadline - now).total_seconds()
+        rem_min = int(rem_sec // 60)
+        if rem_sec < 0:
+            sla_status = "BREACHED"
+        elif rem_sec <= 6 * 3600:
+            sla_status = "AT_RISK"
+        else:
+            sla_status = "ON_TRACK"
+
+        moderation_queue.append(
+            SLAItem(
+                id=cr.id,
+                type="creative_moderation",
+                title=f"Creative #{cr.id}: {cr.title}",
+                entity_name=cr.title,
+                created_at=created,
+                sla_deadline=deadline,
+                sla_status=sla_status,
+                time_remaining_minutes=rem_min,
+                details={
+                    "campaign_id": cr.campaign_id,
+                    "landing_url": cr.landing_url,
+                    "moderation_reason": cr.moderation_reason,
+                },
+            )
+        )
+
+    # 2. Finance Exception Queue with SLA (48h window)
+    pending_payouts_stmt = (
+        select(PublisherPayout)
+        .where(PublisherPayout.status == "requested")
+        .order_by(PublisherPayout.created_at.asc())
+        .limit(50)
+    )
+    pending_payouts = (await session.execute(pending_payouts_stmt)).scalars().all()
+    for po in pending_payouts:
+        created = po.created_at.replace(tzinfo=None) if po.created_at else now
+        deadline = created + timedelta(hours=48)
+        rem_sec = (deadline - now).total_seconds()
+        rem_min = int(rem_sec // 60)
+        if rem_sec < 0:
+            sla_status = "BREACHED"
+        elif rem_sec <= 12 * 3600:
+            sla_status = "AT_RISK"
+        else:
+            sla_status = "ON_TRACK"
+
+        finance_queue.append(
+            SLAItem(
+                id=po.id,
+                type="payout_review",
+                title=f"Payout #{po.id} (Publisher {po.publisher_id})",
+                entity_name=f"₹{po.amount}",
+                created_at=created,
+                sla_deadline=deadline,
+                sla_status=sla_status,
+                time_remaining_minutes=rem_min,
+                details={
+                    "publisher_id": po.publisher_id,
+                    "amount": str(po.amount),
+                    "reference_id": po.reference_id,
+                },
+            )
+        )
+
+    open_disputes_stmt = (
+        select(BillingDispute)
+        .where(BillingDispute.status == "OPEN")
+        .order_by(BillingDispute.created_at.asc())
+        .limit(50)
+    )
+    open_disputes = (await session.execute(open_disputes_stmt)).scalars().all()
+    for d in open_disputes:
+        created = d.created_at.replace(tzinfo=None) if d.created_at else now
+        deadline = created + timedelta(hours=48)
+        rem_sec = (deadline - now).total_seconds()
+        rem_min = int(rem_sec // 60)
+        if rem_sec < 0:
+            sla_status = "BREACHED"
+        elif rem_sec <= 12 * 3600:
+            sla_status = "AT_RISK"
+        else:
+            sla_status = "ON_TRACK"
+
+        finance_queue.append(
+            SLAItem(
+                id=d.id,
+                type="dispute",
+                title=f"Dispute #{d.id}: {d.dispute_type}",
+                entity_name=f"₹{d.disputed_amount}",
+                created_at=created,
+                sla_deadline=deadline,
+                sla_status=sla_status,
+                time_remaining_minutes=rem_min,
+                details={
+                    "dispute_type": d.dispute_type,
+                    "advertiser_id": d.advertiser_id,
+                    "publisher_id": d.publisher_id,
+                },
+            )
+        )
+
+    # 3. Stale Integrations
+    stale_props_stmt = (
+        select(PublisherProperty)
+        .where(
+            PublisherProperty.verification_status == "PENDING",
+            PublisherProperty.challenge_expires_at != None,
+            PublisherProperty.challenge_expires_at < now,
+        )
+        .limit(20)
+    )
+    stale_props = (await session.execute(stale_props_stmt)).scalars().all()
+    for p in stale_props:
+        stale_integrations.append(
+            OperationalAlert(
+                code="EXPIRED_PROPERTY_VERIFICATION",
+                severity="medium",
+                title=f"Expired Verification: {p.domain}",
+                description=f"Property {p.name} (#{p.id}) verification challenge expired without completion.",
+                entity_type="property",
+                entity_id=p.id,
+            )
+        )
+
+    # 4. Unusual CTRs
+    high_ctr_stmt = (
+        select(Campaign)
+        .where(
+            Campaign.status == Status.ACTIVE,
+            Campaign.impressions >= 50,
+        )
+        .limit(20)
+    )
+    high_ctr_camps = (await session.execute(high_ctr_stmt)).scalars().all()
+    for c in high_ctr_camps:
+        ctr = (c.clicks / c.impressions) if c.impressions > 0 else 0
+        if ctr > 0.20:
+            unusual_ctrs.append(
+                OperationalAlert(
+                    code="UNUSUAL_CAMPAIGN_CTR",
+                    severity="high" if ctr > 0.35 else "medium",
+                    title=f"Elevated CTR: {c.name} ({round(ctr * 100, 1)}%)",
+                    description=f"Campaign #{c.id} recorded {c.clicks} clicks out of {c.impressions} impressions.",
+                    entity_type="campaign",
+                    entity_id=c.id,
+                )
+            )
+
+    # 5. Spend Spikes (burned >= 80% of daily budget)
+    active_camps_stmt = (
+        select(Campaign)
+        .where(
+            Campaign.status == Status.ACTIVE,
+            Campaign.budget_daily > Decimal("0"),
+        )
+        .limit(50)
+    )
+    active_camps = (await session.execute(active_camps_stmt)).scalars().all()
+    for c in active_camps:
+        if c.spent_today >= (c.budget_daily * Decimal("0.8")):
+            spend_spikes.append(
+                OperationalAlert(
+                    code="BUDGET_PACING_SPIKE",
+                    severity="high" if c.spent_today >= c.budget_daily else "medium",
+                    title=f"Budget Burn Spike: {c.name}",
+                    description=f"Campaign #{c.id} reached {round(float(c.spent_today / c.budget_daily) * 100)}% of daily budget (₹{c.spent_today}/₹{c.budget_daily}).",
+                    entity_type="campaign",
+                    entity_id=c.id,
+                )
+            )
+
+    # 6. Webhook / Payout Failures
+    failed_payouts_stmt = (
+        select(PublisherPayout)
+        .where(PublisherPayout.status.in_(("failed", "rejected")))
+        .order_by(PublisherPayout.created_at.desc())
+        .limit(20)
+    )
+    failed_payouts = (await session.execute(failed_payouts_stmt)).scalars().all()
+    for fp in failed_payouts:
+        webhook_payout_failures.append(
+            OperationalAlert(
+                code="PAYOUT_EXECUTION_FAILURE",
+                severity="high" if fp.status == "failed" else "medium",
+                title=f"Payout {fp.status.capitalize()}: #{fp.id}",
+                description=f"Payout of ₹{fp.amount} to Publisher #{fp.publisher_id} {fp.status}: {fp.notes or 'No reason provided'}",
+                entity_type="payout",
+                entity_id=fp.id,
+            )
+        )
+
+    # 7. No-fill slots
+    slots_stmt = select(AdSlot).where(AdSlot.status == Status.ACTIVE).limit(20)
+    slots = (await session.execute(slots_stmt)).scalars().all()
+    for s in slots:
+        ev_stmt = select(func.count(AdEvent.id)).where(AdEvent.slot_id == s.slot_id)
+        ev_count = (await session.execute(ev_stmt)).scalar() or 0
+        if ev_count == 0 and s.created_at and (now - s.created_at.replace(tzinfo=None)).days >= 3:
+            no_fill_slots.append(
+                OperationalAlert(
+                    code="ZERO_FILL_PLACEMENT",
+                    severity="low",
+                    title=f"Zero Impressions: {s.name} ({s.slot_id})",
+                    description=f"Slot '{s.name}' has recorded zero impressions since creation.",
+                    entity_type="slot",
+                    entity_id=s.id,
+                )
+            )
+
+    total_count = (
+        len(stale_integrations)
+        + len(no_fill_slots)
+        + len(unusual_ctrs)
+        + len(spend_spikes)
+        + len(webhook_payout_failures)
+        + len(moderation_queue)
+        + len(finance_queue)
+    )
+
+    return OperationalExceptionsResponse(
+        stale_integrations=stale_integrations,
+        no_fill_slots=no_fill_slots,
+        unusual_ctrs=unusual_ctrs,
+        spend_spikes=spend_spikes,
+        webhook_payout_failures=webhook_payout_failures,
+        moderation_queue=moderation_queue,
+        finance_queue=finance_queue,
+        total_exceptions_count=total_count,
+    )
+
+
+@router.get(
+    "/publisher/{publisher_id}/safety-summary",
+    response_model=PublisherSafetySummaryResponse,
+    dependencies=[Depends(require_roles("admin", "publisher"))],
+    summary="Publisher-facing traffic quality and safety score summary",
+)
+async def get_publisher_safety_summary(
+    publisher_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> PublisherSafetySummaryResponse:
+    _assert_publisher_access(user, publisher_id)
+    pub = await session.get(Publisher, publisher_id)
+    if not pub:
+        raise _not_found("Publisher", publisher_id)
+
+    ivt_service = IVTService(session)
+    summary = await ivt_service.get_publisher_safety_summary(publisher_id)
+    return PublisherSafetySummaryResponse(
+        publisher_id=summary.publisher_id,
+        quality_score=summary.quality_score,
+        total_events=summary.total_events,
+        valid_events=summary.valid_events,
+        invalid_events=summary.invalid_events,
+        invalid_rate_pct=summary.invalid_rate_pct,
+        warning_categories=[
+            WarningCategorySchema(
+                title=w["title"],
+                description=w["description"],
+                count=w["count"],
+                severity=w["severity"],
+            )
+            for w in summary.warning_categories
+        ],
+        recommendations=summary.recommendations,
+    )
+
+
+@router.get(
+    "/publisher/{publisher_id}/earnings-breakdown",
+    response_model=PublisherEarningsBreakdownResponse,
+    dependencies=[Depends(require_roles("admin", "publisher"))],
+    summary="Detailed publisher earnings breakdown",
+)
+async def get_publisher_earnings_breakdown_management(
+    publisher_id: int,
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
+) -> PublisherEarningsBreakdownResponse:
+    _assert_publisher_access(user, publisher_id)
+    pub = await session.get(Publisher, publisher_id)
+    if not pub:
+        raise _not_found("Publisher", publisher_id)
+
+    data = await BillingService.get_publisher_earnings_breakdown(session, publisher_id)
+    return PublisherEarningsBreakdownResponse(**data)
+

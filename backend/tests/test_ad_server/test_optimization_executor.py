@@ -5,8 +5,18 @@ from sqlalchemy import select
 from liteads.models.ad import Campaign, Advertiser, Suggestion, CampaignChangeLog, TargetingRule
 from liteads.ad_server.services.optimization_policy import OptimizationPolicyResult
 from liteads.ad_server.services.optimization_executor import OptimizationExecutor, OptimizationExecutionError
+from liteads.common.config import get_settings
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+def set_autopilot_mode():
+    settings = get_settings()
+    old_mode = settings.optimization.mode
+    settings.optimization.mode = "autopilot"
+    yield
+    settings.optimization.mode = old_mode
 
 
 @pytest.fixture

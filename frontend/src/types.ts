@@ -128,6 +128,56 @@ export interface PropertyChallengeResponse {
   challenge_expires_at: string;
   instructions: string;
 }
+export interface ReadinessIssue {
+  code: string;
+  category: "blocker" | "warning";
+  entity_type: "campaign" | "ad_set" | "creative" | "advertiser";
+  entity_id?: number | null;
+  entity_name?: string | null;
+  field?: string | null;
+  message: string;
+}
+
+export interface CampaignReadinessResponse {
+  campaign_id: number;
+  campaign_name: string;
+  status: number;
+  status_name: string;
+  is_ready: boolean;
+  blockers: ReadinessIssue[];
+  warnings: ReadinessIssue[];
+  summary: {
+    wallet_balance: number;
+    budget_daily: number;
+    budget_total: number;
+    bid_type: number;
+    bid_amount: number;
+    freq_cap_daily: number;
+    freq_cap_hourly: number;
+    start_time?: string | null;
+    end_time?: string | null;
+    total_ad_sets: number;
+    active_ad_sets: number;
+    total_creatives: number;
+    active_creatives: number;
+    approved_creatives: number;
+    unapproved_creatives: number;
+    verified_creatives: number;
+    unverified_creatives: number;
+    has_targeting: boolean;
+    ad_sets: Array<{
+      id: number;
+      name: string;
+      status: number;
+      daily_budget: number | null;
+      bid_amount: number;
+      ads_count: number;
+      active_ads_count: number;
+      has_targeting: boolean;
+    }>;
+  };
+}
+
 export interface SuggestionAction {
   action: string;
   confidence?: number;
@@ -696,6 +746,77 @@ export interface WebsiteAIGenerateSectionResponse {
   quota_remaining: number;
   daily_limit: number;
   reset_timestamp_utc: string;
+}
+
+// ── Phase 7 Operations, Exceptions, SLA & Audit Types ────────────────────────
+
+export interface SLAItem {
+  id: number | string;
+  type: string;
+  title: string;
+  entity_name?: string;
+  created_at: string;
+  sla_deadline: string;
+  sla_status: "ON_TRACK" | "AT_RISK" | "BREACHED";
+  time_remaining_minutes: number;
+  details?: Record<string, any>;
+}
+
+export interface OperationalAlert {
+  code: string;
+  severity: "high" | "medium" | "low";
+  title: string;
+  description: string;
+  entity_type: string;
+  entity_id?: number | string;
+  count: number;
+}
+
+export interface OperationalExceptionsResponse {
+  stale_integrations: OperationalAlert[];
+  no_fill_slots: OperationalAlert[];
+  unusual_ctrs: OperationalAlert[];
+  spend_spikes: OperationalAlert[];
+  webhook_payout_failures: OperationalAlert[];
+  moderation_queue: SLAItem[];
+  finance_queue: SLAItem[];
+  total_exceptions_count: number;
+}
+
+export interface AuditLogItem {
+  id: number;
+  user_id?: number;
+  action: string;
+  ip_address?: string;
+  details?: string;
+  created_at: string;
+}
+
+export interface PublisherSafetySummary {
+  publisher_id: number;
+  quality_score: number;
+  total_events: number;
+  valid_events: number;
+  invalid_events: number;
+  invalid_rate_pct: number;
+  warning_categories: Array<{
+    title: string;
+    description: string;
+    count: number;
+    severity: string;
+  }>;
+  recommendations: string[];
+}
+
+export interface PublisherEarningsBreakdown {
+  publisher_id: number;
+  currency: string;
+  estimated: number | string;
+  under_review: number | string;
+  finalised: number | string;
+  adjusted: number | string;
+  payable: number | string;
+  paid: number | string;
 }
 
 declare global {

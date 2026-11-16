@@ -168,6 +168,10 @@ class AdRequest(BaseModel):
         None,
         description="Privacy and regulatory consent signals (e.g. {'gdpr': True, 'coppa': False}).",
     )
+    consent_token: str | None = Field(
+        None,
+        description="Signed visitor consent token proof (Phase 1).",
+    )
     is_sandbox: bool = Field(
         False,
         description="Sandbox testing mode indicator.",

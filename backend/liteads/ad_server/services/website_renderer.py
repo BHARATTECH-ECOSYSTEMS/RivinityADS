@@ -646,7 +646,7 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
           {% if is_monetized and not is_preview and block.content.ad_slot_id %}
           <div class="rivinity-live-ad-container" role="region" aria-label="Sponsored Advertisement" data-od-protected="true" data-od-editable="false">
             <div id="rivinity-ad-{{ block.content.ad_slot_id }}{% if block.id %}-{{ block.id }}{% endif %}" class="rivinity-ad-slot" data-slot-id="{{ block.content.ad_slot_id }}" data-format="{{ block.content.format or 1 }}" data-od-protected="true" data-od-editable="false">
-              <script async src="/static/rivinity.js" data-slot="{{ block.content.ad_slot_id }}" data-format="{{ block.content.format or 1 }}" data-od-protected="true"></script>
+              <script async src="/static/rivinity.js" data-slot="{{ block.content.ad_slot_id }}" data-format="{{ block.content.format or 1 }}" data-site="{{ site_slug }}" data-od-protected="true"></script>
             </div>
             <div class="ad-label" style="font-size:0.6875rem;color:#94a3b8;text-align:right;margin-top:2px;" data-od-protected="true" data-od-editable="false">Sponsored</div>
           </div>
@@ -691,15 +691,43 @@ _PAGE_TEMPLATE = """<!DOCTYPE html>
   </footer>
 
   {% if is_monetized and not is_preview %}
-  <aside id="rivinity-consent-banner" class="rivinity-consent-banner" role="dialog" aria-label="Privacy and Advertising Choices" data-od-protected="true" data-od-editable="false" style="position:fixed;bottom:0;left:0;right:0;background:#1e293b;color:#f8fafc;padding:1rem 1.5rem;display:flex;align-items:center;justify-content:space-between;gap:1rem;z-index:999;box-shadow:0 -4px 12px rgba(0,0,0,0.15);font-size:0.875rem;">
-    <div style="max-width:800px;" data-od-protected="true" data-od-editable="false">
-      <strong>Privacy & Advertising Choices:</strong> This website is monetized through RivinityADS. We and our advertising partners use cookies and device identifiers to measure ad performance.
+  <aside id="rivinity-consent-banner" class="rivinity-consent-banner" role="dialog" aria-label="Privacy and Advertising Choices" data-site="{{ site_slug }}" data-policy-version="v1.0" data-od-protected="true" data-od-editable="false" style="position:fixed;bottom:0;left:0;right:0;background:#1e293b;color:#f8fafc;padding:1rem 1.5rem;display:flex;align-items:center;justify-content:space-between;gap:1rem;z-index:999;box-shadow:0 -4px 12px rgba(0,0,0,0.15);font-size:0.875rem;">
+    <div style="max-width:700px;" data-od-protected="true" data-od-editable="false">
+      <strong>Privacy &amp; Advertising Choices:</strong> This website is monetized through RivinityADS. We and our advertising partners use cookies and device identifiers to personalize and measure ad performance. Non-essential categories default to denied.
     </div>
     <div style="display:flex;gap:0.75rem;flex-shrink:0;" data-od-protected="true" data-od-editable="false">
-      <button id="rivinity-consent-accept" class="btn btn-primary" style="padding:0.4rem 1rem;font-size:0.8125rem;" data-od-protected="true" data-od-editable="false">Accept</button>
+      <button id="rivinity-consent-accept" class="btn btn-primary" style="padding:0.4rem 1rem;font-size:0.8125rem;" data-od-protected="true" data-od-editable="false">Accept All</button>
       <button id="rivinity-consent-decline" class="btn btn-secondary" style="padding:0.4rem 1rem;font-size:0.8125rem;" data-od-protected="true" data-od-editable="false">Decline</button>
+      <button id="rivinity-consent-manage" class="btn btn-outline" style="padding:0.4rem 0.8rem;font-size:0.8125rem;background:transparent;color:#94a3b8;border:1px solid #475569;" data-od-protected="true" data-od-editable="false">Manage</button>
     </div>
   </aside>
+
+  <!-- Granular Consent Management Dialog -->
+  <dialog id="rivinity-consent-modal" class="rivinity-consent-modal" role="dialog" aria-label="Manage Privacy Preferences" data-od-protected="true" data-od-editable="false" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1e293b;color:#f8fafc;padding:1.5rem 2rem;border-radius:12px;border:1px solid #334155;z-index:1000;box-shadow:0 20px 25px -5px rgba(0,0,0,0.5);max-width:500px;width:90%;">
+    <h3 style="margin-top:0;font-size:1.125rem;color:#f8fafc;">Privacy &amp; Consent Preferences</h3>
+    <p style="font-size:0.8125rem;color:#94a3b8;line-height:1.4;">Configure how your data and identifiers are processed for advertising and analytics. Non-essential categories are disabled by default.</p>
+    <div style="margin:1rem 0;display:flex;flex-direction:column;gap:0.75rem;">
+      <label style="display:flex;align-items:center;justify-content:space-between;padding:0.5rem 0.75rem;background:#0f172a;border-radius:6px;font-size:0.8125rem;">
+        <span><strong>Essential Services:</strong> Required for site operation</span>
+        <input type="checkbox" id="rivinity-consent-opt-necessary" checked disabled style="cursor:not-allowed;">
+      </label>
+      <label style="display:flex;align-items:center;justify-content:space-between;padding:0.5rem 0.75rem;background:#0f172a;border-radius:6px;font-size:0.8125rem;">
+        <span><strong>Advertising &amp; Delivery:</strong> Personalized ad delivery and measurement</span>
+        <input type="checkbox" id="rivinity-consent-opt-ad" style="cursor:pointer;">
+      </label>
+      <label style="display:flex;align-items:center;justify-content:space-between;padding:0.5rem 0.75rem;background:#0f172a;border-radius:6px;font-size:0.8125rem;">
+        <span><strong>Analytics:</strong> Traffic and outcome measurement</span>
+        <input type="checkbox" id="rivinity-consent-opt-analytics" style="cursor:pointer;">
+      </label>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:0.75rem;margin-top:1.25rem;">
+      <button id="rivinity-consent-modal-cancel" class="btn btn-secondary" style="padding:0.4rem 1rem;font-size:0.8125rem;">Cancel</button>
+      <button id="rivinity-consent-modal-save" class="btn btn-primary" style="padding:0.4rem 1rem;font-size:0.8125rem;">Save Preferences</button>
+    </div>
+  </dialog>
+
+  <!-- Persistent Reopen Trigger for Withdrawal/Settings -->
+  <button id="rivinity-consent-reopen" class="rivinity-privacy-trigger" data-site="{{ site_slug }}" data-od-protected="true" data-od-editable="false" style="display:none;position:fixed;bottom:12px;left:12px;z-index:998;background:#1e293b;color:#94a3b8;font-size:0.6875rem;padding:4px 10px;border-radius:9999px;border:1px solid #334155;cursor:pointer;">Privacy Choices</button>
   {% endif %}
 
   {% if bridge_nonce %}
@@ -2499,6 +2527,7 @@ class SafeWebsiteRenderer:
             footer_links=footer_links,
             footer_copyright=footer_copyright,
             footer_block_id=footer_block_id,
+            site_slug=project_dict.get("slug", ""),
             is_preview=is_preview,
             is_monetized=is_monetized,
             bridge_nonce=bridge_nonce,

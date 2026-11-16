@@ -484,6 +484,64 @@ async def request_ads(
                 detail=f"Referer '{referer_host or referer_header}' is not authorized for this ad slot.",
             )
 
+    # Phase 1: Visitor Consent Gate for Website Placements
+    # Ad delivery on websites strictly requires verified visitor consent.
+    from liteads.models.website import WebsiteProject, WebsiteConsentLog
+    from liteads.common.tracking_sig import verify_consent_token
+
+    website_proj = None
+    if slot.property_id:
+        proj_res = await session.execute(
+            select(WebsiteProject).where(WebsiteProject.property_id == slot.property_id)
+        )
+        website_proj = proj_res.scalar_one_or_none()
+
+    if website_proj and not is_sandbox and not is_trusted_s2s:
+        # 1. Check for signed visitor consent token proof
+        consent_token = ad_request.consent_token or request.headers.get("X-Consent-Token")
+        is_consented = False
+        if consent_token:
+            token_data = verify_consent_token(
+                consent_token,
+                expected_site_slug=website_proj.slug,
+                expected_project_id=website_proj.id,
+            )
+            if token_data.get("is_granted"):
+                is_consented = True
+            else:
+                logger.info(
+                    "Ad request suppressed: visitor declined advertising consent",
+                    slot_id=ad_request.slot_id,
+                    site_slug=website_proj.slug,
+                )
+                return AdListResponse(ads=[], total=0)
+        else:
+            # 2. Check for trusted stored consent state via privacy hash
+            raw_ip = request.client.host if request.client else None
+            ip_h = hashlib.sha256(raw_ip.encode("utf-8")).hexdigest() if raw_ip else None
+            if ip_h:
+                c_stmt = (
+                    select(WebsiteConsentLog)
+                    .where(
+                        WebsiteConsentLog.project_id == website_proj.id,
+                        WebsiteConsentLog.consent_type == "visitor_consent",
+                        WebsiteConsentLog.client_ip_hash == ip_h,
+                    )
+                    .order_by(WebsiteConsentLog.recorded_at.desc())
+                    .limit(1)
+                )
+                stored_log = (await session.execute(c_stmt)).scalar_one_or_none()
+                if stored_log and stored_log.is_granted:
+                    is_consented = True
+
+        if not is_consented:
+            logger.info(
+                "Ad request suppressed: visitor consent missing or not granted (default to denied)",
+                slot_id=ad_request.slot_id,
+                site_slug=website_proj.slug,
+            )
+            return AdListResponse(ads=[], total=0)
+
     # Serve ads
     candidates = await ad_service.serve_ads(
         request=ad_request,
@@ -631,6 +689,20 @@ async def serve_ad_iframe(
             .where(AdSlot.slot_id == slot_id)
         )
         slot = slot_res.scalar_one_or_none()
+        if slot:
+            if slot.status != Status.ACTIVE:
+                logger.warning("iframe_slot_inactive", slot_id=slot_id)
+                return HTMLResponse(content="<!-- slot inactive -->", status_code=400)
+            if slot.publisher and slot.publisher.status != Status.ACTIVE:
+                logger.warning("iframe_publisher_inactive_or_suspended", slot_id=slot_id)
+                return HTMLResponse(content="<!-- publisher inactive or suspended -->", status_code=400)
+            if slot.property and slot.property.status != Status.ACTIVE:
+                logger.warning("iframe_property_inactive_or_suspended", slot_id=slot_id)
+                return HTMLResponse(content="<!-- publisher property inactive or suspended -->", status_code=400)
+            if slot.property and slot.property.verification_status != "VERIFIED":
+                logger.warning("iframe_property_not_verified", slot_id=slot_id)
+                return HTMLResponse(content="<!-- publisher property not verified -->", status_code=403)
+
         if slot and request:
             target_domain = (
                 (slot.property.domain if slot.property and slot.property.domain else None)

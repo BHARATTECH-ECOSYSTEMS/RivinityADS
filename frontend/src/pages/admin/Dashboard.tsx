@@ -5,10 +5,18 @@ import {
   listAdvertisers, 
   listCampaigns, 
   listPublishers,
+  getOperationalExceptions,
 } from "../../api/client";
 import StatCard from "../../components/StatCard";
 import { money, num } from "../../lib/format";
-import type { HealthResponse, Advertiser, Campaign, Publisher } from "../../types";
+import type { 
+  HealthResponse, 
+  Advertiser, 
+  Campaign, 
+  Publisher,
+  OperationalExceptionsResponse,
+  SLAItem,
+} from "../../types";
 import {
   PageContainer,
   PageHeader,
@@ -30,12 +38,17 @@ export default function AdminDashboard() {
   const [publishers, setPublishers] = useState<Publisher[]>([]);
   const [loadingStats, setLoadingStats] = useState(true);
 
+  // Operational Exceptions & SLA Tracking (Phase 7)
+  const [exceptions, setExceptions] = useState<OperationalExceptionsResponse | null>(null);
+  const [loadingExceptions, setLoadingExceptions] = useState(true);
+
   // Search & Investigation query
   const [searchQuery, setSearchQuery] = useState("");
 
   const reloadData = async () => {
     setLoadingHealth(true);
     setLoadingStats(true);
+    setLoadingExceptions(true);
 
     getHealth()
       .then(setHealth)
@@ -50,6 +63,11 @@ export default function AdminDashboard() {
       })
       .catch(() => {})
       .finally(() => setLoadingStats(false));
+
+    getOperationalExceptions()
+      .then(setExceptions)
+      .catch(() => {})
+      .finally(() => setLoadingExceptions(false));
   };
 
   useEffect(() => {
@@ -266,6 +284,134 @@ export default function AdminDashboard() {
           )}
         </Card>
       </div>
+
+      {/* Phase 7 — Operational Exceptions & SLA Tracking Queues */}
+      <Card
+        title="Operational Exceptions & SLA Tracking"
+        subtitle="Active review queues, SLA countdowns, and automated platform alerts."
+      >
+        {loadingExceptions ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: "10px", padding: "12px 0" }}>
+            <LoadingSkeleton variant="rect" height={60} />
+            <LoadingSkeleton variant="rect" height={60} />
+          </div>
+        ) : !exceptions || exceptions.total_exceptions_count === 0 ? (
+          <div style={{ textAlign: "center", padding: "24px 0", color: "var(--color-text-muted)", fontSize: "0.875rem" }}>
+            All operations running smoothly. Zero active exception items or breached SLAs.
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+            {/* System Alerts Row */}
+            {exceptions.stale_integrations.length + exceptions.no_fill_slots.length + exceptions.unusual_ctrs.length + exceptions.spend_spikes.length + exceptions.webhook_payout_failures.length > 0 && (
+              <div>
+                <div style={{ fontSize: "0.8125rem", fontWeight: 700, color: "var(--color-text-muted)", textTransform: "uppercase", marginBottom: "8px" }}>
+                  Active Operational Warnings
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "12px" }}>
+                  {[
+                    ...exceptions.spend_spikes,
+                    ...exceptions.unusual_ctrs,
+                    ...exceptions.webhook_payout_failures,
+                    ...exceptions.stale_integrations,
+                    ...exceptions.no_fill_slots,
+                  ].map((alert, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        padding: "12px",
+                        borderRadius: "var(--radius-md)",
+                        background: alert.severity === "high" ? "rgba(239, 68, 68, 0.08)" : "var(--color-bg-subtle)",
+                        border: `1px solid ${alert.severity === "high" ? "rgba(239, 68, 68, 0.3)" : "var(--border-color)"}`,
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+                        <span style={{ fontWeight: 600, fontSize: "0.8125rem" }}>{alert.title}</span>
+                        <StatusBadge
+                          status={alert.severity === "high" ? "failed" : "warning"}
+                          label={alert.severity.toUpperCase()}
+                          size="sm"
+                        />
+                      </div>
+                      <div style={{ fontSize: "0.75rem", color: "var(--color-text-secondary)" }}>
+                        {alert.description}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* SLA Queues Grid */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+              {/* Moderation Queue */}
+              <div style={{ border: "1px solid var(--border-color)", borderRadius: "var(--radius-md)", padding: "14px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+                  <div style={{ fontWeight: 600, fontSize: "0.875rem" }}>
+                    Creative Moderation Queue ({exceptions.moderation_queue.length})
+                  </div>
+                  <Link to="/admin/creatives" className="btn btn-secondary btn-sm" style={{ fontSize: "11px", padding: "2px 8px" }}>
+                    Review All
+                  </Link>
+                </div>
+                {exceptions.moderation_queue.length === 0 ? (
+                  <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)" }}>No creatives awaiting moderation.</div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "200px", overflowY: "auto" }}>
+                    {exceptions.moderation_queue.slice(0, 5).map((item) => (
+                      <div key={item.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 8px", background: "var(--color-bg-subtle)", borderRadius: "var(--radius-sm)", fontSize: "0.75rem" }}>
+                        <div>
+                          <strong>{item.title}</strong>
+                          <div style={{ color: "var(--color-text-muted)", fontSize: "11px" }}>
+                            {item.time_remaining_minutes < 0 ? `Breached by ${Math.abs(item.time_remaining_minutes)}m` : `${item.time_remaining_minutes}m remaining`}
+                          </div>
+                        </div>
+                        <StatusBadge
+                          status={item.sla_status === "ON_TRACK" ? "success" : item.sla_status === "AT_RISK" ? "warning" : "failed"}
+                          label={item.sla_status}
+                          size="sm"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Finance Queue */}
+              <div style={{ border: "1px solid var(--border-color)", borderRadius: "var(--radius-md)", padding: "14px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+                  <div style={{ fontWeight: 600, fontSize: "0.875rem" }}>
+                    Finance Exception Queue ({exceptions.finance_queue.length})
+                  </div>
+                  <Link to="/admin/finance" className="btn btn-secondary btn-sm" style={{ fontSize: "11px", padding: "2px 8px" }}>
+                    Review Ledger
+                  </Link>
+                </div>
+                {exceptions.finance_queue.length === 0 ? (
+                  <div style={{ fontSize: "0.75rem", color: "var(--color-text-muted)" }}>No pending payouts or disputes.</div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "200px", overflowY: "auto" }}>
+                    {exceptions.finance_queue.slice(0, 5).map((item) => (
+                      <div key={item.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 8px", background: "var(--color-bg-subtle)", borderRadius: "var(--radius-sm)", fontSize: "0.75rem" }}>
+                        <div>
+                          <strong>{item.title}</strong> ({item.entity_name})
+                          <div style={{ color: "var(--color-text-muted)", fontSize: "11px" }}>
+                            {item.time_remaining_minutes < 0 ? `Breached by ${Math.abs(item.time_remaining_minutes)}m` : `${item.time_remaining_minutes}m remaining`}
+                          </div>
+                        </div>
+                        <StatusBadge
+                          status={item.sla_status === "ON_TRACK" ? "success" : item.sla_status === "AT_RISK" ? "warning" : "failed"}
+                          label={item.sla_status}
+                          size="sm"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </Card>
     </PageContainer>
   );
 }

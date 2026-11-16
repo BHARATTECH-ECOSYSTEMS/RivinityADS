@@ -25,10 +25,13 @@ logger = structlog.get_logger(__name__)
 class AIPublisherAdapter(BasePublisherConnector):
     """
     Adapter for delivering inventory on partner AI platforms with signed contracts.
+    
+    Lacks public self-serve open delivery; strictly EXPERIMENTAL / partner-contract-only.
     """
 
     provider = "ai_publisher"
     platform_name = "Rivinity Verified AI Publisher"
+    adapter_mode = "EXPERIMENTAL"
 
     def __init__(self, publisher_id: int, contract: Any | None = None):
         super().__init__(publisher_id, contract)
@@ -42,14 +45,18 @@ class AIPublisherAdapter(BasePublisherConnector):
             supports_account_discovery=False,
             supports_campaign_management=False,
             supports_reporting_sync=True,
+            adapter_mode="EXPERIMENTAL",
+            is_experimental=True,
+            is_simulated=False,
             supported_objectives=["NATIVE_DELIVERY", "RECOMMENDATION"],
             supported_bidding_strategies=["FLOOR_PRICE", "FIRST_PRICE", "SECOND_PRICE"],
             supported_targeting=["CONTEXTUAL_SECTOR", "GEO_COARSE", "DEVICE_TYPE"],
             supported_creative_types=["NATIVE_CARD", "SPONSORED_RECOMMENDATION", "TEXT_SNIPPET"],
             limitations=[
-                "Requires an active signed inventory agreement and legal contract ID.",
+                "EXPERIMENTAL / PARTNER-CONTRACT ONLY: Requires an active signed inventory agreement and legal contract ID.",
                 "Delivery restricted strictly to pre-approved surfaces listed in the contract.",
                 "Contract must be unexpired and policy-compliance verified.",
+                "Empty delivery results indicate absence of matching supply; empty results must never be treated as an active connected supply source.",
             ],
             auth_requirements=[
                 "Signed agreement ID (e.g. AGR-AI-2026-XXXX)",

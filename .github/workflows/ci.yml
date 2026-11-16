@@ -35,10 +35,13 @@ jobs:
 
       - name: Validate Alembic Migration Head
         run: |
+          export PYTHONPATH="backend"
+          EXPECTED_HEAD=$(python -m liteads.common.alembic_utils | tail -n 1)
+          echo "Authoritative Alembic Head from Graph: $EXPECTED_HEAD"
           HEAD_OUTPUT=$(alembic -c backend/alembic.ini heads)
           echo "Current Alembic Head: $HEAD_OUTPUT"
-          if [[ "$HEAD_OUTPUT" != *"r0a1b2c3d4e5"* ]]; then
-            echo "ERROR: Expected migration head r0a1b2c3d4e5, got: $HEAD_OUTPUT"
+          if [[ "$HEAD_OUTPUT" != *"$EXPECTED_HEAD"* ]]; then
+            echo "ERROR: Expected migration head $EXPECTED_HEAD, got: $HEAD_OUTPUT"
             exit 1
           fi
           HEAD_COUNT=$(echo "$HEAD_OUTPUT" | wc -l)
@@ -49,7 +52,8 @@ jobs:
 
       - name: Run Core & Regression Pytest Suites
         run: |
-          pytest backend/tests/test_api/test_phase11_conversion_measurement.py \
+          pytest backend/tests/test_api/test_phase0_migration_truthfulness.py \
+                 backend/tests/test_api/test_phase11_conversion_measurement.py \
                  backend/tests/test_api/test_phase10f_monetization_consent.py \
                  backend/tests/test_api/test_phase10g_security_e2e.py \
                  backend/tests/test_api/test_phase9_3_persistence_lifecycle.py \
@@ -95,7 +99,7 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U liteads -d liteads"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5

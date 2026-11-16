@@ -18,6 +18,10 @@ class TransactionResponse(BaseModel):
     publisher_id: int | None = None
     campaign_id: int | None = None
     reference_id: str | None = None
+    provider_event_id: str | None = None
+    rev_share_rate: Decimal | None = None
+    hold_until: datetime | None = None
+    is_cleared: bool = True
     description: str | None = None
     created_at: datetime
 
@@ -162,5 +166,29 @@ class ReconciliationResponse(BaseModel):
     total_ivt_events: int
     ivt_suppressed_spend: Decimal
     discrepancies: list[dict[str, Any]]
+    unresolved_queue: list[dict[str, Any]] = Field(default_factory=list)
     alerts: list[str]
+
+
+class PublisherEarningsBreakdownResponse(BaseModel):
+    """Publisher earnings breakdown across lifecycle states."""
+
+    publisher_id: int
+    currency: str = "INR"
+    estimated: Decimal
+    under_review: Decimal
+    finalised: Decimal
+    adjusted: Decimal
+    payable: Decimal
+    paid: Decimal
+
+
+class PublisherAdjustmentRequest(BaseModel):
+    """Admin manual adjustment request for publisher earnings."""
+
+    amount: Decimal = Field(..., gt=0, description="Positive adjustment amount to deduct")
+    reason: str = Field(..., min_length=3, description="Auditable adjustment reason")
+    reference_id: str | None = None
+    campaign_id: int | None = None
+
 

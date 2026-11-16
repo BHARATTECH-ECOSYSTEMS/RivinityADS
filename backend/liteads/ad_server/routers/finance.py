@@ -2,10 +2,11 @@
 Finance API endpoints.
 """
 
+from datetime import date, time, datetime
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import select
+from sqlalchemy import select, or_, and_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from decimal import Decimal
@@ -16,6 +17,7 @@ from liteads.common.database import get_session
 from liteads.common.logger import get_logger
 from liteads.common.security import current_user, require_roles, verified_user
 from liteads.models import Advertiser, Publisher, User
+from liteads.models.auth import AuditLog
 from liteads.models.finance import BillingDispute, PaymentRequest, PublisherPayout, Transaction
 from liteads.schemas.finance import (
     DepositRequest, 
@@ -27,6 +29,8 @@ from liteads.schemas.finance import (
     PayoutRecordResponse,
     PayoutRejectRequest,
     PayoutRequest, 
+    PublisherAdjustmentRequest,
+    PublisherEarningsBreakdownResponse,
     ReconciliationRequest,
     ReconciliationResponse,
     TransactionResponse,
@@ -148,87 +152,115 @@ async def razorpay_webhook(
         
     event = payload.get("event")
     
-    if event not in ("order.paid", "qr_code.credited"):
-        return {"status": "ignored", "reason": "unsupported event"}
-        
+    provider_event_id = payload.get("event_id") or payload.get("id")
+
     if event == "order.paid":
         order_entity = payload.get("payload", {}).get("order", {}).get("entity", {})
-        if not order_entity:
+        payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
+        if not order_entity and not payment_entity:
             return {"status": "ignored", "reason": "missing order entity"}
-            
-        order_id = order_entity.get("id")
-        amount_in_paise = order_entity.get("amount", 0)
-        currency = order_entity.get("currency", "")
-        receipt = order_entity.get("receipt", "")
-        status = order_entity.get("status")
-        
+
+        order_id = order_entity.get("id") or (payment_entity.get("order_id") if payment_entity else None)
+        amount_in_paise = order_entity.get("amount") or (payment_entity.get("amount", 0) if payment_entity else 0)
+        currency = order_entity.get("currency") or (payment_entity.get("currency", "") if payment_entity else "")
+        receipt = order_entity.get("receipt") or (payment_entity.get("notes", {}).get("receipt", "") if payment_entity else "")
+        status = order_entity.get("status") or (payment_entity.get("status") if payment_entity else None)
+        provider_event_id = provider_event_id or (payment_entity.get("id") if payment_entity else order_id)
+
         if not order_id:
             return {"status": "ignored", "reason": "missing order_id"}
-        if status != "paid":
+        if status not in ("paid", "captured"):
             return {"status": "ignored", "reason": "order not paid"}
-    else:
-        # qr_code.credited
+
+    elif event == "payment.captured":
+        payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
+        if not payment_entity:
+            return {"status": "ignored", "reason": "missing payment entity"}
+
+        order_id = payment_entity.get("order_id") or payment_entity.get("id")
+        amount_in_paise = payment_entity.get("amount", 0)
+        currency = payment_entity.get("currency", "")
+        receipt = payment_entity.get("notes", {}).get("receipt", "")
+        status = payment_entity.get("status")
+        provider_event_id = provider_event_id or payment_entity.get("id")
+
+        if not order_id:
+            return {"status": "ignored", "reason": "missing order_id"}
+        if status != "captured":
+            return {"status": "ignored", "reason": "payment not captured"}
+
+    elif event == "qr_code.credited":
         payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
         qr_code_entity = payload.get("payload", {}).get("qr_code", {}).get("entity", {})
         if not payment_entity or not qr_code_entity:
             return {"status": "ignored", "reason": "missing payment or qr_code entity"}
-            
+
         order_id = qr_code_entity.get("id")
         amount_in_paise = payment_entity.get("amount", 0)
         currency = payment_entity.get("currency", "")
         receipt = payment_entity.get("notes", {}).get("receipt", "")
         status = payment_entity.get("status")
-        
+        provider_event_id = provider_event_id or payment_entity.get("id") or order_id
+
         if not order_id:
             return {"status": "ignored", "reason": "missing qr_id"}
         if status != "captured":
             return {"status": "ignored", "reason": "payment not captured"}
-        
+    else:
+        return {"status": "ignored", "reason": "unsupported event"}
+
     if currency != "INR":
         return {"status": "ignored", "reason": "invalid currency"}
-        
+
     amount = Decimal(str(amount_in_paise)) / Decimal("100")
     if amount <= Decimal("0"):
         return {"status": "ignored", "reason": "invalid amount"}
-        
+
     if not receipt or not receipt.startswith("adv_"):
         return {"status": "ignored", "reason": "unrecognized receipt format"}
-        
+
     try:
         advertiser_id = int(receipt.split("_")[1])
     except (IndexError, ValueError):
         return {"status": "ignored", "reason": "invalid advertiser_id in receipt"}
-        
+
+    adv = await session.get(Advertiser, advertiser_id)
+    if not adv:
+        return {"status": "ignored", "reason": "advertiser not found"}
+
     try:
-        # Pre-check to avoid unnecessary locks
-        stmt = select(Transaction).where(Transaction.reference_id == order_id)
+        # Pre-check against both reference_id and provider_event_id
+        conditions = [Transaction.reference_id == order_id]
+        if provider_event_id:
+            conditions.append(and_(Transaction.provider_event_id.is_not(None), Transaction.provider_event_id == provider_event_id))
+        stmt = select(Transaction).where(or_(*conditions))
         result = await session.execute(stmt)
         if result.scalar_one_or_none():
             return {"status": "already_processed"}
-            
-        # Additional validation for QR payments against our PaymentRequest
-        if event == "qr_code.credited":
-            pr_stmt = select(PaymentRequest).where(PaymentRequest.provider_order_id == order_id)
-            pr_result = await session.execute(pr_stmt)
-            pr = pr_result.scalar_one_or_none()
-            if not pr:
-                return {"status": "ignored", "reason": "unknown payment request"}
+
+        # Validate against existing PaymentRequest if present
+        pr_stmt = select(PaymentRequest).where(PaymentRequest.provider_order_id == order_id)
+        pr_result = await session.execute(pr_stmt)
+        pr = pr_result.scalar_one_or_none()
+        if pr:
             if pr.amount != amount:
                 return {"status": "ignored", "reason": "amount mismatch"}
             if pr.currency != currency:
                 return {"status": "ignored", "reason": "currency mismatch"}
             if pr.advertiser_id != advertiser_id:
                 return {"status": "ignored", "reason": "advertiser mismatch"}
-            
             pr.status = "paid"
             session.add(pr)
-            
+        elif event == "qr_code.credited":
+            return {"status": "ignored", "reason": "unknown payment request"}
+
         await BillingService.record_deposit(
             session=session,
             advertiser_id=advertiser_id,
             amount=amount,
             currency=currency,
             reference_id=order_id,
+            provider_event_id=provider_event_id,
             description=f"Razorpay Wallet Top-up (Order: {order_id})"
         )
         await session.commit()
@@ -343,9 +375,97 @@ async def reject_publisher_payout(
             payout_id=payout_id,
             reason=request.reason,
         )
+        session.add(
+            AuditLog(
+                user_id=user.id,
+                action="payout_rejected",
+                details=json.dumps({
+                    "publisher_id": publisher_id,
+                    "payout_id": payout_id,
+                    "reason": request.reason,
+                    "admin_email": user.email,
+                }),
+            )
+        )
         await session.commit()
         await session.refresh(reversal_tx)
         return TransactionResponse.model_validate(reversal_tx)
+    except ValueError as e:
+        await session.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/publisher/{publisher_id}/payout/{payout_id}/approve", response_model=PayoutRecordResponse)
+async def approve_publisher_payout(
+    publisher_id: int,
+    payout_id: int,
+    notes: str | None = Query(default=None),
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(verified_user),
+) -> PayoutRecordResponse:
+    """Approve a requested publisher payout, maintaining reserved funds (admin only)."""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin authorization required to approve payouts")
+
+    try:
+        payout = await BillingService.approve_payout(
+            session=session,
+            payout_id=payout_id,
+            notes=notes,
+        )
+        session.add(
+            AuditLog(
+                user_id=user.id,
+                action="payout_approved",
+                details=json.dumps({
+                    "publisher_id": publisher_id,
+                    "payout_id": payout_id,
+                    "notes": notes,
+                    "admin_email": user.email,
+                }),
+            )
+        )
+        await session.commit()
+        await session.refresh(payout)
+        return PayoutRecordResponse.model_validate(payout)
+    except ValueError as e:
+        await session.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/publisher/{publisher_id}/payout/{payout_id}/fail", response_model=TransactionResponse)
+async def fail_publisher_payout(
+    publisher_id: int,
+    payout_id: int,
+    reason: str = Query(default="Provider transfer failed"),
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(verified_user),
+) -> TransactionResponse:
+    """Record an external provider transfer failure and restore reserved funds to publisher balance (admin only)."""
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin authorization required to fail payouts")
+
+    try:
+        _, refund_tx = await BillingService.fail_payout(
+            session=session,
+            payout_id=payout_id,
+            reason=reason,
+        )
+        session.add(
+            AuditLog(
+                user_id=user.id,
+                action="payout_failed",
+                details=json.dumps({
+                    "publisher_id": publisher_id,
+                    "payout_id": payout_id,
+                    "reason": reason,
+                    "admin_email": user.email,
+                }),
+            )
+        )
+        await session.commit()
+        await session.refresh(refund_tx)
+        return TransactionResponse.model_validate(refund_tx)
     except ValueError as e:
         await session.rollback()
         raise HTTPException(status_code=400, detail=str(e))
@@ -369,6 +489,18 @@ async def confirm_publisher_payout(
             payout_id=payout_id,
             provider_payout_id=request.provider_payout_id,
             notes=request.notes,
+        )
+        session.add(
+            AuditLog(
+                user_id=user.id,
+                action="payout_confirmed",
+                details=json.dumps({
+                    "publisher_id": publisher_id,
+                    "payout_id": payout_id,
+                    "provider_payout_id": request.provider_payout_id,
+                    "admin_email": user.email,
+                }),
+            )
         )
         await session.commit()
         await session.refresh(payout)
@@ -547,12 +679,80 @@ async def resolve_dispute(
             notes=payload.resolution_notes,
             admin_user_id=user.id,
         )
+        session.add(
+            AuditLog(
+                user_id=user.id,
+                action="dispute_resolved",
+                details=json.dumps({
+                    "dispute_id": dispute_id,
+                    "status": payload.status,
+                    "amount_credited": str(payload.amount_credited),
+                    "notes": payload.resolution_notes,
+                    "admin_email": user.email,
+                }),
+            )
+        )
         await session.commit()
         await session.refresh(dispute)
         return dispute
     except ValueError as e:
         await session.rollback()
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/publisher/{publisher_id}/adjustment", response_model=TransactionResponse, dependencies=[Depends(require_roles("admin"))])
+async def manual_publisher_adjustment(
+    publisher_id: int,
+    payload: PublisherAdjustmentRequest,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(verified_user),
+) -> TransactionResponse:
+    """Manual adjustment / deduction against publisher earnings with immutable audit log (admin only)."""
+    try:
+        adj_tx = await BillingService.apply_ivt_adjustment(
+            session=session,
+            publisher_id=publisher_id,
+            amount=payload.amount,
+            reason=payload.reason,
+            reference_id=payload.reference_id,
+            campaign_id=payload.campaign_id,
+        )
+        session.add(
+            AuditLog(
+                user_id=user.id,
+                action="manual_payment_adjustment",
+                details=json.dumps({
+                    "publisher_id": publisher_id,
+                    "amount": str(payload.amount),
+                    "reason": payload.reason,
+                    "reference_id": payload.reference_id,
+                    "admin_email": user.email,
+                }),
+            )
+        )
+        await session.commit()
+        await session.refresh(adj_tx)
+        return TransactionResponse.model_validate(adj_tx)
+    except ValueError as e:
+        await session.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/publisher/{publisher_id}/earnings-breakdown", response_model=PublisherEarningsBreakdownResponse)
+async def get_publisher_earnings_breakdown(
+    publisher_id: int,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(verified_user),
+) -> PublisherEarningsBreakdownResponse:
+    """Detailed publisher earnings breakdown distinguishing estimated, under review, finalised, adjusted, payable, and paid."""
+    pub = await session.get(Publisher, publisher_id)
+    if not pub:
+        raise HTTPException(status_code=404, detail="Publisher not found")
+    if user.role != "admin" and pub.owner_user_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access publisher earnings")
+
+    data = await BillingService.get_publisher_earnings_breakdown(session, publisher_id)
+    return PublisherEarningsBreakdownResponse(**data)
 
 
 # ── Phase 3: Financial & Measurement Reconciliation ──────────────────────────
@@ -584,7 +784,52 @@ async def run_reconciliation(
         total_ivt_events=report.total_ivt_events,
         ivt_suppressed_spend=report.ivt_suppressed_spend,
         discrepancies=report.discrepancies,
+        unresolved_queue=report.unresolved_queue,
         alerts=report.alerts,
     )
+
+
+@router.get("/ledger/audit", response_model=list[TransactionResponse], dependencies=[Depends(require_roles("admin"))])
+async def get_audit_ledger(
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    reference: str | None = Query(default=None),
+    provider_event_id: str | None = Query(default=None),
+    advertiser_id: int | None = Query(default=None),
+    publisher_id: int | None = Query(default=None),
+    campaign_id: int | None = Query(default=None),
+    tx_type: int | None = Query(default=None, alias="type"),
+    is_cleared: bool | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(verified_user),
+) -> list[TransactionResponse]:
+    """Admin-only authoritative query endpoint for the immutable financial ledger with multi-column filters."""
+    query = select(Transaction).order_by(Transaction.created_at.desc(), Transaction.id.desc())
+
+    if start_date:
+        query = query.where(Transaction.created_at >= datetime.combine(start_date, time.min))
+    if end_date:
+        query = query.where(Transaction.created_at <= datetime.combine(end_date, time.max))
+    if reference:
+        query = query.where(Transaction.reference_id.ilike(f"%{reference}%"))
+    if provider_event_id:
+        query = query.where(Transaction.provider_event_id.ilike(f"%{provider_event_id}%"))
+    if advertiser_id:
+        query = query.where(Transaction.advertiser_id == advertiser_id)
+    if publisher_id:
+        query = query.where(Transaction.publisher_id == publisher_id)
+    if campaign_id:
+        query = query.where(Transaction.campaign_id == campaign_id)
+    if tx_type:
+        query = query.where(Transaction.type == tx_type)
+    if is_cleared is not None:
+        query = query.where(Transaction.is_cleared == is_cleared)
+
+    query = query.offset(offset).limit(limit)
+    res = await session.execute(query)
+    txs = res.scalars().all()
+    return [TransactionResponse.model_validate(tx) for tx in txs]
 
 

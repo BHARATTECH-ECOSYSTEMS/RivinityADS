@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   listSlots,
   createSlot,
@@ -168,13 +169,35 @@ export default function PublisherAdUnits() {
     }
   };
 
+  const selectedProperty = propertyId !== "" ? properties.find((p) => p.id === Number(propertyId)) : null;
+  const unverifiedSlotCount = slots.filter((s) => {
+    const prop = properties.find((p) => p.id === s.property_id);
+    return prop && prop.verification_status !== "VERIFIED";
+  }).length;
+
   return (
     <PageContainer>
       <PageHeader
         eyebrow="Inventory Management"
         title="Ad Units"
         description="Configure placement slots, set floor prices, generate embed code tags, and optimize fill rates."
+        actions={
+          <div style={{ display: "flex", gap: "8px" }}>
+            <Link to="/publisher/properties" className="btn btn-secondary btn-sm">
+              Properties &amp; Verification →
+            </Link>
+            <Link to="/publisher/integration" className="btn btn-secondary btn-sm">
+              Integration Guide →
+            </Link>
+          </div>
+        }
       />
+
+      {unverifiedSlotCount > 0 && (
+        <Alert variant="warning" title="Unverified Properties Detected" style={{ marginBottom: "16px" }}>
+          {unverifiedSlotCount} ad unit{unverifiedSlotCount > 1 ? "s are" : " is"} bound to unverified domain properties. The ad server automatically suppresses live ad delivery (returning 403 Forbidden) on unverified domains until ownership is verified in <Link to="/publisher/properties" style={{ textDecoration: "underline", fontWeight: 600 }}>Properties</Link>.
+        </Alert>
+      )}
 
       {error && (
         <Alert variant="danger" title="Error" onClose={() => setError(null)}>
@@ -240,9 +263,23 @@ export default function PublisherAdUnits() {
                         </td>
                         <td>
                           {prop ? (
-                            <span style={{ fontSize: "0.8125rem" }}>{prop.name}</span>
+                            <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+                              <span style={{ fontSize: "0.8125rem", fontWeight: 600 }}>{prop.name}</span>
+                              <span style={{ fontSize: "0.6875rem", color: "var(--color-text-muted)", fontFamily: "var(--font-mono)" }}>
+                                {prop.domain}
+                              </span>
+                              {prop.verification_status !== "VERIFIED" ? (
+                                <span style={{ fontSize: "0.6875rem", color: "var(--color-warning)", fontWeight: 500 }}>
+                                  ⚠️ Unverified Property
+                                </span>
+                              ) : (
+                                <span style={{ fontSize: "0.6875rem", color: "var(--color-success)", fontWeight: 500 }}>
+                                  ✓ Verified
+                                </span>
+                              )}
+                            </div>
                           ) : (
-                            <span style={{ fontSize: "0.8125rem", color: "var(--color-text-muted)" }}>Unassigned</span>
+                            <span style={{ fontSize: "0.8125rem", color: "var(--color-text-muted)" }}>Unassigned (Global)</span>
                           )}
                         </td>
                         <td>
@@ -353,12 +390,28 @@ export default function PublisherAdUnits() {
                   disabled={creating}
                 >
                   <option value="">[ None / Global ]</option>
-                  {properties.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name} ({p.domain})
-                    </option>
-                  ))}
+                  {properties.map((p) => {
+                    const isVer = p.verification_status === "VERIFIED";
+                    return (
+                      <option key={p.id} value={p.id}>
+                        {p.name} ({p.domain}) [{isVer ? "Verified" : "Unverified"}]
+                      </option>
+                    );
+                  })}
                 </select>
+                {selectedProperty && selectedProperty.verification_status !== "VERIFIED" && (
+                  <div style={{
+                    marginTop: "8px",
+                    padding: "8px 10px",
+                    background: "rgba(245, 158, 11, 0.1)",
+                    border: "1px solid rgba(245, 158, 11, 0.3)",
+                    borderRadius: "var(--radius-sm)",
+                    fontSize: "0.75rem",
+                    color: "var(--color-warning)"
+                  }}>
+                    ⚠️ <strong>Verification Required:</strong> "{selectedProperty.name}" ({selectedProperty.domain}) is unverified. Ad requests will be blocked (403 Forbidden) until domain ownership is verified in <Link to="/publisher/properties" style={{ textDecoration: "underline", fontWeight: 600, color: "var(--color-primary)" }}>Properties</Link>.
+                  </div>
+                )}
               </div>
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>

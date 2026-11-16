@@ -172,7 +172,9 @@ class ConversionService:
                 resolved_creative_id = resolved_creative_id or click_event.creative_id
 
                 click_dt = click_event.event_time
-                age_delta = event_dt - click_dt
+                norm_event_dt = event_dt.replace(tzinfo=None) if event_dt.tzinfo is None else event_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                norm_click_dt = click_dt.replace(tzinfo=None) if click_dt.tzinfo is None else click_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                age_delta = norm_event_dt - norm_click_dt
                 if getattr(click_event, "is_invalid", False):
                     is_attributed = False
                     attribution_reason = "click_invalid_ivt"
@@ -212,7 +214,9 @@ class ConversionService:
 
                 # Check 30-day attribution window (event_dt - click_dt)
                 click_dt = click_event.event_time
-                age_delta = event_dt - click_dt
+                norm_event_dt = event_dt.replace(tzinfo=None) if event_dt.tzinfo is None else event_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                norm_click_dt = click_dt.replace(tzinfo=None) if click_dt.tzinfo is None else click_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                age_delta = norm_event_dt - norm_click_dt
                 if getattr(click_event, "is_invalid", False):
                     is_attributed = False
                     attribution_reason = "click_invalid_ivt"

@@ -74,3 +74,5 @@ class TransactionType(IntEnum):
     SPEND = 2
     PAYOUT = 3
     REFUND = 4
+    EARNINGS = 5
+    ADJUSTMENT = 6

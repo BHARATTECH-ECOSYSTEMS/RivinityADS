@@ -22,6 +22,10 @@ class Publisher(Base, TimestampMixin):
     status: Mapped[int] = mapped_column(Integer, default=Status.ACTIVE, nullable=False)
     is_sandbox: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"), nullable=False)
     balance: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"), nullable=False)
+    # Estimated / pending earnings within hold window (Phase 5)
+    pending_balance: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"), server_default=text("0"), nullable=False)
+    # Optional contracted publisher rev share rate (e.g. 0.750). Overrides platform default if set.
+    rev_share_rate: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)
     payout_details: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     owner_user_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
@@ -189,6 +193,7 @@ class PublisherDailyStat(Base, TimestampMixin):
     clicks: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     conversions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     earnings: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"), nullable=False)
+    cleared_earnings: Mapped[Decimal] = mapped_column(Numeric(12, 6), default=Decimal("0"), server_default=text("0"), nullable=False)
     slot_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("ad_slots.id", ondelete="CASCADE"), nullable=True
     )

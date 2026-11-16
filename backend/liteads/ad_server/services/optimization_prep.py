@@ -196,6 +196,13 @@ class OptimizationPreparationService:
         ctr = campaign.clicks / campaign.impressions if campaign.impressions > 0 else 0.0
         cvr = campaign.conversions / campaign.clicks if campaign.clicks > 0 else 0.0
 
+        bid_type = getattr(campaign, "bid_type", 1)
+        bid_type_name = "CPA" if bid_type == 3 else ("CPC" if bid_type == 2 else "CPM")
+        objective = "conversions" if bid_type == 3 else ("clicks" if bid_type == 2 else "impressions")
+
+        cpa = float(round(float(campaign.spent_total) / campaign.conversions, 4)) if getattr(campaign, "conversions", 0) > 0 else None
+        cpc = float(round(float(campaign.spent_total) / campaign.clicks, 4)) if getattr(campaign, "clicks", 0) > 0 else None
+
         perf = {
             "impressions": campaign.impressions,
             "clicks": campaign.clicks,
@@ -207,6 +214,10 @@ class OptimizationPreparationService:
             "bid_amount": float(campaign.bid_amount),
             "ctr": float(round(ctr, 6)),
             "cvr": float(round(cvr, 6)),
+            "bid_type": bid_type_name,
+            "objective": objective,
+            "effective_cpa": cpa,
+            "effective_cpc": cpc,
         }
         
         targeting = {

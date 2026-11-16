@@ -195,3 +195,86 @@ def verify_conversion_sig(
     if not is_valid:
         raise HTTPException(status_code=400, detail="Invalid conversion signature")
 
+
+def sign_consent_token(
+    site_slug: str,
+    project_id: int,
+    is_granted: bool,
+    version: str = "v1.0",
+    ttl_seconds: int = 604800,  # 7 days
+    secret: str | None = None,
+) -> str:
+    """Generate a tamper-evident HMAC-signed site-scoped visitor consent proof."""
+    ts = int(time.time())
+    exp = ts + ttl_seconds
+    granted_flag = "1" if is_granted else "0"
+    signing_secret = (secret or get_settings().tracking.secret).encode()
+    payload = f"{site_slug}:{project_id}:{granted_flag}:{version}:{ts}:{exp}".encode()
+    sig = hmac.new(signing_secret, payload, hashlib.sha256).hexdigest()[:32]
+    return f"{site_slug}.{project_id}.{granted_flag}.{version}.{ts}.{exp}.{sig}"
+
+
+def verify_consent_token(
+    token: str,
+    expected_site_slug: str | None = None,
+    expected_project_id: int | None = None,
+    secret: str | None = None,
+) -> dict[str, Any]:
+    """Verify and unpack a site-scoped visitor consent proof.
+    
+    Raises HTTPException(400 or 403) if invalid, expired, or tampered.
+    """
+    if not token or not isinstance(token, str):
+        raise HTTPException(status_code=400, detail="Invalid consent token format")
+
+    parts = token.split(".")
+    if len(parts) < 7:
+        raise HTTPException(status_code=400, detail="Invalid consent token format")
+
+    site_slug = parts[0]
+    proj_str = parts[1]
+    granted_flag = parts[2]
+    version = ".".join(parts[3:-3])
+    ts_str = parts[-3]
+    exp_str = parts[-2]
+    sig = parts[-1]
+    try:
+        proj_id = int(proj_str)
+        ts = int(ts_str)
+        exp = int(exp_str)
+        is_granted = granted_flag == "1"
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid consent token data")
+
+    signing_secret = (secret or get_settings().tracking.secret).encode()
+    payload = f"{site_slug}:{proj_id}:{granted_flag}:{version}:{ts}:{exp}".encode()
+    expected_sig = hmac.new(signing_secret, payload, hashlib.sha256).hexdigest()[:32]
+    if not hmac.compare_digest(expected_sig, sig):
+        raise HTTPException(status_code=403, detail="Invalid consent token signature: token tampered")
+
+    now = int(time.time())
+    if now > exp:
+        raise HTTPException(status_code=400, detail="Consent token expired")
+
+    # Anti-tampering check: cross-site or cross-project verification
+    if expected_site_slug and site_slug != expected_site_slug:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Consent token site mismatch: token for '{site_slug}', expected '{expected_site_slug}'",
+        )
+    if expected_project_id and proj_id != expected_project_id:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Consent token project mismatch: token for project {proj_id}, expected {expected_project_id}",
+        )
+
+    return {
+        "site_slug": site_slug,
+        "project_id": proj_id,
+        "is_granted": is_granted,
+        "version": version,
+        "timestamp": ts,
+        "expires_at": exp,
+    }
+
+

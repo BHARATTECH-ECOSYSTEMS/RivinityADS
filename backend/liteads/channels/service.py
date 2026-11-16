@@ -16,6 +16,7 @@ from typing import Any
 import uuid
 
 from fastapi import HTTPException, status
+import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
@@ -47,6 +48,7 @@ from liteads.channels.schemas import (
     PublisherContractCreateRequest,
     PublisherContractResponse,
 )
+from liteads.common.config import get_settings
 from liteads.management.advertiser_api_key_service import decrypt_secret, encrypt_secret
 from liteads.models.auth import AuditLog
 from liteads.models.channel import (
@@ -67,24 +69,41 @@ def _mask_credential(raw: str) -> str:
 
 
 def _get_connector(
-    provider: str, credentials: dict[str, Any], account_id: str, organization_id: str | None = None
+    provider: str,
+    credentials: dict[str, Any],
+    account_id: str,
+    organization_id: str | None = None,
+    http_client: httpx.AsyncClient | None = None,
 ) -> BaseAdvertiserConnector:
     """Instantiate appropriate channel connector based on provider."""
     # Enforce Claude ad-free policy first
     ClaudePolicyGuard.enforce_ad_free_policy(provider)
 
+    settings = get_settings()
     provider_clean = provider.lower().strip()
+
     if provider_clean in ("openai", "openai_ads"):
+        is_simulation = bool(
+            credentials.get("is_simulation", False)
+            or credentials.get("allow_simulated", True)
+            or str(credentials.get("api_key", "")).startswith("test_")
+        )
         return OpenAIAdsConnector(
             credentials=credentials,
             account_id=account_id,
             organization_id=organization_id,
+            env=settings.env,
+            is_simulation=is_simulation,
         )
     elif provider_clean in ("google", "google_ads"):
         return GoogleAdsConnector(
             credentials=credentials,
             account_id=account_id,
             organization_id=organization_id,
+            api_version=settings.channels.google_ads_api_version,
+            token_endpoint=settings.channels.google_ads_token_endpoint,
+            api_endpoint=settings.channels.google_ads_api_endpoint,
+            http_client=http_client,
         )
     else:
         raise UnsupportedChannelException(
@@ -96,8 +115,9 @@ def _get_connector(
 class ChannelService:
     """Service orchestrating channel connectors and publisher contracts."""
 
-    def __init__(self, session: AsyncSession):
+    def __init__(self, session: AsyncSession, http_client: httpx.AsyncClient | None = None):
         self.session = session
+        self.http_client = http_client
 
     # ── Advertiser Connector Operations ──
 
@@ -111,25 +131,44 @@ class ChannelService:
         Connect and authenticate an authorized external ad platform account.
         
         Credentials are encrypted at rest and never returned to the caller.
+        Simulated adapters fail closed in production and report status=SIMULATED.
         """
         # 1. Enforce Claude ad-free policy check
         ClaudePolicyGuard.enforce_ad_free_policy(req.provider)
 
-        # 2. Build credentials dictionary
+        # 2. Check environment isolation for simulations
+        settings = get_settings()
+        is_prod = settings.env in ("prod", "production", "staging")
+        prov_clean = req.provider.lower().strip()
+
+        if is_prod:
+            if prov_clean in ("openai", "openai_ads"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="OpenAI Ads adapter has no official public API and is prohibited from simulation in production environments.",
+                )
+            if req.additional_credentials.get("is_simulation") or req.additional_credentials.get("allow_simulated"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Simulated channel adapters are strictly prohibited in production environments.",
+                )
+
+        # 3. Build credentials dictionary
         creds_payload = {
             "api_key": req.api_key.strip(),
             **req.additional_credentials,
         }
 
-        # 3. Instantiate and test connection
+        # 4. Instantiate and verify connection
         connector = _get_connector(
             req.provider,
             credentials=creds_payload,
             account_id=req.account_id,
             organization_id=req.organization_id,
+            http_client=self.http_client,
         )
 
-        is_valid, err_msg = await connector.test_connection()
+        is_valid, err_msg, metadata = await connector.verify_credentials()
         if not is_valid:
             logger.warning(
                 "channel_connection_test_failed",
@@ -142,14 +181,24 @@ class ChannelService:
                 detail=f"Connection authentication failed: {err_msg}",
             )
 
-        # 4. Encrypt credentials at rest
+        # 5. Encrypt credentials at rest
         creds_json = json.dumps(creds_payload)
         encrypted_creds = encrypt_secret(creds_json)
         prefix = _mask_credential(req.api_key)
 
         capabilities_dict = connector.get_capabilities().model_dump()
+        adapter_mode = connector.adapter_mode
+        if adapter_mode == "SIMULATED":
+            status_value = "SIMULATED"
+            token_state = "SIMULATED"
+        elif adapter_mode == "EXPERIMENTAL":
+            status_value = "CONNECTING"
+            token_state = "NOT_CONFIGURED"
+        else:
+            status_value = "CONNECTED"
+            token_state = metadata.get("token_state", "VALID")
 
-        # 5. Check if connection already exists for this account
+        # 6. Check if connection already exists for this account
         stmt = select(ChannelConnection).where(
             ChannelConnection.advertiser_id == advertiser_id,
             ChannelConnection.provider == req.provider.lower().strip(),
@@ -164,7 +213,11 @@ class ChannelService:
             existing.credentials_encrypted = encrypted_creds
             existing.credentials_prefix = prefix
             existing.external_organization_id = req.organization_id
-            existing.status = "CONNECTED"
+            existing.status = status_value
+            existing.adapter_mode = adapter_mode
+            existing.token_state = token_state
+            existing.last_verified_at = now
+            existing.remote_metadata = metadata
             existing.capabilities = capabilities_dict
             existing.last_error = None
             connection = existing
@@ -178,18 +231,22 @@ class ChannelService:
                 external_organization_id=req.organization_id,
                 credentials_encrypted=encrypted_creds,
                 credentials_prefix=prefix,
-                status="CONNECTED",
+                status=status_value,
+                adapter_mode=adapter_mode,
+                token_state=token_state,
+                last_verified_at=now,
+                remote_metadata=metadata,
                 capabilities=capabilities_dict,
                 created_at=now,
                 updated_at=now,
             )
             self.session.add(connection)
 
-        # 6. Audit log
+        # 7. Audit log
         audit = AuditLog(
             user_id=user_id,
             action=f"channel_connected:{req.provider}",
-            details=f"Connected {req.provider} account {req.account_id} for advertiser {advertiser_id}",
+            details=f"Connected {req.provider} account {req.account_id} (mode={adapter_mode}) for advertiser {advertiser_id}",
         )
         self.session.add(audit)
 
@@ -203,6 +260,9 @@ class ChannelService:
             external_account_id=connection.external_account_id,
             credentials_prefix=connection.credentials_prefix,
             status=connection.status,
+            adapter_mode=connection.adapter_mode,
+            token_state=connection.token_state,
+            last_verified_at=connection.last_verified_at,
             capabilities=connector.get_capabilities(),
             created_at=connection.created_at,
         )
@@ -234,7 +294,11 @@ class ChannelService:
                     external_organization_id=c.external_organization_id,
                     credentials_prefix=c.credentials_prefix,
                     status=c.status,
+                    adapter_mode=c.adapter_mode,
+                    token_state=c.token_state,
+                    last_verified_at=c.last_verified_at,
                     last_sync_at=c.last_sync_at,
+                    sync_cursor=c.sync_cursor,
                     last_error=c.last_error,
                     capabilities=caps,
                     created_at=c.created_at,
@@ -268,6 +332,7 @@ class ChannelService:
             credentials=creds,
             account_id=conn.external_account_id,
             organization_id=conn.external_organization_id,
+            http_client=self.http_client,
         )
 
     async def discover_accounts(
@@ -300,6 +365,11 @@ class ChannelService:
             if mapping:
                 mapping.external_campaign_name = ec.name
                 mapping.external_status = ec.status
+                mapping.remote_object_status = ec.remote_object_status
+                mapping.moderation_status = ec.moderation_status
+                mapping.provider_request_id = ec.provider_request_id
+                mapping.remote_resource_name = ec.remote_resource_name
+                mapping.sync_status = ec.sync_status or "SYNCED"
                 mapping.objective = ec.objective
                 mapping.daily_budget = Decimal(str(ec.daily_budget)) if ec.daily_budget is not None else None
                 mapping.total_spend = Decimal(str(ec.total_spend)) if ec.total_spend is not None else None
@@ -311,6 +381,11 @@ class ChannelService:
                     external_campaign_id=ec.external_id,
                     external_campaign_name=ec.name,
                     external_status=ec.status,
+                    remote_object_status=ec.remote_object_status,
+                    moderation_status=ec.moderation_status,
+                    provider_request_id=ec.provider_request_id,
+                    remote_resource_name=ec.remote_resource_name,
+                    sync_status=ec.sync_status or "SYNCED",
                     objective=ec.objective,
                     daily_budget=Decimal(str(ec.daily_budget)) if ec.daily_budget is not None else None,
                     total_spend=Decimal(str(ec.total_spend)) if ec.total_spend is not None else None,
@@ -372,6 +447,11 @@ class ChannelService:
                 total_spend=float(existing_mapping.total_spend) if existing_mapping.total_spend else None,
                 currency=existing_mapping.currency,
                 local_campaign_id=existing_mapping.local_campaign_id,
+                remote_object_status=existing_mapping.remote_object_status,
+                moderation_status=existing_mapping.moderation_status,
+                provider_request_id=existing_mapping.provider_request_id,
+                remote_resource_name=existing_mapping.remote_resource_name,
+                sync_status=existing_mapping.sync_status,
             )
 
         # 2. Invoke provider creation
@@ -385,6 +465,11 @@ class ChannelService:
             external_campaign_id=created_campaign.external_id,
             external_campaign_name=created_campaign.name,
             external_status=created_campaign.status,
+            remote_object_status=created_campaign.remote_object_status,
+            moderation_status=created_campaign.moderation_status,
+            provider_request_id=created_campaign.provider_request_id,
+            remote_resource_name=created_campaign.remote_resource_name,
+            sync_status="SYNCED",
             objective=created_campaign.objective,
             daily_budget=Decimal(str(created_campaign.daily_budget)) if created_campaign.daily_budget is not None else None,
             total_spend=Decimal("0.0"),
@@ -428,6 +513,7 @@ class ChannelService:
             mapping = res.scalar_one_or_none()
             if mapping:
                 mapping.external_status = status_value
+                mapping.remote_object_status = f"CONFIRMED_{status_value}"
                 mapping.last_sync_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 await self.session.commit()
         return ok
@@ -442,7 +528,20 @@ class ChannelService:
         """Synchronize performance reporting."""
         conn = await self.get_connection_scoped(advertiser_id, connection_id)
         connector = self._decrypt_connector(conn)
-        return await connector.sync_reporting(start_date, end_date)
+        reports = await connector.sync_reporting(start_date, end_date)
+
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        for r in reports:
+            stmt = select(ExternalCampaignMapping).where(
+                ExternalCampaignMapping.connection_id == conn.id,
+                ExternalCampaignMapping.external_campaign_id == r.external_campaign_id,
+            )
+            res = await self.session.execute(stmt)
+            mapping = res.scalar_one_or_none()
+            if mapping:
+                mapping.reporting_synced_at = now
+        await self.session.commit()
+        return reports
 
     async def disconnect(
         self, advertiser_id: int, connection_id: int, user_id: int | None = None
@@ -456,6 +555,7 @@ class ChannelService:
             logger.warning("connector_disconnect_exception", error=str(e))
 
         conn.status = "DISCONNECTED"
+        conn.token_state = "REVOKED"
         conn.credentials_encrypted = ""  # Erase secret material
         conn.last_sync_at = datetime.now(timezone.utc).replace(tzinfo=None)
 

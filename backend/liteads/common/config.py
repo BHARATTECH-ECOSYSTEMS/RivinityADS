@@ -232,6 +232,26 @@ class OptimizationSettings(BaseSettings):
     pilot_max_budget_delta_amount: float = 500.0
     pilot_campaign_ids: list[int] = Field(default_factory=list)
 
+    @field_validator("pilot_campaign_ids", mode="before")
+    @classmethod
+    def parse_pilot_ids(cls, v: Any) -> list[int]:
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return []
+            if v.startswith("[") and v.endswith("]"):
+                import json
+                try:
+                    parsed = json.loads(v)
+                    if isinstance(parsed, list):
+                        return [int(x) for x in parsed if str(x).strip().isdigit()]
+                except Exception:
+                    pass
+            return [int(x.strip()) for x in v.split(",") if x.strip().isdigit()]
+        elif isinstance(v, (list, tuple, set)):
+            return [int(x) for x in v if str(x).strip().isdigit()]
+        return []
+
 
 class AuthSettings(BaseSettings):
     """Authentication and token configuration."""
@@ -390,6 +410,20 @@ class WebsiteHostingSettings(BaseSettings):
     cache_ttl_seconds: int = 3600
 
 
+class ChannelSettings(BaseSettings):
+    """Configuration for external channel adapters (Phase 2)."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="LITEADS_CHANNELS__",
+        extra="ignore",
+    )
+
+    allow_simulated_adapters: bool = False  # Strictly False by default. Gate simulations behind dev/test config that fails closed in prod.
+    google_ads_api_version: str = "v18"
+    google_ads_token_endpoint: str = "https://oauth2.googleapis.com/token"
+    google_ads_api_endpoint: str = "https://googleads.googleapis.com"
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
@@ -452,6 +486,7 @@ class Settings(BaseSettings):
     gemini: GeminiSettings = Field(default_factory=GeminiSettings)
     groq: GroqSettings = Field(default_factory=GroqSettings)
     website: WebsiteHostingSettings = Field(default_factory=WebsiteHostingSettings)
+    channels: ChannelSettings = Field(default_factory=ChannelSettings)
     llm_provider: Literal["openai", "gemini", "groq"] = "openai"
 
     @field_validator("env")
@@ -471,6 +506,13 @@ class Settings(BaseSettings):
                 self.enable_in_process_schedulers = True
 
         if self.env in ("staging", "prod"):
+            # 0. Simulated channel adapters are strictly prohibited in production and staging
+            if self.channels.allow_simulated_adapters:
+                raise ValueError(
+                    "LITEADS_CHANNELS__ALLOW_SIMULATED_ADAPTERS cannot be True in staging/prod environment. "
+                    "Simulated channel adapters are strictly prohibited in production."
+                )
+
             # 1. Database password must not be empty or known dev default
             db_pwd = self.database.password
             if not db_pwd:
