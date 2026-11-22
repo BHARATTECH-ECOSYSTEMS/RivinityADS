@@ -3,11 +3,13 @@ Tests for ad serving endpoints.
 """
 
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from liteads.ad_server.main import app
+from liteads.ad_server.services.rate_limit_service import RateLimitService
 from liteads.common.security import AuthenticatedAdCaller, authenticate_ad_request
 from liteads.models import AdSlot, Publisher
 from liteads.common.database import get_session
@@ -30,16 +32,13 @@ async def override_auth(test_db):
     test_db.add(slot)
     await test_db.commit()
     
-    try:
-        yield
-    finally:
-        app.dependency_overrides.pop(authenticate_ad_request, None)
+    with patch.object(RateLimitService, "check_rate_limit", return_value=(True, 1000, 60)), \
+         patch.object(RateLimitService, "check_daily_quota", return_value=(True, 10000, 86400)), \
+         patch.object(RateLimitService, "record_usage_metric", new_callable=AsyncMock):
         try:
-            await test_db.delete(slot)
-            await test_db.delete(publisher)
-            await test_db.commit()
-        except Exception:
-            pass
+            yield
+        finally:
+            app.dependency_overrides.pop(authenticate_ad_request, None)
 
 @pytest.mark.asyncio
 async def test_ad_request_empty(
