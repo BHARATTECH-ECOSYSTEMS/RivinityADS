@@ -201,23 +201,43 @@ def sign_consent_token(
     project_id: int,
     is_granted: bool,
     version: str = "v1.0",
+    visitor_id: str | None = None,
+    consent_log_id: int | None = None,
     ttl_seconds: int = 604800,  # 7 days
     secret: str | None = None,
 ) -> str:
-    """Generate a tamper-evident HMAC-signed site-scoped visitor consent proof."""
+    """Generate a tamper-evident HMAC-signed site-scoped visitor consent proof.
+    
+    Optionally binds visitor_id and consent_log_id for deterministic post-withdrawal revocation checks.
+    """
     ts = int(time.time())
     exp = ts + ttl_seconds
     granted_flag = "1" if is_granted else "0"
     signing_secret = (secret or get_settings().tracking.secret).encode()
-    payload = f"{site_slug}:{project_id}:{granted_flag}:{version}:{ts}:{exp}".encode()
-    sig = hmac.new(signing_secret, payload, hashlib.sha256).hexdigest()[:32]
-    return f"{site_slug}.{project_id}.{granted_flag}.{version}.{ts}.{exp}.{sig}"
+    v_id = (visitor_id or "").strip()
+    if v_id and consent_log_id is not None:
+        payload = f"{site_slug}:{project_id}:{granted_flag}:{version}:{v_id}:{consent_log_id}:{ts}:{exp}".encode()
+        sig = hmac.new(signing_secret, payload, hashlib.sha256).hexdigest()[:32]
+        return f"{site_slug}.{project_id}.{granted_flag}.{version}:{v_id}:{consent_log_id}.{ts}.{exp}.{sig}"
+    elif v_id:
+        payload = f"{site_slug}:{project_id}:{granted_flag}:{version}:{v_id}:{ts}:{exp}".encode()
+        sig = hmac.new(signing_secret, payload, hashlib.sha256).hexdigest()[:32]
+        return f"{site_slug}.{project_id}.{granted_flag}.{version}:{v_id}.{ts}.{exp}.{sig}"
+    elif consent_log_id is not None:
+        payload = f"{site_slug}:{project_id}:{granted_flag}:{version}::{consent_log_id}:{ts}:{exp}".encode()
+        sig = hmac.new(signing_secret, payload, hashlib.sha256).hexdigest()[:32]
+        return f"{site_slug}.{project_id}.{granted_flag}.{version}::{consent_log_id}.{ts}.{exp}.{sig}"
+    else:
+        payload = f"{site_slug}:{project_id}:{granted_flag}:{version}:{ts}:{exp}".encode()
+        sig = hmac.new(signing_secret, payload, hashlib.sha256).hexdigest()[:32]
+        return f"{site_slug}.{project_id}.{granted_flag}.{version}.{ts}.{exp}.{sig}"
 
 
 def verify_consent_token(
     token: str,
     expected_site_slug: str | None = None,
     expected_project_id: int | None = None,
+    expected_version: str | None = None,
     secret: str | None = None,
 ) -> dict[str, Any]:
     """Verify and unpack a site-scoped visitor consent proof.
@@ -234,10 +254,26 @@ def verify_consent_token(
     site_slug = parts[0]
     proj_str = parts[1]
     granted_flag = parts[2]
-    version = ".".join(parts[3:-3])
+    middle = ".".join(parts[3:-3])
     ts_str = parts[-3]
     exp_str = parts[-2]
     sig = parts[-1]
+
+    visitor_id: str | None = None
+    consent_log_id: int | None = None
+    if ":" in middle:
+        subparts = middle.split(":")
+        version = subparts[0]
+        if len(subparts) >= 2 and subparts[1]:
+            visitor_id = subparts[1]
+        if len(subparts) >= 3 and subparts[2]:
+            try:
+                consent_log_id = int(subparts[2])
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid consent log ID in token")
+    else:
+        version = middle
+
     try:
         proj_id = int(proj_str)
         ts = int(ts_str)
@@ -247,7 +283,16 @@ def verify_consent_token(
         raise HTTPException(status_code=400, detail="Invalid consent token data")
 
     signing_secret = (secret or get_settings().tracking.secret).encode()
-    payload = f"{site_slug}:{proj_id}:{granted_flag}:{version}:{ts}:{exp}".encode()
+    v_id = visitor_id or ""
+    if v_id and consent_log_id is not None:
+        payload = f"{site_slug}:{proj_id}:{granted_flag}:{version}:{v_id}:{consent_log_id}:{ts}:{exp}".encode()
+    elif v_id:
+        payload = f"{site_slug}:{proj_id}:{granted_flag}:{version}:{v_id}:{ts}:{exp}".encode()
+    elif consent_log_id is not None:
+        payload = f"{site_slug}:{proj_id}:{granted_flag}:{version}::{consent_log_id}:{ts}:{exp}".encode()
+    else:
+        payload = f"{site_slug}:{proj_id}:{granted_flag}:{version}:{ts}:{exp}".encode()
+
     expected_sig = hmac.new(signing_secret, payload, hashlib.sha256).hexdigest()[:32]
     if not hmac.compare_digest(expected_sig, sig):
         raise HTTPException(status_code=403, detail="Invalid consent token signature: token tampered")
@@ -267,14 +312,89 @@ def verify_consent_token(
             status_code=403,
             detail=f"Consent token project mismatch: token for project {proj_id}, expected {expected_project_id}",
         )
+    if expected_version and version != expected_version:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Consent token version mismatch: token version '{version}', expected '{expected_version}'",
+        )
 
     return {
         "site_slug": site_slug,
         "project_id": proj_id,
         "is_granted": is_granted,
         "version": version,
+        "visitor_id": visitor_id,
+        "consent_log_id": consent_log_id,
         "timestamp": ts,
         "expires_at": exp,
     }
+
+
+async def check_visitor_consent_revocation(
+    session: Any,
+    project_id: int,
+    visitor_id: str | None,
+    token_timestamp: int,
+    consent_log_id: int | None = None,
+    client_ip_hash: str | None = None,
+) -> bool:
+    """Check if a visitor's affirmative consent grant has been superseded by a subsequent withdrawal.
+    
+    Guarantees:
+    - If the visitor's most recent consent state is withdrawn/declined, ALL tokens are revoked.
+    - If the visitor subsequently re-accepted, only tokens issued under the new grant are valid;
+      stale tokens from before the withdrawal remain permanently revoked.
+    - Strict visitor_id isolation: when visitor_id is known, never match by client_ip_hash (prevents NAT collisions).
+    - Monotonic log ID resolution: avoids same-second timestamp races when accept/withdraw/reaccept occur within 1s.
+    """
+    if session is None:
+        return False
+
+    from datetime import datetime, timezone
+    from sqlalchemy import select
+    from liteads.models.website import WebsiteConsentLog
+
+    if consent_log_id is not None:
+        stmt = (
+            select(WebsiteConsentLog)
+            .where(
+                WebsiteConsentLog.project_id == project_id,
+                WebsiteConsentLog.consent_type == "visitor_consent",
+                WebsiteConsentLog.is_granted.is_(False),
+                WebsiteConsentLog.id > consent_log_id,
+            )
+            .order_by(WebsiteConsentLog.id.desc())
+        )
+    else:
+        # Fallback for legacy tokens without consent_log_id (timestamp-based check)
+        token_dt = datetime.fromtimestamp(token_timestamp, tz=timezone.utc).replace(tzinfo=None)
+        stmt = (
+            select(WebsiteConsentLog)
+            .where(
+                WebsiteConsentLog.project_id == project_id,
+                WebsiteConsentLog.consent_type == "visitor_consent",
+                WebsiteConsentLog.is_granted.is_(False),
+                WebsiteConsentLog.recorded_at >= token_dt,
+            )
+            .order_by(WebsiteConsentLog.id.desc())
+        )
+
+    result = await session.execute(stmt)
+    decline_logs = result.scalars().all()
+
+    for log in decline_logs:
+        scope = log.consent_scope or {}
+        log_vid = scope.get("visitor_id")
+        if visitor_id:
+            # Strict isolation: when visitor_id is known, match ONLY rows with exact visitor_id
+            if log_vid and log_vid == visitor_id:
+                return True
+        elif client_ip_hash:
+            # Fall back to client_ip_hash ONLY when BOTH token and log have no visitor_id
+            if not log_vid and log.client_ip_hash == client_ip_hash:
+                return True
+
+    return False
+
 
 

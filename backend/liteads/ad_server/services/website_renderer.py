@@ -2143,8 +2143,8 @@ class SafeWebsiteRenderer:
         footer_copyright: str | None = None
         footer_block_id: str | None = None
 
-        if isinstance(raw_blocks_payload, dict):
-            raw_blocks = raw_blocks_payload.get("blocks", [])
+        if isinstance(raw_blocks_payload, (dict, list)):
+            raw_blocks = raw_blocks_payload.get("blocks", []) if isinstance(raw_blocks_payload, dict) else raw_blocks_payload
             for raw_b in raw_blocks:
                 if not isinstance(raw_b, dict):
                     continue

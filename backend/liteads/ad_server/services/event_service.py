@@ -127,7 +127,7 @@ class EventService:
             # Server verifies stored WebsiteConsentLog or cryptographic consent_token.
             if slot and slot.property_id and not is_sandbox_event:
                 from liteads.models.website import WebsiteProject, WebsiteConsentLog
-                from liteads.common.tracking_sig import verify_consent_token
+                from liteads.common.tracking_sig import check_visitor_consent_revocation, verify_consent_token
 
                 proj_stmt = select(WebsiteProject).where(WebsiteProject.property_id == slot.property_id)
                 proj_obj = (await self.session.execute(proj_stmt)).scalar_one_or_none()
@@ -143,41 +143,27 @@ class EventService:
                                 expected_project_id=proj_obj.id,
                             )
                             if tok_info.get("is_granted"):
-                                has_visitor_consent = True
+                                ip_addr = extra.get("ip_address") or extra.get("client_ip") or extra.get("ip") if extra else None
+                                ip_h = hashlib.sha256(ip_addr.encode("utf-8")).hexdigest() if ip_addr else None
+                                is_revoked = await check_visitor_consent_revocation(
+                                    session=self.session,
+                                    project_id=proj_obj.id,
+                                    visitor_id=tok_info.get("visitor_id"),
+                                    token_timestamp=tok_info.get("timestamp", 0),
+                                    consent_log_id=tok_info.get("consent_log_id"),
+                                    client_ip_hash=ip_h,
+                                )
+                                if not is_revoked:
+                                    has_visitor_consent = True
+                                else:
+                                    logger.warning(
+                                        "Event consent token has been revoked/withdrawn by visitor; billable spend suppressed",
+                                        slot_id=slot_id,
+                                        project_id=proj_obj.id,
+                                    )
                         except Exception as e:
                             logger.warning("Consent token validation failed for event", error=str(e), slot_id=slot_id)
                             has_visitor_consent = False
-                    else:
-                        # Inspect server-side trusted consent log (using hashed IP/UA or latest project record)
-                        ip_raw = extra.get("ip_address") or extra.get("client_ip") or extra.get("ip") if extra else None
-                        ip_h = hashlib.sha256(ip_raw.encode("utf-8")).hexdigest() if ip_raw else None
-                        if ip_h:
-                            c_stmt = (
-                                select(WebsiteConsentLog)
-                                .where(
-                                    WebsiteConsentLog.project_id == proj_obj.id,
-                                    WebsiteConsentLog.consent_type == "visitor_consent",
-                                    WebsiteConsentLog.client_ip_hash == ip_h,
-                                )
-                                .order_by(WebsiteConsentLog.recorded_at.desc())
-                                .limit(1)
-                            )
-                            c_log = (await self.session.execute(c_stmt)).scalar_one_or_none()
-                            if c_log and c_log.is_granted:
-                                has_visitor_consent = True
-                        else:
-                            c_stmt = (
-                                select(WebsiteConsentLog)
-                                .where(
-                                    WebsiteConsentLog.project_id == proj_obj.id,
-                                    WebsiteConsentLog.consent_type == "visitor_consent",
-                                )
-                                .order_by(WebsiteConsentLog.recorded_at.desc())
-                                .limit(1)
-                            )
-                            c_log = (await self.session.execute(c_stmt)).scalar_one_or_none()
-                            if c_log and c_log.is_granted:
-                                has_visitor_consent = True
 
                     if not has_visitor_consent:
                         logger.warning(

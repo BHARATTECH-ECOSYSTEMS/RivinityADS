@@ -44,6 +44,40 @@ def _get_channel_service(session: AsyncSession = Depends(get_session)) -> Channe
     return ChannelService(session)
 
 
+def _require_advertiser_id(user: User) -> int:
+    """Enforce caller has an authorized advertiser tenant association."""
+    if not user.advertiser_id and user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User is not associated with an advertiser account",
+        )
+    if user.advertiser_id:
+        return user.advertiser_id
+    if user.role == "admin":
+        return 1
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="User is not associated with an advertiser account",
+    )
+
+
+def _require_publisher_id(user: User) -> int:
+    """Enforce caller has an authorized publisher tenant association."""
+    if not user.publisher_id and user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User is not associated with a publisher account",
+        )
+    if user.publisher_id:
+        return user.publisher_id
+    if user.role == "admin":
+        return 1
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="User is not associated with a publisher account",
+    )
+
+
 # -----------------------------------------------------------------------------
 # Capabilities Discovery Endpoint (Public / Authenticated)
 # -----------------------------------------------------------------------------
@@ -85,12 +119,7 @@ async def connect_advertiser_account(
     service: ChannelService = Depends(_get_channel_service),
 ) -> ConnectAdvertiserResponse:
     """Connect an authorized external ad platform account (e.g. OpenAI Ads Manager)."""
-    if not user.advertiser_id and user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User is not associated with an advertiser account",
-        )
-    advertiser_id = user.advertiser_id or 1
+    advertiser_id = _require_advertiser_id(user)
     return await service.connect_advertiser_channel(
         advertiser_id=advertiser_id,
         user_id=user.id,
@@ -108,9 +137,7 @@ async def list_advertiser_connections(
     service: ChannelService = Depends(_get_channel_service),
 ) -> list[ConnectionDetailsResponse]:
     """List connected accounts for the authenticated advertiser (secrets redacted)."""
-    if not user.advertiser_id and user.role != "admin":
-        return []
-    advertiser_id = user.advertiser_id or 1
+    advertiser_id = _require_advertiser_id(user)
     return await service.list_advertiser_connections(advertiser_id)
 
 
@@ -125,7 +152,7 @@ async def get_connection_details(
     service: ChannelService = Depends(_get_channel_service),
 ) -> ConnectionDetailsResponse:
     """Inspect specific connection details without secret leakage."""
-    advertiser_id = user.advertiser_id or 1
+    advertiser_id = _require_advertiser_id(user)
     conn = await service.get_connection_scoped(advertiser_id, connection_id)
     caps = ChannelCapabilities(**conn.capabilities) if conn.capabilities else None
     return ConnectionDetailsResponse(
@@ -158,7 +185,7 @@ async def discover_accounts(
     service: ChannelService = Depends(_get_channel_service),
 ) -> list[ExternalAccount]:
     """Discover accessible ad accounts in the connected platform."""
-    advertiser_id = user.advertiser_id or 1
+    advertiser_id = _require_advertiser_id(user)
     return await service.discover_accounts(advertiser_id, connection_id)
 
 
@@ -173,7 +200,7 @@ async def sync_campaigns(
     service: ChannelService = Depends(_get_channel_service),
 ) -> list[ExternalCampaign]:
     """Synchronize external campaigns into deterministic mapping records."""
-    advertiser_id = user.advertiser_id or 1
+    advertiser_id = _require_advertiser_id(user)
     return await service.sync_campaigns(advertiser_id, connection_id)
 
 
@@ -189,7 +216,7 @@ async def preview_campaign_creation(
     service: ChannelService = Depends(_get_channel_service),
 ) -> CampaignPreviewResult:
     """Preview campaign parameters, spend, and warnings before committing writes."""
-    advertiser_id = user.advertiser_id or 1
+    advertiser_id = _require_advertiser_id(user)
     return await service.preview_campaign_creation(advertiser_id, connection_id, params)
 
 
@@ -210,7 +237,7 @@ async def create_campaign(
     
     Requires explicit user confirmation (confirmed=True) and X-Idempotency-Key header.
     """
-    advertiser_id = user.advertiser_id or 1
+    advertiser_id = _require_advertiser_id(user)
     return await service.create_campaign(
         advertiser_id=advertiser_id,
         connection_id=connection_id,
@@ -232,7 +259,7 @@ async def update_campaign_status(
     service: ChannelService = Depends(_get_channel_service),
 ) -> dict[str, Any]:
     """Pause or activate an external campaign."""
-    advertiser_id = user.advertiser_id or 1
+    advertiser_id = _require_advertiser_id(user)
     ok = await service.update_campaign_status(
         advertiser_id=advertiser_id,
         connection_id=connection_id,
@@ -255,7 +282,7 @@ async def sync_reporting(
     service: ChannelService = Depends(_get_channel_service),
 ) -> list[ExternalReportRow]:
     """Fetch historical performance reporting metrics from provider."""
-    advertiser_id = user.advertiser_id or 1
+    advertiser_id = _require_advertiser_id(user)
     return await service.sync_reporting(
         advertiser_id=advertiser_id,
         connection_id=connection_id,
@@ -274,7 +301,7 @@ async def disconnect_account(
     service: ChannelService = Depends(_get_channel_service),
 ) -> dict[str, Any]:
     """Disconnect and revoke an external account connection."""
-    advertiser_id = user.advertiser_id or 1
+    advertiser_id = _require_advertiser_id(user)
     ok = await service.disconnect(advertiser_id, connection_id, user_id=user.id)
     return {"success": ok, "connection_id": connection_id, "status": "DISCONNECTED"}
 
@@ -293,12 +320,7 @@ async def register_publisher_contract(
     service: ChannelService = Depends(_get_channel_service),
 ) -> PublisherContractResponse:
     """Register a signed agreement for AI publisher inventory delivery."""
-    if not user.publisher_id and user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User is not associated with a publisher account",
-        )
-    publisher_id = user.publisher_id or 1
+    publisher_id = _require_publisher_id(user)
     return await service.register_publisher_contract(
         publisher_id=publisher_id,
         req=req,
@@ -316,7 +338,7 @@ async def verify_publisher_surface(
     service: ChannelService = Depends(_get_channel_service),
 ) -> dict[str, Any]:
     """Verify surface authorization under active signed contract."""
-    publisher_id = user.publisher_id or 1
+    publisher_id = _require_publisher_id(user)
     is_valid, reason = await service.verify_publisher_surface(publisher_id, surface_id)
     return {
         "surface_id": surface_id,

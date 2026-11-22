@@ -5,6 +5,7 @@ Safe to run in local development or CI environments with a running PostgreSQL se
 Never touches production or developer databases.
 """
 
+import argparse
 import asyncio
 import os
 import subprocess
@@ -26,7 +27,10 @@ from liteads.models.publisher import Publisher
 from liteads.models.finance import Transaction
 from liteads.ad_server.services.conversion_service import ConversionService
 from liteads.common.tracking_sig import sign_click_token
-from liteads.common.alembic_utils import get_authoritative_alembic_head
+from liteads.common.alembic_utils import (
+    get_authoritative_alembic_head,
+    get_preceding_alembic_revision,
+)
 
 TEST_DB_NAME = "liteads_phase11_pg_audit_db"
 PRE_CHANGE_REVISION = "09062f9ba9c2"
@@ -123,7 +127,28 @@ async def assert_geo_constraint(
     ), f"Unexpected legacy constraint {absent}"
 
 
-async def main():
+def is_ci_environment() -> bool:
+    ci_val = os.environ.get("CI", "").strip().lower()
+    gh_val = os.environ.get("GITHUB_ACTIONS", "").strip().lower()
+    return ci_val in ("true", "1", "yes") or gh_val in ("true", "1", "yes")
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Phase 11: PostgreSQL-Backed Concurrency, Ledger & Rollback Verification"
+    )
+    parser.add_argument(
+        "--allow-skip-if-unavailable",
+        action="store_true",
+        help="Allow graceful exit (code 0) ONLY in local non-CI environment if PostgreSQL is unreachable. Disallowed in CI.",
+    )
+    return parser.parse_args(argv)
+
+
+async def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    is_ci = is_ci_environment()
+
     settings = get_settings()
     host = settings.database.host
     port = settings.database.port
@@ -134,8 +159,20 @@ async def main():
     try:
         admin_conn = await asyncpg.connect(host=host, port=port, user=user, password=password, database="postgres")
     except Exception as e:
-        print(f"SKIPPED: PostgreSQL service is not reachable on {host}:{port}: {e}")
-        return 0
+        error_msg = f"PostgreSQL service is not reachable on {host}:{port}: {e}"
+        if args.allow_skip_if_unavailable and not is_ci:
+            print(f"SKIPPED (Local non-CI opt-in): {error_msg}")
+            return 0
+
+        if is_ci:
+            print(f"FAIL CLOSED (CI environment detected): {error_msg}", file=sys.stderr)
+        else:
+            print(
+                f"FAIL CLOSED: {error_msg}\n"
+                "Pass --allow-skip-if-unavailable to allow local non-CI skip when database is offline.",
+                file=sys.stderr,
+            )
+        return 1
 
     print("=== Step 1: Setting up isolated PostgreSQL test database ===")
     alembic_ini = find_alembic_ini()
@@ -246,6 +283,48 @@ async def main():
             )
         finally:
             await geo_conn.close()
+
+        # Step 4B: Immediately preceding revision (head-1) downgrade and upgrade verification
+        print("\n=== Step 4B: Verifying immediately preceding revision (head-1) downgrade and upgrade path ===")
+        preceding_rev = get_preceding_alembic_revision(alembic_ini)
+        if preceding_rev:
+            print(f"Testing downgrade to preceding revision (head-1): {preceding_rev}")
+            print(await run_alembic(alembic_ini, TEST_DB_NAME, "downgrade", preceding_rev))
+            geo_conn = await asyncpg.connect(
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+                database=TEST_DB_NAME,
+            )
+            try:
+                db_version = await geo_conn.fetchval("SELECT version_num FROM alembic_version")
+                assert db_version == preceding_rev, (
+                    f"Expected alembic_version {preceding_rev!r} after downgrade, got {db_version!r}"
+                )
+                print(f"PASS: Successfully downgraded to preceding revision {preceding_rev}")
+            finally:
+                await geo_conn.close()
+
+            print(f"Testing re-upgrade from {preceding_rev} to head ({expected_head})")
+            print(await run_alembic(alembic_ini, TEST_DB_NAME, "upgrade", "head"))
+            geo_conn = await asyncpg.connect(
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+                database=TEST_DB_NAME,
+            )
+            try:
+                db_version = await geo_conn.fetchval("SELECT version_num FROM alembic_version")
+                assert db_version == expected_head, (
+                    f"Expected alembic_version {expected_head!r} after re-upgrade, got {db_version!r}"
+                )
+                print(f"PASS: Successfully re-upgraded from {preceding_rev} to head {expected_head}")
+            finally:
+                await geo_conn.close()
+        else:
+            print("INFO: Single revision graph or no preceding revision detected; skipping head-1 step.")
 
         # Create async engine connected to isolated DB
         db_url = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{TEST_DB_NAME}"
@@ -503,4 +582,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    sys.exit(asyncio.run(main(sys.argv[1:])))

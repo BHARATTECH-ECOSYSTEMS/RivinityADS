@@ -72,6 +72,8 @@ async def track_event(
                 extra_slot_id=extra["slot_id"],
             )
         extra["slot_id"] = event.slot_id
+    if getattr(event, "consent_token", None):
+        extra["consent_token"] = event.consent_token
 
     # 4. Record the event with transactional retry safety
     try:
@@ -116,6 +118,7 @@ async def track_event_get(
     sig: str = Query(..., description="Tracking signature"),
     slot: str | None = Query(None, description="Publisher slot ID"),
     sandbox: int | None = Query(None, description="Sandbox indicator flag"),
+    consent_token: str | None = Query(None, description="Visitor consent token proof"),
     event_service: EventService = Depends(get_event_service),
 ) -> EventResponse:
     """
@@ -149,6 +152,8 @@ async def track_event_get(
         extra_data["slot_id"] = slot
     if sandbox:
         extra_data["is_sandbox"] = True
+    if consent_token:
+        extra_data["consent_token"] = consent_token
 
     # 4. Record the event with transactional retry safety
     try:

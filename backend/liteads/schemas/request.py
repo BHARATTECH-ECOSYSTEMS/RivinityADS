@@ -244,6 +244,7 @@ class EventRequest(BaseModel):
     user_id: str | None = Field(None, description="User identifier")
     slot_id: str | None = Field(None, description="Slot identifier")
     sig: str | None = Field(None, description="Cryptographic tracking signature")
+    consent_token: str | None = Field(None, description="Visitor consent token proof (Phase 1)")
     extra: dict[str, Any] | None = Field(None, description="Extra event data")
 
     model_config = {

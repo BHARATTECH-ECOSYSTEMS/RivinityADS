@@ -487,7 +487,8 @@ async def request_ads(
     # Phase 1: Visitor Consent Gate for Website Placements
     # Ad delivery on websites strictly requires verified visitor consent.
     from liteads.models.website import WebsiteProject, WebsiteConsentLog
-    from liteads.common.tracking_sig import verify_consent_token
+    from liteads.common.security import resolve_client_ip
+    from liteads.common.tracking_sig import check_visitor_consent_revocation, verify_consent_token
 
     website_proj = None
     if slot.property_id:
@@ -497,7 +498,7 @@ async def request_ads(
         website_proj = proj_res.scalar_one_or_none()
 
     if website_proj and not is_sandbox and not is_trusted_s2s:
-        # 1. Check for signed visitor consent token proof
+        # 1. Check for signed visitor consent token proof (fail-closed, no IP fallback)
         consent_token = ad_request.consent_token or request.headers.get("X-Consent-Token")
         is_consented = False
         if consent_token:
@@ -507,6 +508,23 @@ async def request_ads(
                 expected_project_id=website_proj.id,
             )
             if token_data.get("is_granted"):
+                client_ip = resolve_client_ip(request)
+                client_ip_hash = hashlib.sha256(client_ip.encode("utf-8")).hexdigest() if client_ip else None
+                is_revoked = await check_visitor_consent_revocation(
+                    session=session,
+                    project_id=website_proj.id,
+                    visitor_id=token_data.get("visitor_id"),
+                    token_timestamp=token_data.get("timestamp", 0),
+                    consent_log_id=token_data.get("consent_log_id"),
+                    client_ip_hash=client_ip_hash,
+                )
+                if is_revoked:
+                    logger.info(
+                        "Ad request suppressed: visitor previously granted consent but subsequently withdrew/revoked it",
+                        slot_id=ad_request.slot_id,
+                        site_slug=website_proj.slug,
+                    )
+                    return AdListResponse(ads=[], total=0)
                 is_consented = True
             else:
                 logger.info(
@@ -515,24 +533,6 @@ async def request_ads(
                     site_slug=website_proj.slug,
                 )
                 return AdListResponse(ads=[], total=0)
-        else:
-            # 2. Check for trusted stored consent state via privacy hash
-            raw_ip = request.client.host if request.client else None
-            ip_h = hashlib.sha256(raw_ip.encode("utf-8")).hexdigest() if raw_ip else None
-            if ip_h:
-                c_stmt = (
-                    select(WebsiteConsentLog)
-                    .where(
-                        WebsiteConsentLog.project_id == website_proj.id,
-                        WebsiteConsentLog.consent_type == "visitor_consent",
-                        WebsiteConsentLog.client_ip_hash == ip_h,
-                    )
-                    .order_by(WebsiteConsentLog.recorded_at.desc())
-                    .limit(1)
-                )
-                stored_log = (await session.execute(c_stmt)).scalar_one_or_none()
-                if stored_log and stored_log.is_granted:
-                    is_consented = True
 
         if not is_consented:
             logger.info(
@@ -565,14 +565,15 @@ async def request_ads(
             pass
 
         sandbox_param = "&sandbox=1" if is_sandbox else ""
+        consent_param = f"&consent_token={quote(consent_token)}" if consent_token else ""
         tracking = TrackingUrls(
             impression_url=(
                 f"{base_url}/api/v1/event/track?type=impression"
-                f"&req={request_id}&ad={ad_id}&slot={slot_q}{sig_param}{sandbox_param}"
+                f"&req={request_id}&ad={ad_id}&slot={slot_q}{sig_param}{sandbox_param}{consent_param}"
             ),
             click_url=(
                 f"{base_url}/api/v1/event/track?type=click"
-                f"&req={request_id}&ad={ad_id}&slot={slot_q}{sig_param}{sandbox_param}"
+                f"&req={request_id}&ad={ad_id}&slot={slot_q}{sig_param}{sandbox_param}{consent_param}"
             ),
             conversion_url=(
                 f"{base_url}/api/v1/event/conversion"

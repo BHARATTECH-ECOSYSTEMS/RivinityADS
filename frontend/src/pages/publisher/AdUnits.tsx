@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import {
   listSlots,
   createSlot,
@@ -61,7 +61,16 @@ export default function PublisherAdUnits() {
   const [pendingToggle, setPendingToggle] = useState<{ id: number; currentStatus: number; name: string } | null>(null);
   const [toggleLoading, setToggleLoading] = useState(false);
 
+  const location = useLocation();
   const publisherId = session?.user?.publisher_id;
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const propIdParam = params.get("property_id");
+    if (propIdParam) {
+      setPropertyId(Number(propIdParam));
+    }
+  }, [location.search]);
 
   const loadData = async () => {
     if (!publisherId) return;
@@ -270,7 +279,7 @@ export default function PublisherAdUnits() {
                               </span>
                               {prop.verification_status !== "VERIFIED" ? (
                                 <span style={{ fontSize: "0.6875rem", color: "var(--color-warning)", fontWeight: 500 }}>
-                                  ⚠️ Unverified Property
+                                  ⚠️ Unverified Property (Delivery Blocked)
                                 </span>
                               ) : (
                                 <span style={{ fontSize: "0.6875rem", color: "var(--color-success)", fontWeight: 500 }}>

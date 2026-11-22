@@ -327,17 +327,30 @@ async def _serve_published_page_response(
             page_slug=clean_page_slug,
         )
         if cached_html:
+            headers = dict(PUBLIC_SECURITY_HEADERS)
+            if cached_info and cached_info.get("is_monetized"):
+                headers["Content-Security-Policy"] = (
+                    "default-src 'none'; "
+                    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+                    "font-src https://fonts.gstatic.com; "
+                    "img-src 'self' https: data:; "
+                    "script-src 'self'; "
+                    "frame-ancestors 'none'; "
+                    "form-action 'self'; "
+                    "connect-src 'self'; "
+                    "base-uri 'none';"
+                )
+            headers["Cache-Control"] = f"public, max-age={settings.website.cache_ttl_seconds}"
+            headers["X-Cache"] = "HIT"
             return HTMLResponse(
                 content=cached_html,
-                headers={
-                    **PUBLIC_SECURITY_HEADERS,
-                    "Cache-Control": f"public, max-age={settings.website.cache_ttl_seconds}",
-                    "X-Cache": "HIT",
-                },
+                headers=headers,
             )
 
     # 3. Resolve from DB with fail-closed checks
     project, version, snapshot = await _resolve_published_site_and_snapshot(slug, session)
+
+    is_monetized = (project.monetization_status == WebsiteMonetizationStatus.ACTIVE_MONETIZED)
 
     # Cache site info
     await website_cache.set_site_info(
@@ -346,6 +359,7 @@ async def _serve_published_page_response(
             "project_id": project.id,
             "version_id": version.id,
             "status": project.status,
+            "is_monetized": is_monetized,
         },
         ttl_seconds=60,
     )
@@ -605,6 +619,14 @@ async def record_visitor_consent(
     ua_hash = hashlib.sha256(ua.encode("utf-8")).hexdigest() if ua else None
 
     # Default to Denied: All non-essential categories (advertising, analytics) default to False
+    visitor_id = (payload.visitor_id or "").strip()
+    if not visitor_id:
+        if ip_hash and ua_hash:
+            visitor_id = hashlib.sha256(f"{ip_hash}:{ua_hash}".encode("utf-8")).hexdigest()[:24]
+        else:
+            import uuid
+            visitor_id = uuid.uuid4().hex[:24]
+
     raw_categories = payload.categories or {}
     is_advertising_granted = bool(raw_categories.get("advertising", False))
     is_analytics_granted = bool(raw_categories.get("analytics", False))
@@ -613,29 +635,42 @@ async def record_visitor_consent(
         "advertising": is_advertising_granted,
         "analytics": is_analytics_granted,
     }
+    clean_scope = {
+        **clean_categories,
+        "visitor_id": visitor_id,
+    }
 
-    # Idempotent write: reuse recent identical record if scope and hashes match
-    existing_stmt = (
+    # Idempotent write: reuse latest record ONLY if the visitor's latest decision is already identical
+    latest_stmt = (
         select(WebsiteConsentLog)
         .where(
             WebsiteConsentLog.project_id == project.id,
             WebsiteConsentLog.consent_type == "visitor_consent",
             WebsiteConsentLog.client_ip_hash == ip_hash,
             WebsiteConsentLog.user_agent_hash == ua_hash,
-            WebsiteConsentLog.version == payload.version,
-            WebsiteConsentLog.is_granted == is_advertising_granted,
         )
-        .order_by(WebsiteConsentLog.recorded_at.desc())
+        .order_by(WebsiteConsentLog.id.desc())
         .limit(1)
     )
-    existing_log = (await session.execute(existing_stmt)).scalar_one_or_none()
-    if existing_log and existing_log.consent_scope == clean_categories:
-        log = existing_log
+    latest_log = (await session.execute(latest_stmt)).scalar_one_or_none()
+    if (
+        latest_log
+        and latest_log.is_granted == is_advertising_granted
+        and latest_log.version == payload.version
+        and (
+            latest_log.consent_scope == clean_scope
+            or (
+                latest_log.consent_scope.get("advertising") == is_advertising_granted
+                and (latest_log.consent_scope.get("visitor_id") == visitor_id or not latest_log.consent_scope.get("visitor_id"))
+            )
+        )
+    ):
+        log = latest_log
     else:
         log = WebsiteConsentLog(
             project_id=project.id,
             consent_type="visitor_consent",
-            consent_scope=clean_categories,
+            consent_scope=clean_scope,
             version=payload.version,
             is_granted=is_advertising_granted,
             client_ip_hash=ip_hash,
@@ -652,6 +687,8 @@ async def record_visitor_consent(
         project_id=project.id,
         is_granted=is_advertising_granted,
         version=payload.version,
+        visitor_id=visitor_id,
+        consent_log_id=log.id,
         ttl_seconds=604800,
     )
 
@@ -663,6 +700,7 @@ async def record_visitor_consent(
         is_granted=is_advertising_granted,
         consent_token=consent_token,
         expires_at=expires_at,
+        visitor_id=visitor_id,
     )
 
 

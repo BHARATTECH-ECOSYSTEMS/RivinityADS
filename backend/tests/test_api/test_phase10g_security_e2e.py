@@ -438,6 +438,7 @@ async def test_complete_end_to_end_monetized_website_lifecycle(client: AsyncClie
         json={"version": "1.0", "categories": {"necessary": True, "advertising": True}},
     )
     assert vis_res.status_code == 201
+    vis_token = vis_res.json()["consent_token"]
 
     # Step 11 & 12: Track billable impression
     adv = Advertiser(name="Top Advertiser", balance=Decimal("200.00"), status=Status.ACTIVE)
@@ -467,7 +468,7 @@ async def test_complete_end_to_end_monetized_website_lifecycle(client: AsyncClie
         request_id="e2e_live_req_001",
         ad_id=f"ad_{camp.id}_{creative.id}",
         event_type="impression",
-        extra={"slot_id": "chronicle_top_banner"},
+        extra={"slot_id": "chronicle_top_banner", "consent_token": vis_token},
     )
     assert track_ok is True
 
@@ -487,7 +488,7 @@ async def test_complete_end_to_end_monetized_website_lifecycle(client: AsyncClie
         request_id="e2e_live_req_002",
         ad_id=f"ad_{camp.id}_{creative.id}",
         event_type="impression",
-        extra={"slot_id": "chronicle_top_banner"},
+        extra={"slot_id": "chronicle_top_banner", "consent_token": vis_token},
     )
     assert track_suspended is True
 

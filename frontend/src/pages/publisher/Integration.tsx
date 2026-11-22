@@ -310,6 +310,27 @@ print("Ad Response:", json.dumps(ad, indent=2))`
         </Card>
       </div>
 
+      {/* Platform Invariants & Verification Callout */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "16px", marginBottom: "24px" }}>
+        <div style={{ background: "var(--color-bg-subtle)", border: "1px solid var(--border-color)", borderRadius: "var(--radius-md)", padding: "14px 16px" }}>
+          <div style={{ fontWeight: 600, fontSize: "0.8125rem", color: "var(--color-text-primary)", display: "flex", alignItems: "center", gap: "6px" }}>
+            <span>🔒</span> Origin &amp; Referer Domain Matching
+          </div>
+          <p style={{ margin: "6px 0 0", fontSize: "0.75rem", color: "var(--color-text-secondary)", lineHeight: 1.5 }}>
+            To prevent ad spoofing and traffic hijacking, the ad server validates the request <code>Origin</code> and <code>Referer</code> headers against your verified property domain. Requests from mismatched domains are rejected with HTTP 403 Forbidden.
+          </p>
+        </div>
+
+        <div style={{ background: "var(--color-bg-subtle)", border: "1px solid var(--border-color)", borderRadius: "var(--radius-md)", padding: "14px 16px" }}>
+          <div style={{ fontWeight: 600, fontSize: "0.8125rem", color: "var(--color-text-primary)", display: "flex", alignItems: "center", gap: "6px" }}>
+            <span>🧪</span> Non-Billable Test Mode &amp; Sandbox Safety
+          </div>
+          <p style={{ margin: "6px 0 0", fontSize: "0.75rem", color: "var(--color-text-secondary)", lineHeight: 1.5 }}>
+            Requests sent via the live test inspector above or within editor preview sandboxes are strictly non-billable. They generate zero balance deductions for advertisers and zero publisher earnings adjustments.
+          </p>
+        </div>
+      </div>
+
       {/* Integration Snippets Card */}
       <Card
         title="Integration Code Snippets"
@@ -440,12 +461,32 @@ print("Ad Response:", json.dumps(ad, indent=2))`
       {/* Supported Formats & Conversational AI Surface Guide */}
       <Card
         title="Supported Formats &amp; Placement Specifications"
-        subtitle="Match ad placement dimensions and opt into Conversational AI surfaces."
+        subtitle="Match ad placement dimensions, creative formats, and opt into Conversational AI surfaces."
         style={{ marginBottom: "24px" }}
       >
         <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1.8fr", gap: "24px", alignItems: "start" }}>
           <div>
-            <h4 style={{ fontSize: "0.875rem", fontWeight: 700, margin: "0 0 8px" }}>Standard IAB Display Sizes</h4>
+            <h4 style={{ fontSize: "0.875rem", fontWeight: 700, margin: "0 0 8px" }}>Supported Creative Formats</h4>
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginBottom: "16px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8125rem", padding: "6px 0", borderBottom: "1px solid var(--border-color)" }}>
+                <span><strong>Banner</strong> (Format 1)</span>
+                <span style={{ color: "var(--color-text-secondary)" }}>Display Image / HTML creatives</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8125rem", padding: "6px 0", borderBottom: "1px solid var(--border-color)" }}>
+                <span><strong>Native</strong> (Format 2)</span>
+                <span style={{ color: "var(--color-text-secondary)" }}>Feed cards &amp; contextual in-stream units</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8125rem", padding: "6px 0", borderBottom: "1px solid var(--border-color)" }}>
+                <span><strong>Video</strong> (Format 3)</span>
+                <span style={{ color: "var(--color-text-secondary)" }}>Outstream &amp; VAST-compatible video</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8125rem", padding: "6px 0", borderBottom: "1px solid var(--border-color)" }}>
+                <span><strong>Interstitial</strong> (Format 4)</span>
+                <span style={{ color: "var(--color-text-secondary)" }}>Full-screen overlay transitions</span>
+              </div>
+            </div>
+
+            <h4 style={{ fontSize: "0.875rem", fontWeight: 700, margin: "0 0 8px" }}>Standard IAB Display Dimensions</h4>
             <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.8125rem", padding: "6px 0", borderBottom: "1px solid var(--border-color)" }}>
                 <span>Medium Rectangle</span>
@@ -475,13 +516,14 @@ print("Ad Response:", json.dumps(ad, indent=2))`
               <span>💬</span> Conversational AI Surfaces (Chat AI)
             </div>
             <p style={{ fontSize: "0.8125rem", color: "var(--color-text-secondary)", margin: "8px 0 12px" }}>
-              Placements flagged with <code>is_chat_surface: true</code> are optimized for conversational AI engines, chatbot dialogues, and AI assistant interfaces.
+              Placements flagged with <code>is_chat_surface: true</code> require explicit publisher opt-in and are optimized for conversational AI engines, chatbot dialogues, and AI assistant interfaces.
             </p>
             <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "0.75rem", color: "var(--color-text-secondary)", lineHeight: 1.6 }}>
-              <li>Context-aware sector affinity matching against user queries.</li>
-              <li>Native card rendering designed for assistant text streams.</li>
-              <li>Strict privacy hashing: user identifiers are irreversibly hashed before ad matching.</li>
-              <li>Eligible for premium dynamic pricing and conversational advertiser bids.</li>
+              <li><strong>Explicit Surface Opt-In:</strong> Check &quot;Conversational AI Surface&quot; when creating or editing a placement slot.</li>
+              <li><strong>Context-Aware Matching:</strong> Real-time sector affinity matching against user conversation prompts.</li>
+              <li><strong>Native Stream Formatting:</strong> Lightweight cards formatted specifically for LLM text outputs.</li>
+              <li><strong>Zero PII / Privacy Hashing:</strong> User identifiers must be 64-character SHA-256 hashes prior to request submission.</li>
+              <li><strong>Premium Yield:</strong> Eligible for conversational advertiser bidding and higher floor pricing.</li>
             </ul>
           </div>
         </div>

@@ -459,27 +459,48 @@ class ChannelService:
         created_campaign = await connector.create_campaign(params, idempotency_key=idempotency_key)
 
         now = datetime.now(timezone.utc).replace(tzinfo=None)
-        mapping = ExternalCampaignMapping(
-            connection_id=conn.id,
-            advertiser_id=advertiser_id,
-            external_campaign_id=created_campaign.external_id,
-            external_campaign_name=created_campaign.name,
-            external_status=created_campaign.status,
-            remote_object_status=created_campaign.remote_object_status,
-            moderation_status=created_campaign.moderation_status,
-            provider_request_id=created_campaign.provider_request_id,
-            remote_resource_name=created_campaign.remote_resource_name,
-            sync_status="SYNCED",
-            objective=created_campaign.objective,
-            daily_budget=Decimal(str(created_campaign.daily_budget)) if created_campaign.daily_budget is not None else None,
-            total_spend=Decimal("0.0"),
-            currency=created_campaign.currency,
-            idempotency_key=idempotency_key,
-            last_sync_at=now,
-            created_at=now,
-            updated_at=now,
+        stmt_ext = select(ExternalCampaignMapping).where(
+            ExternalCampaignMapping.connection_id == conn.id,
+            ExternalCampaignMapping.external_campaign_id == created_campaign.external_id,
         )
-        self.session.add(mapping)
+        res_ext = await self.session.execute(stmt_ext)
+        existing_ext = res_ext.scalar_one_or_none()
+
+        if existing_ext:
+            existing_ext.external_campaign_name = created_campaign.name
+            existing_ext.external_status = created_campaign.status
+            existing_ext.remote_object_status = created_campaign.remote_object_status
+            existing_ext.moderation_status = created_campaign.moderation_status
+            existing_ext.provider_request_id = created_campaign.provider_request_id
+            existing_ext.remote_resource_name = created_campaign.remote_resource_name
+            existing_ext.sync_status = "SYNCED"
+            existing_ext.objective = created_campaign.objective
+            existing_ext.daily_budget = Decimal(str(created_campaign.daily_budget)) if created_campaign.daily_budget is not None else None
+            existing_ext.idempotency_key = idempotency_key
+            existing_ext.last_sync_at = now
+            mapping = existing_ext
+        else:
+            mapping = ExternalCampaignMapping(
+                connection_id=conn.id,
+                advertiser_id=advertiser_id,
+                external_campaign_id=created_campaign.external_id,
+                external_campaign_name=created_campaign.name,
+                external_status=created_campaign.status,
+                remote_object_status=created_campaign.remote_object_status,
+                moderation_status=created_campaign.moderation_status,
+                provider_request_id=created_campaign.provider_request_id,
+                remote_resource_name=created_campaign.remote_resource_name,
+                sync_status="SYNCED",
+                objective=created_campaign.objective,
+                daily_budget=Decimal(str(created_campaign.daily_budget)) if created_campaign.daily_budget is not None else None,
+                total_spend=Decimal("0.0"),
+                currency=created_campaign.currency,
+                idempotency_key=idempotency_key,
+                last_sync_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+            self.session.add(mapping)
 
         # Audit log
         audit = AuditLog(

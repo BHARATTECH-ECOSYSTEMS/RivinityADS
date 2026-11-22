@@ -80,6 +80,23 @@ def validate_single_head(alembic_ini: str | Path | None = None) -> str:
     return head
 
 
+def get_preceding_alembic_revision(alembic_ini: str | Path | None = None) -> str | None:
+    """
+    Get the down_revision of the single authoritative head (head-1).
+    Returns None if the head has no down_revision (i.e. single revision in repo).
+    """
+    ini_path = find_alembic_ini(alembic_ini)
+    config = Config(str(ini_path))
+    script = ScriptDirectory.from_config(config)
+    head = get_authoritative_alembic_head(alembic_ini)
+    rev = script.get_revision(head)
+    if rev is None:
+        return None
+    if isinstance(rev.down_revision, tuple):
+        return rev.down_revision[0] if rev.down_revision else None
+    return rev.down_revision
+
+
 if __name__ == "__main__":
     head = validate_single_head()
     print(head)

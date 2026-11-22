@@ -13,9 +13,9 @@
 (function () {
   "use strict";
 
-  var el = document.currentScript;
+  var el = document.currentScript || document.querySelector("script[data-slot]") || document.querySelector("script[src*='rivinity.js']");
   if (!el) {
-    console.warn("[rivinity] Could not detect currentScript — load synchronously.");
+    console.warn("[rivinity] Could not detect script element with data-slot.");
     return;
   }
 
@@ -47,12 +47,18 @@
   function getStoredConsent() {
     try {
       if (typeof localStorage === "undefined") return null;
-      var raw = localStorage.getItem(storageKey);
+      var raw = localStorage.getItem(storageKey) || localStorage.getItem("rivinity_consent_" + policyVersion);
       if (!raw) return null;
       var data = JSON.parse(raw);
       if (!data || typeof data !== "object") return null;
+      if (data.version && data.version !== policyVersion) {
+        localStorage.removeItem(storageKey);
+        localStorage.removeItem("rivinity_consent_" + policyVersion);
+        return null;
+      }
       if (data.expires_at && (Date.now() / 1000) > data.expires_at) {
         localStorage.removeItem(storageKey);
+        localStorage.removeItem("rivinity_consent_" + policyVersion);
         return null;
       }
       return data;
@@ -64,7 +70,9 @@
   function saveStoredConsent(data) {
     try {
       if (typeof localStorage !== "undefined") {
-        localStorage.setItem(storageKey, JSON.stringify(data));
+        var str = JSON.stringify(data);
+        localStorage.setItem(storageKey, str);
+        localStorage.setItem("rivinity_consent_" + policyVersion, str);
       }
     } catch (e) {}
   }
@@ -78,6 +86,21 @@
         localStorage.removeItem("rv_user_id");
       }
     } catch (e) {}
+  }
+
+  function getVisitorId() {
+    try {
+      if (typeof localStorage === "undefined") return "v_anon_" + Math.random().toString(36).substring(2, 10);
+      var k = "rv_vid_" + (siteSlug || "default");
+      var vid = localStorage.getItem(k);
+      if (!vid) {
+        vid = "v_" + Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
+        localStorage.setItem(k, vid);
+      }
+      return vid;
+    } catch (e) {
+      return "v_anon";
+    }
   }
 
   // ── Pixel helper ─────────────────────────────────────────────────────────
@@ -214,6 +237,9 @@
     }
     var ct = (ad.creative || {}).creative_type || "banner";
     var container = document.createElement("div");
+    if (slot) {
+      container.id = "rivinity-ad-container-" + slot;
+    }
     container.setAttribute("data-ad-id", ad.ad_id || "");
     pixel(ad.tracking.impression_url);
     if (ct === "video") {
@@ -265,7 +291,14 @@
       })
       .catch(function (err) {
         console.warn("[rivinity]", err.message || err);
-        renderPlaceholder("Ad Service Offline", "Unable to load advertisement.");
+        var msg = (err && err.message) ? err.message.toLowerCase() : "";
+        if (msg.indexOf("inactive") !== -1 || msg.indexOf("monetization") !== -1) {
+          renderPlaceholder("Monetisation Inactive", "Website monetization is currently inactive.");
+        } else if (msg.indexOf("preview") !== -1 || msg.indexOf("sandbox") !== -1) {
+          renderPlaceholder("Preview / Sandbox Mode", "Preview mode active. Ads are non-billable.");
+        } else {
+          renderPlaceholder("Ad Service Offline", "Unable to load advertisement.");
+        }
       });
   }
 
@@ -285,7 +318,7 @@
     } else {
       // Declined / Withdrawn: Suppress all ads and tracking
       clearTrackingIdentifiers();
-      renderPlaceholder("Non-Billable Sandbox", "Visitor consent declined. Ads and tracking suppressed.");
+      renderPlaceholder("Consent Declined", "Visitor consent declined. Ads and tracking suppressed.");
     }
   }
 
@@ -303,8 +336,10 @@
     if (!slug) {
       return Promise.reject(new Error("siteSlug is required to record consent"));
     }
+    var vid = options.visitorId || getVisitorId();
     var payload = {
       version: options.version || policyVersion,
+      visitor_id: vid,
       categories: {
         necessary: true,
         advertising: !!(categories && categories.advertising),
@@ -426,6 +461,17 @@
       var declineBtn = document.getElementById("rivinity-consent-decline");
       var manageBtn = document.getElementById("rivinity-consent-manage");
 
+      function showBannerError(msg) {
+        var errEl = banner.querySelector(".rivinity-consent-error");
+        if (!errEl) {
+          errEl = document.createElement("div");
+          errEl.className = "rivinity-consent-error";
+          errEl.style.cssText = "color:#fca5a5;font-size:0.75rem;margin-top:0.5rem;width:100%;";
+          banner.appendChild(errEl);
+        }
+        errEl.textContent = msg || "Unable to save preferences. Please check your connection and try again.";
+      }
+
       if (acceptBtn) {
         acceptBtn.addEventListener("click", function () {
           window.Rivinity.setConsent({ advertising: true, analytics: true }, { siteSlug: siteSlug })
@@ -435,7 +481,8 @@
             })
             .catch(function (err) {
               console.error("[rivinity] Failed to record consent", err);
-              banner.style.display = "none";
+              showBannerError("Unable to record consent. Please check your connection and try again.");
+              evaluateConsentAndServe();
             });
         });
       }
@@ -449,7 +496,8 @@
             })
             .catch(function (err) {
               console.error("[rivinity] Failed to record decline", err);
-              banner.style.display = "none";
+              showBannerError("Unable to record preferences. Please check your connection and try again.");
+              evaluateConsentAndServe();
             });
         });
       }
@@ -489,7 +537,14 @@
             })
             .catch(function (err) {
               console.error("[rivinity] Failed to save choices", err);
-              modal.style.display = "none";
+              var errEl = modal.querySelector(".rivinity-consent-error");
+              if (!errEl) {
+                errEl = document.createElement("div");
+                errEl.className = "rivinity-consent-error";
+                errEl.style.cssText = "color:#fca5a5;font-size:0.75rem;margin-top:0.5rem;";
+                modal.appendChild(errEl);
+              }
+              errEl.textContent = "Unable to save preferences. Please check your connection and try again.";
             });
         });
       }

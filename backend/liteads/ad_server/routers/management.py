@@ -11,6 +11,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import and_, case, func, select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from liteads.common.config import get_settings
@@ -1435,14 +1436,56 @@ async def get_publisher_placement_health(
     )
 
 
+async def _enrich_property_telemetry(session: AsyncSession, properties: list[PublisherProperty]) -> None:
+    """Enrich property models with operational last_impression_at and last_request_at."""
+    if not properties:
+        return
+    prop_ids = [p.id for p in properties]
+    slots_res = await session.execute(
+        select(AdSlot.property_id, AdSlot.slot_id).where(AdSlot.property_id.in_(prop_ids))
+    )
+    prop_to_slot_ids: dict[int, list[str]] = {}
+    for prop_id, slot_id_str in slots_res.all():
+        if prop_id:
+            prop_to_slot_ids.setdefault(prop_id, []).append(slot_id_str)
+
+    all_slot_ids = [sid for sids in prop_to_slot_ids.values() for sid in sids]
+    if all_slot_ids:
+        stats_res = await session.execute(
+            select(PublisherDailyStat.slot_id, func.max(PublisherDailyStat.updated_at))
+            .where(
+                PublisherDailyStat.slot_id.in_(all_slot_ids),
+                PublisherDailyStat.impressions > 0,
+            )
+            .group_by(PublisherDailyStat.slot_id)
+        )
+        slot_last_imp: dict[str, datetime] = {row[0]: row[1] for row in stats_res.all() if row[1]}
+        for prop in properties:
+            sids = prop_to_slot_ids.get(prop.id, [])
+            last_imps = [slot_last_imp[sid] for sid in sids if sid in slot_last_imp]
+            prop.last_impression_at = max(last_imps) if last_imps else None
+            prop.last_request_at = None
+    else:
+        for prop in properties:
+            prop.last_impression_at = None
+            prop.last_request_at = None
+
+
 @router.get("/publisher/{publisher_id}/property", response_model=list[PublisherPropertyResponse], dependencies=[Depends(require_roles("admin", "publisher"))])
 async def list_publisher_properties(
     publisher_id: int, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)
 ) -> list[PublisherProperty]:
     _assert_publisher_access(user, publisher_id)
-    query = select(PublisherProperty).where(PublisherProperty.publisher_id == publisher_id).order_by(PublisherProperty.id)
+    query = (
+        select(PublisherProperty)
+        .options(selectinload(PublisherProperty.slots))
+        .where(PublisherProperty.publisher_id == publisher_id)
+        .order_by(PublisherProperty.id)
+    )
     result = await session.execute(query)
-    return list(result.scalars().all())
+    props = list(result.scalars().all())
+    await _enrich_property_telemetry(session, props)
+    return props
 
 
 @router.post("/publisher/{publisher_id}/property", response_model=PublisherPropertyResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin", "publisher"))])
@@ -1477,13 +1520,18 @@ async def create_publisher_property(
         )
 
     # Check if this publisher already has this property registered
-    existing_stmt = select(PublisherProperty).where(
-        PublisherProperty.domain == norm_domain,
-        PublisherProperty.publisher_id == publisher_id,
+    existing_stmt = (
+        select(PublisherProperty)
+        .options(selectinload(PublisherProperty.slots))
+        .where(
+            PublisherProperty.domain == norm_domain,
+            PublisherProperty.publisher_id == publisher_id,
+        )
     )
     existing_res = await session.execute(existing_stmt)
     existing = existing_res.scalar_one_or_none()
     if existing is not None:
+        await _enrich_property_telemetry(session, [existing])
         return existing
 
     data = payload.model_dump()
@@ -1499,7 +1547,16 @@ async def create_publisher_property(
     property_obj = PublisherProperty(**data)
     session.add(property_obj)
     await session.commit()
-    await session.refresh(property_obj)
+
+    # Eagerly reload with slots so serialization never triggers lazy load
+    stmt_reload = (
+        select(PublisherProperty)
+        .options(selectinload(PublisherProperty.slots))
+        .where(PublisherProperty.id == property_obj.id)
+    )
+    res_reload = await session.execute(stmt_reload)
+    property_obj = res_reload.scalar_one()
+    await _enrich_property_telemetry(session, [property_obj])
     return property_obj
 
 
@@ -1507,10 +1564,17 @@ async def create_publisher_property(
 async def get_publisher_property(
     property_id: int, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)
 ) -> PublisherProperty:
-    property_obj = await session.get(PublisherProperty, property_id)
+    stmt = (
+        select(PublisherProperty)
+        .options(selectinload(PublisherProperty.slots))
+        .where(PublisherProperty.id == property_id)
+    )
+    res = await session.execute(stmt)
+    property_obj = res.scalar_one_or_none()
     if property_obj is None:
         raise _not_found("PublisherProperty", property_id)
     _assert_publisher_access(user, property_obj.publisher_id)
+    await _enrich_property_telemetry(session, [property_obj])
     return property_obj
 
 
@@ -1523,7 +1587,13 @@ async def update_publisher_property(
         generate_property_verification_token,
     )
 
-    property_obj = await session.get(PublisherProperty, property_id)
+    stmt = (
+        select(PublisherProperty)
+        .options(selectinload(PublisherProperty.slots))
+        .where(PublisherProperty.id == property_id)
+    )
+    res = await session.execute(stmt)
+    property_obj = res.scalar_one_or_none()
     if property_obj is None:
         raise _not_found("PublisherProperty", property_id)
     _assert_publisher_access(user, property_obj.publisher_id)
@@ -1582,7 +1652,16 @@ async def update_publisher_property(
             )
 
     await session.commit()
-    await session.refresh(property_obj)
+
+    # Eagerly reload with slots
+    stmt_reload = (
+        select(PublisherProperty)
+        .options(selectinload(PublisherProperty.slots))
+        .where(PublisherProperty.id == property_obj.id)
+    )
+    res_reload = await session.execute(stmt_reload)
+    property_obj = res_reload.scalar_one()
+    await _enrich_property_telemetry(session, [property_obj])
     return property_obj
 
 
@@ -1640,6 +1719,16 @@ async def verify_publisher_property(
 
     service = PublisherVerificationService(session)
     result_prop = await service.verify_property(property_obj)
+
+    # Eagerly reload with slots so serialization never triggers lazy load / MissingGreenlet
+    stmt_reload = (
+        select(PublisherProperty)
+        .options(selectinload(PublisherProperty.slots))
+        .where(PublisherProperty.id == result_prop.id)
+    )
+    res_reload = await session.execute(stmt_reload)
+    result_prop = res_reload.scalar_one()
+    await _enrich_property_telemetry(session, [result_prop])
     return result_prop
 
 

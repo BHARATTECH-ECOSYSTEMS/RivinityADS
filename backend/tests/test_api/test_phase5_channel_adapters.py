@@ -249,7 +249,7 @@ async def test_discover_accounts_and_sync_campaigns(
         idempotency_key="idemp_q4_saas_001",
         user_id=1,
     )
-    assert created.external_id.startswith("oa_cmp_")
+    assert created.external_id.startswith(("oa_cmp_", "sim_oa_cmp_"))
     assert created.status == "ACTIVE"
 
     # Synchronize campaigns

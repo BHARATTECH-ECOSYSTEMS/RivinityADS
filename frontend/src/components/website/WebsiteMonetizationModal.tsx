@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { PropertyVerificationPanel } from "../publisher/PropertyVerificationPanel";
 import {
   ProjectData,
   PublisherProperty,
@@ -836,123 +837,30 @@ export const WebsiteMonetizationModal: React.FC<WebsiteMonetizationModalProps> =
                     </div>
                   </div>
 
-                  {/* Challenge Generator Form */}
-                  <div className="card space-y-3" style={{ padding: "1.25rem" }}>
-                    <div style={{ fontWeight: 600, fontSize: "0.875rem" }}>
-                      Generate Domain Challenge
-                    </div>
-
-                    <div>
-                      <label className="form-label" style={{ fontSize: "0.8125rem" }}>
-                        Verification Method
-                      </label>
-                      <div style={{ display: "flex", gap: "1rem", marginTop: "0.25rem" }}>
-                        <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.8125rem", cursor: "pointer" }}>
-                          <input
-                            type="radio"
-                            name="verMethod"
-                            value="DNS_TXT"
-                            checked={verificationMethod === "DNS_TXT"}
-                            onChange={() => setVerificationMethod("DNS_TXT")}
-                            data-testid="challenge-method-dns"
-                          />
-                          DNS TXT Record (Root Domain)
-                        </label>
-                        <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", fontSize: "0.8125rem", cursor: "pointer" }}>
-                          <input
-                            type="radio"
-                            name="verMethod"
-                            value="HTML_META"
-                            checked={verificationMethod === "HTML_META"}
-                            onChange={() => setVerificationMethod("HTML_META")}
-                            data-testid="challenge-method-html"
-                          />
-                          HTML Meta Tag (&lt;head&gt;)
-                        </label>
-                      </div>
-                    </div>
-
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => handleGenerateChallenge(project.property_id!)}
-                      disabled={isGeneratingChallenge}
-                      data-testid="generate-challenge-btn"
-                    >
-                      {isGeneratingChallenge ? "Generating..." : "Generate / Renew Challenge"}
-                    </button>
-
-                    {/* Challenge Instructions Box */}
-                    {challengeData && (
-                      <div
-                        style={{
-                          marginTop: "1rem",
-                          padding: "1rem",
-                          backgroundColor: "var(--bg-secondary)",
-                          border: "1px solid var(--border)",
-                          borderRadius: "var(--radius-sm)",
-                          fontSize: "0.8125rem",
-                        }}
-                        className="space-y-2"
-                        data-testid="challenge-details-box"
-                      >
-                        <div style={{ fontWeight: 700, color: "var(--text-primary)" }}>
-                          Authoritative Verification Instructions:
-                        </div>
-                        <p style={{ margin: 0, color: "var(--text-secondary)" }}>
-                          {challengeData.instructions}
-                        </p>
-
-                        {challengeData.verification_method === "DNS_TXT" ? (
-                          <div className="space-y-1" style={{ marginTop: "0.5rem" }}>
-                            <div>
-                              <span style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>Host / Name: </span>
-                              <code style={{ fontSize: "0.75rem" }}>{challengeData.dns_record_name}</code>
-                            </div>
-                            <div>
-                              <span style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>Value: </span>
-                              <code style={{ fontSize: "0.75rem" }}>{challengeData.dns_record_value}</code>
-                            </div>
-                          </div>
-                        ) : (
-                          <div style={{ marginTop: "0.5rem" }}>
-                            <span style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>Meta Tag: </span>
-                            <pre
-                              style={{
-                                padding: "0.5rem",
-                                backgroundColor: "var(--bg-card)",
-                                borderRadius: "4px",
-                                overflowX: "auto",
-                                fontSize: "0.75rem",
-                                margin: "0.25rem 0 0",
-                              }}
-                            >
-                              {challengeData.html_meta_tag}
-                            </pre>
-                          </div>
-                        )}
-
-                        <div style={{ fontSize: "0.6875rem", color: "var(--text-muted)", marginTop: "0.5rem" }}>
-                          Challenge expires at: {new Date(challengeData.challenge_expires_at).toLocaleString()}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Verify Action */}
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: "0.5rem" }}>
-                    <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-                      DNS/HTML changes may require a few minutes to propagate across servers.
-                    </span>
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      onClick={() => handleVerifyDomain(project.property_id!)}
-                      disabled={isVerifyingDomain}
-                      data-testid="verify-domain-btn"
-                    >
-                      {isVerifyingDomain ? "Verifying Domain..." : "Verify Ownership Now"}
-                    </button>
+                  {/* Shared Verification Panel */}
+                  <div className="card" style={{ padding: "1.25rem" }}>
+                    <PropertyVerificationPanel
+                      property={{
+                        id: project.property_id!,
+                        domain: project.custom_domain || `${project.slug}.rivinity.site`,
+                        verification_status: linkedProperty?.verification_status || (challengeData ? "PENDING" : "UNVERIFIED"),
+                        verification_method: verificationMethod,
+                        verification_token: challengeData?.verification_token,
+                        challenge_expires_at: challengeData?.challenge_expires_at,
+                      }}
+                      initialChallenge={challengeData}
+                      onChallengeUpdated={(updated) => setChallengeData(updated)}
+                      onVerified={async (updatedProp) => {
+                        await loadMonetizationStatus();
+                        setVerificationFeedback({
+                          type: "success",
+                          message: `Domain ownership verified successfully for ${updatedProp.domain}!`,
+                        });
+                      }}
+                      showSuccessBanner={false}
+                      compact={true}
+                      showCreateSlotAction={false}
+                    />
                   </div>
                 </div>
               )}

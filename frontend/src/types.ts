@@ -103,6 +103,10 @@ export interface PublisherProperty {
   verified_at?: string | null;
   last_error?: string | null;
   is_platform_subdomain: boolean;
+  slot_count?: number;
+  last_request_at?: string | null;
+  last_impression_at?: string | null;
+  health_warnings?: string[];
   created_at: string;
   updated_at: string;
 }

@@ -565,3 +565,344 @@ async def test_secrets_encryption_and_zero_leakage(
     decrypted = decrypt_secret(conn.credentials_encrypted)
     assert raw_secret in decrypted
 
+
+# -----------------------------------------------------------------------------
+# 10. Google Ads Credential Presence Alone Rejected (Never Connected)
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_google_ads_credential_presence_alone_rejected(
+    test_db: AsyncSession, advertiser_test: Advertiser
+):
+    """Presence of credential fields alone without valid OAuth verification MUST fail and NEVER report CONNECTED."""
+    def fake_failing_oauth_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"error": "invalid_grant", "error_description": "Bad credentials or expired refresh token."},
+        )
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(fake_failing_oauth_handler))
+    service = ChannelService(test_db, http_client=mock_client)
+
+    # Attempt connect with dummy/unverified credentials
+    with pytest.raises(HTTPException) as exc:
+        await service.connect_advertiser_channel(
+            advertiser_id=advertiser_test.id,
+            user_id=1,
+            req=ConnectAdvertiserRequest(
+                provider="google_ads",
+                name="Unverified Google Ads Attempt",
+                api_key="non_empty_developer_token_123",
+                account_id="123-456-7890",
+                additional_credentials={
+                    "client_id": "non_empty_client_id.apps.googleusercontent.com",
+                    "client_secret": "non_empty_secret",
+                    "refresh_token": "non_empty_refresh_token",
+                },
+            ),
+        )
+    assert exc.value.status_code == 400
+    assert "Connection authentication failed" in exc.value.detail
+    assert "invalid_grant" in exc.value.detail
+
+    # Database assertion: zero connected records created
+    stmt = select(ChannelConnection).where(
+        ChannelConnection.advertiser_id == advertiser_test.id,
+        ChannelConnection.provider == "google_ads",
+    )
+    res = await test_db.execute(stmt)
+    assert res.scalar_one_or_none() is None
+
+
+# -----------------------------------------------------------------------------
+# 11. Google Ads Error Surfacing Sanitized and Zero Raw Secret Leakage
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_google_ads_error_surfacing_sanitized_no_token_leak():
+    """Provider 401/429/5xx error surfaces sanitized reason and never leaks raw tokens or client secrets."""
+    raw_secret = "super_secret_oauth_refresh_token_leak_probe_9999"
+    raw_client_secret = "top_secret_client_secret_xyz"
+
+    def fake_error_handler(request: httpx.Request) -> httpx.Response:
+        url_str = str(request.url)
+        if "token" in url_str:
+            return httpx.Response(
+                401,
+                json={"error": "unauthorized_client", "error_description": "The OAuth client is not authorized."},
+            )
+        return httpx.Response(500, text="Internal Provider Failure")
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(fake_error_handler))
+    connector = GoogleAdsConnector(
+        credentials={
+            "developer_token": "dev_token_test",
+            "client_id": "client_id_test",
+            "client_secret": raw_client_secret,
+            "refresh_token": raw_secret,
+        },
+        account_id="1234567890",
+        http_client=mock_client,
+    )
+
+    is_valid, err_msg, metadata = await connector.verify_credentials()
+    assert is_valid is False
+    assert "unauthorized_client" in err_msg
+    # Ensure neither raw refresh token nor raw client secret is leaked into error message
+    assert raw_secret not in err_msg
+    assert raw_client_secret not in err_msg
+    assert metadata.get("token_state") == "REFRESH_FAILED"
+
+
+# -----------------------------------------------------------------------------
+# 12. Tenant Isolation & Anti-Generic-Proxy Enforcement
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_channel_tenant_isolation_and_anti_proxy(
+    test_db: AsyncSession, advertiser_test: Advertiser
+):
+    """Compromised or foreign tenant cannot view, mutate, sync, report, or disconnect another tenant's channel."""
+    from liteads.models.auth import User
+    from liteads.ad_server.routers.channels import (
+        get_connection_details,
+        discover_accounts,
+        sync_campaigns,
+        preview_campaign_creation,
+        create_campaign,
+        update_campaign_status,
+        sync_reporting,
+        disconnect_account,
+        verify_publisher_surface,
+    )
+
+    # 1. Create Connection for Advertiser A
+    service = ChannelService(test_db)
+    conn_a = await service.connect_advertiser_channel(
+        advertiser_id=advertiser_test.id,
+        user_id=1,
+        req=ConnectAdvertiserRequest(
+            provider="openai",
+            name="Adv A Channel",
+            api_key="oa_ads_test_iso_1",
+            account_id="act_iso_1",
+        ),
+    )
+
+    # 2. Foreign tenant user B (advertiser_id = 9999)
+    foreign_user = User(
+        id=999,
+        email="foreign_advertiser@test.com",
+        role="advertiser",
+        advertiser_id=9999,
+    )
+
+    # Verify every endpoint rejects foreign tenant with 404/403
+    with pytest.raises(HTTPException) as exc:
+        await get_connection_details(connection_id=conn_a.id, user=foreign_user, service=service)
+    assert exc.value.status_code == 404
+
+    with pytest.raises(HTTPException) as exc:
+        await discover_accounts(connection_id=conn_a.id, user=foreign_user, service=service)
+    assert exc.value.status_code == 404
+
+    with pytest.raises(HTTPException) as exc:
+        await sync_campaigns(connection_id=conn_a.id, user=foreign_user, service=service)
+    assert exc.value.status_code == 404
+
+    with pytest.raises(HTTPException) as exc:
+        await preview_campaign_creation(
+            connection_id=conn_a.id,
+            params=CampaignCreateParams(name="Probe", daily_budget=10.0, confirmed=True),
+            user=foreign_user,
+            service=service,
+        )
+    assert exc.value.status_code == 404
+
+    with pytest.raises(HTTPException) as exc:
+        await create_campaign(
+            connection_id=conn_a.id,
+            params=CampaignCreateParams(name="Probe", daily_budget=10.0, confirmed=True),
+            idempotency_key="idemp_foreign_probe",
+            user=foreign_user,
+            service=service,
+        )
+    assert exc.value.status_code == 404
+
+    from liteads.channels.schemas import CampaignStatusUpdateRequest
+    with pytest.raises(HTTPException) as exc:
+        await update_campaign_status(
+            connection_id=conn_a.id,
+            external_campaign_id="ext_probe",
+            req=CampaignStatusUpdateRequest(status="PAUSED"),
+            user=foreign_user,
+            service=service,
+        )
+    assert exc.value.status_code == 404
+
+    with pytest.raises(HTTPException) as exc:
+        await sync_reporting(
+            connection_id=conn_a.id,
+            start_date=date(2026, 11, 1),
+            end_date=date(2026, 11, 2),
+            user=foreign_user,
+            service=service,
+        )
+    assert exc.value.status_code == 404
+
+    with pytest.raises(HTTPException) as exc:
+        await disconnect_account(connection_id=conn_a.id, user=foreign_user, service=service)
+    assert exc.value.status_code == 404
+
+    # 3. Unassociated caller (role != admin, advertiser_id is None) gets 403 Forbidden
+    unassociated_user = User(
+        id=888,
+        email="unassociated@test.com",
+        role="viewer",
+        advertiser_id=None,
+    )
+    with pytest.raises(HTTPException) as exc:
+        await get_connection_details(connection_id=conn_a.id, user=unassociated_user, service=service)
+    assert exc.value.status_code == 403
+    assert "User is not associated with an advertiser account" in exc.value.detail
+
+    with pytest.raises(HTTPException) as exc:
+        await verify_publisher_surface(surface_id="slot_probe", user=unassociated_user, service=service)
+    assert exc.value.status_code == 403
+    assert "User is not associated with a publisher account" in exc.value.detail
+
+
+# -----------------------------------------------------------------------------
+# 13. OpenAI Ads Simulation Truthfulness & ID Prefix
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_openai_ads_synthetic_id_prefix_and_production_block(
+    test_db: AsyncSession, advertiser_test: Advertiser, monkeypatch
+):
+    """Simulated campaigns must carry explicit 'sim_oa_cmp_' prefix; production unconditionally blocks simulation."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "env", "dev")
+
+    service = ChannelService(test_db)
+    conn = await service.connect_advertiser_channel(
+        advertiser_id=advertiser_test.id,
+        user_id=1,
+        req=ConnectAdvertiserRequest(
+            provider="openai",
+            name="OpenAI Sim Test",
+            api_key="oa_ads_test_sim_prefix",
+            account_id="act_sim_pref",
+        ),
+    )
+
+    created = await service.create_campaign(
+        advertiser_id=advertiser_test.id,
+        connection_id=conn.id,
+        params=CampaignCreateParams(
+            name="Simulated Promotion",
+            objective="TRAFFIC",
+            daily_budget=20.0,
+            confirmed=True,
+        ),
+        idempotency_key="idemp_sim_prefix_001",
+        user_id=1,
+    )
+    assert created.external_id.startswith("sim_oa_cmp_")
+
+    # In production mode, OpenAI connector verify_credentials returns False and create_campaign fails closed
+    monkeypatch.setattr(settings, "env", "prod")
+    prod_connector = OpenAIAdsConnector(
+        credentials={"api_key": "oa_ads_live_key"},
+        account_id="act_prod_probe",
+        env="prod",
+    )
+    is_valid, err, _ = await prod_connector.verify_credentials()
+    assert is_valid is False
+    assert "no public general-availability self-serve API" in err
+
+    # Reporting in non-simulated mode returns empty list (never synthetic metrics)
+    rows = await prod_connector.sync_reporting(date(2026, 11, 1), date(2026, 11, 2))
+    assert rows == []
+
+
+# -----------------------------------------------------------------------------
+# 14. Google Ads Disconnect Cleans Secrets and Revokes Session
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_google_ads_disconnect_clears_credentials_and_revokes(
+    test_db: AsyncSession, advertiser_test: Advertiser
+):
+    """Disconnect clears stored encrypted secrets and marks token state REVOKED."""
+    def fake_handler(request: httpx.Request) -> httpx.Response:
+        url_str = str(request.url)
+        if "token" in url_str:
+            return httpx.Response(200, json={"access_token": "ya29.disc_token", "expires_in": 3600})
+        if "customers:listAccessibleCustomers" in url_str:
+            return httpx.Response(200, json={"resourceNames": ["customers/1234567890"]})
+        return httpx.Response(404, text="Not Found")
+
+    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(fake_handler))
+    service = ChannelService(test_db, http_client=mock_client)
+
+    conn_resp = await service.connect_advertiser_channel(
+        advertiser_id=advertiser_test.id,
+        user_id=1,
+        req=ConnectAdvertiserRequest(
+            provider="google_ads",
+            name="Disconnect Test Connection",
+            api_key="dev_tok_disc",
+            account_id="123-456-7890",
+            additional_credentials={
+                "client_id": "cid_disc",
+                "client_secret": "csec_disc",
+                "refresh_token": "ref_disc",
+            },
+        ),
+    )
+    assert conn_resp.status == "CONNECTED"
+
+    # Disconnect
+    ok = await service.disconnect(advertiser_id=advertiser_test.id, connection_id=conn_resp.id)
+    assert ok is True
+
+    # Verify DB state
+    conn = await test_db.get(ChannelConnection, conn_resp.id)
+    assert conn is not None
+    assert conn.status == "DISCONNECTED"
+    assert conn.token_state == "REVOKED"
+    assert conn.credentials_encrypted == ""
+
+
+# -----------------------------------------------------------------------------
+# 15. Explicit Capability Flags Contract
+# -----------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_channel_capability_flags_explicit_truth():
+    """Verify that all adapters expose truthful capability flags."""
+    # 1. Google Ads
+    g_conn = GoogleAdsConnector(credentials={}, account_id="1234567890")
+    g_caps = g_conn.get_capabilities()
+    assert g_caps.supports_live_delivery is False  # Management only
+    assert g_caps.supports_oauth is True
+    assert g_caps.supports_reporting is True
+    assert g_caps.is_simulated is False
+    assert g_caps.is_experimental is False
+    assert g_caps.adapter_mode == "LIVE"
+
+    # 2. OpenAI Ads
+    oa_conn = OpenAIAdsConnector(credentials={"api_key": "oa_ads_test_caps"}, account_id="act_caps", env="dev")
+    oa_caps = oa_conn.get_capabilities()
+    assert oa_caps.supports_live_delivery is False
+    assert oa_caps.supports_oauth is False
+    assert oa_caps.supports_reporting is True
+    assert oa_caps.is_simulated is True
+    assert oa_caps.is_experimental is True
+    assert oa_caps.adapter_mode == "SIMULATED"
+
+    # 3. AI Publisher
+    pub_adapter = AIPublisherAdapter(publisher_id=1)
+    pub_caps = pub_adapter.get_capabilities()
+    assert pub_caps.supports_live_delivery is True
+    assert pub_caps.supports_oauth is False
+    assert pub_caps.supports_reporting is True
+    assert pub_caps.is_simulated is False
+    assert pub_caps.is_experimental is True
+    assert pub_caps.adapter_mode == "EXPERIMENTAL"
+

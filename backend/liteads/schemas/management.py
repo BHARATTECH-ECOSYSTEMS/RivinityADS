@@ -381,6 +381,10 @@ class PublisherPropertyResponse(ORMModel):
     verified_at: datetime | None = None
     last_error: str | None = None
     is_platform_subdomain: bool = False
+    slot_count: int = 0
+    last_request_at: datetime | None = None
+    last_impression_at: datetime | None = None
+    health_warnings: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

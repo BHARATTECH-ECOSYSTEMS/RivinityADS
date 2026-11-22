@@ -1199,6 +1199,9 @@ export interface ChannelCapabilities {
   supports_account_discovery: boolean;
   supports_campaign_management: boolean;
   supports_reporting_sync: boolean;
+  supports_live_delivery?: boolean;
+  supports_oauth?: boolean;
+  supports_reporting?: boolean;
   adapter_mode?: "LIVE" | "SIMULATED" | "EXPERIMENTAL";
   is_experimental?: boolean;
   is_simulated?: boolean;

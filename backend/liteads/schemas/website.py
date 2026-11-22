@@ -858,10 +858,26 @@ class MonetizationStatusResponse(BaseModel):
 
 class VisitorConsentPayload(BaseModel):
     categories: dict[str, bool] = Field(
-        default_factory=lambda: {"advertising": False, "analytics": False},
+        default_factory=lambda: {"necessary": True, "advertising": False, "analytics": False},
         description="Visitor opted consent categories (defaults to denied)",
     )
     version: str = Field(default="v1.0", max_length=32)
+    visitor_id: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Optional persistent visitor identifier for deterministic revocation tracking",
+    )
+
+    @field_validator("categories", mode="before")
+    @classmethod
+    def normalize_categories(cls, v: Any) -> dict[str, bool]:
+        if not isinstance(v, dict):
+            return {"necessary": True, "advertising": False, "analytics": False}
+        return {
+            "necessary": True,
+            "advertising": bool(v.get("advertising", False)),
+            "analytics": bool(v.get("analytics", False)),
+        }
 
 
 class VisitorConsentResponse(BaseModel):
@@ -872,6 +888,7 @@ class VisitorConsentResponse(BaseModel):
     is_granted: bool = False
     consent_token: str | None = None
     expires_at: int | None = None
+    visitor_id: str | None = None
 
 
 # ── Tenant-Scoped Storage Schemas ──────────────────────────────────────────

@@ -53,6 +53,10 @@ jobs:
       - name: Run Core & Regression Pytest Suites
         run: |
           pytest backend/tests/test_api/test_phase0_migration_truthfulness.py \
+                 backend/tests/test_api/test_phase1_visitor_consent.py \
+                 backend/tests/test_api/test_phase1_visitor_consent_gate.py \
+                 backend/tests/test_api/test_phase2_channel_conformance.py \
+                 backend/tests/test_api/test_phase3_publisher_verification.py \
                  backend/tests/test_api/test_phase7_ad_quality_and_admin_ops.py \
                  backend/tests/test_api/test_phase11_conversion_measurement.py \
                  backend/tests/test_api/test_phase10f_monetization_consent.py \

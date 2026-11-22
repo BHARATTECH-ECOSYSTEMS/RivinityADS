@@ -3,7 +3,22 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, JSON, UniqueConstraint, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    JSON,
+    UniqueConstraint,
+    text,
+    inspect as sa_inspect,
+)
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -78,6 +93,53 @@ class PublisherProperty(Base, TimestampMixin):
     slots: Mapped[list["AdSlot"]] = relationship(
         "AdSlot", back_populates="property", cascade="all, delete-orphan", lazy="selectin"
     )
+
+    @property
+    def slot_count(self) -> int:
+        try:
+            insp = sa_inspect(self)
+            if insp is not None and "slots" in insp.unloaded:
+                return 0
+            slots_val = self.__dict__.get("slots")
+            if slots_val is not None and isinstance(slots_val, (list, tuple, set)):
+                return len(slots_val)
+            return 0
+        except Exception:
+            return 0
+
+    @property
+    def last_request_at(self) -> datetime | None:
+        return getattr(self, "_last_request_at", None)
+
+    @last_request_at.setter
+    def last_request_at(self, val: datetime | None) -> None:
+        self._last_request_at = val
+
+    @property
+    def last_impression_at(self) -> datetime | None:
+        return getattr(self, "_last_impression_at", None)
+
+    @last_impression_at.setter
+    def last_impression_at(self, val: datetime | None) -> None:
+        self._last_impression_at = val
+
+    @property
+    def health_warnings(self) -> list[str]:
+        warnings: list[str] = []
+        if self.verification_status != "VERIFIED":
+            warnings.append("Domain verification pending — ad serving is blocked until ownership is verified.")
+        if self.status != Status.ACTIVE:
+            warnings.append("Property is inactive — ad serving is paused.")
+        if self.slot_count == 0:
+            warnings.append("No ad slots configured for this property.")
+        if self.verification_status != "VERIFIED" and self.challenge_expires_at:
+            now_utc = datetime.now(timezone.utc)
+            exp = self.challenge_expires_at
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if now_utc > exp:
+                warnings.append("Verification challenge has expired. Please regenerate a new challenge.")
+        return warnings
 
 
 class AdSlot(Base, TimestampMixin):

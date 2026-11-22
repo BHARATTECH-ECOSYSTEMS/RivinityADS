@@ -108,6 +108,9 @@ class OpenAIAdsConnector(BaseAdvertiserConnector):
             supports_account_discovery=True,
             supports_campaign_management=True,
             supports_reporting_sync=True,
+            supports_live_delivery=False,
+            supports_oauth=False,
+            supports_reporting=True,
             adapter_mode=self.adapter_mode,
             is_experimental=True,
             is_simulated=self.is_simulation,
@@ -331,7 +334,7 @@ class OpenAIAdsConnector(BaseAdvertiserConnector):
             raise ChannelAuthenticationException(err or "Authentication failed", provider="openai")
 
         async def _call():
-            prefix = "oa_cmp_"
+            prefix = "sim_oa_cmp_" if self.is_simulation else "oa_cmp_"
             ext_id = f"{prefix}{uuid.uuid4().hex[:12]}"
             req_id = f"req_oa_{uuid.uuid4().hex[:8]}"
             campaign_data = {

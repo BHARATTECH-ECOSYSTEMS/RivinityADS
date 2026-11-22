@@ -34,6 +34,9 @@ class ChannelCapabilities(BaseModel):
     supports_account_discovery: bool = True
     supports_campaign_management: bool = True
     supports_reporting_sync: bool = True
+    supports_live_delivery: bool = False
+    supports_oauth: bool = False
+    supports_reporting: bool = True
     adapter_mode: str = "LIVE"  # "LIVE", "SIMULATED", "EXPERIMENTAL"
     is_experimental: bool = False
     is_simulated: bool = False
