@@ -138,6 +138,8 @@ export function ReviewStep({
   const canAttemptActivation =
     isServerReady &&
     blockers.length === 0 &&
+    unapprovedCount === 0 &&
+    unverifiedCount === 0 &&
     campaign.status === 5 && // DRAFT
     !readinessLoading &&
     !submitting;
@@ -213,19 +215,34 @@ export function ReviewStep({
         {/* Data Loading and Network Error Banners */}
         {readinessError && (
           <Alert variant="error" title="Server Readiness Check Failed" style={{ marginBottom: "var(--space-4)" }}>
-            {readinessError} — Unable to obtain authoritative launch status from backend.
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>{readinessError} — Unable to obtain authoritative launch status from backend.</span>
+              <Button size="sm" variant="outline" onClick={fetchReadiness} disabled={readinessLoading}>
+                Retry Readiness Check
+              </Button>
+            </div>
           </Alert>
         )}
 
         {ledgerError && (
           <Alert variant="error" title="Wallet Data Unavailable" style={{ marginBottom: "var(--space-4)" }}>
-            {ledgerError} — Cannot verify wallet balance at this time.
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>{ledgerError} — Cannot verify wallet balance at this time.</span>
+              <Button size="sm" variant="outline" onClick={fetchLedger} disabled={ledgerLoading}>
+                Retry Wallet Check
+              </Button>
+            </div>
           </Alert>
         )}
 
         {domainsError && (
           <Alert variant="warning" title="Domain Verification Data Stale" style={{ marginBottom: "var(--space-4)" }}>
-            {domainsError} — Domain records could not be refreshed.
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>{domainsError} — Domain records could not be refreshed.</span>
+              <Button size="sm" variant="outline" onClick={fetchDomains} disabled={domainsLoading}>
+                Retry Domain Check
+              </Button>
+            </div>
           </Alert>
         )}
 
@@ -404,7 +421,10 @@ export function ReviewStep({
                     Pricing: {BID_TYPES[campaign.bid_type] || "CPM"} @ ${campaign.bid_amount} | Daily Cap: {campaign.freq_cap_daily || 10} impr/user | Hourly: {campaign.freq_cap_hourly || 3}
                   </div>
                 </div>
-                <StatusBadge status={campaign.status} />
+                <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
+                  <span className="badge badge-subtle">Lifecycle: {readiness?.lifecycle_state || "Draft"}</span>
+                  <StatusBadge status={campaign.status} />
+                </div>
               </div>
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "var(--space-4)", background: "var(--color-bg-subtle)", padding: "var(--space-3)", borderRadius: "var(--radius-md)" }}>
@@ -490,7 +510,7 @@ export function ReviewStep({
 
               <div style={{ display: "flex", alignItems: "center", gap: "var(--space-3)" }}>
                 <span className="text-muted" style={{ fontSize: "var(--font-size-xs)" }}>
-                  Current Status: <strong>{campaign.status === 5 ? "DRAFT" : campaign.status === 1 ? "ACTIVE" : "PAUSED"}</strong>
+                  Lifecycle: <strong>{readiness?.lifecycle_state || (campaign.status === 5 ? "Draft" : campaign.status === 1 ? "Active" : "Paused")}</strong> | Current Status: <strong>{campaign.status === 5 ? "DRAFT" : campaign.status === 1 ? "ACTIVE" : "PAUSED"}</strong>
                 </span>
 
                 <Button

@@ -147,6 +147,7 @@ export interface CampaignReadinessResponse {
   campaign_name: string;
   status: number;
   status_name: string;
+  lifecycle_state?: string;
   is_ready: boolean;
   blockers: ReadinessIssue[];
   warnings: ReadinessIssue[];
@@ -763,6 +764,9 @@ export interface SLAItem {
   sla_deadline: string;
   sla_status: "ON_TRACK" | "AT_RISK" | "BREACHED";
   time_remaining_minutes: number;
+  owner?: string | null;
+  status?: "open" | "in_review" | "escalated" | "resolved";
+  triage_action?: string | null;
   details?: Record<string, any>;
 }
 
@@ -774,6 +778,7 @@ export interface OperationalAlert {
   entity_type: string;
   entity_id?: number | string;
   count: number;
+  runbook_url?: string | null;
 }
 
 export interface OperationalExceptionsResponse {
@@ -782,6 +787,8 @@ export interface OperationalExceptionsResponse {
   unusual_ctrs: OperationalAlert[];
   spend_spikes: OperationalAlert[];
   webhook_payout_failures: OperationalAlert[];
+  consent_failures?: OperationalAlert[];
+  worker_redis_health?: OperationalAlert[];
   moderation_queue: SLAItem[];
   finance_queue: SLAItem[];
   total_exceptions_count: number;

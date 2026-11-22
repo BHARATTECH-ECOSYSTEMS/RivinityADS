@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import Any
 import math
 
-import torch
+try:
+    import torch
+    HAS_TORCH = True
+except ImportError:
+    torch = None
+    HAS_TORCH = False
 
 from liteads.common.logger import get_logger
 
@@ -75,6 +80,13 @@ def validate_model_artifact(
         return ModelValidationResult(
             is_valid=False,
             error_message=f"Failed to access model file {path}: {e}",
+        )
+
+    # Check PyTorch availability
+    if not HAS_TORCH:
+        return ModelValidationResult(
+            is_valid=False,
+            error_message="PyTorch is not installed in the serving environment",
         )
 
     # Load PyTorch checkpoint safely mapped to CPU

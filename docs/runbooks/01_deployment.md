@@ -62,7 +62,7 @@ Verify system operational readiness immediately following container startup:
    ```
 2. **Ad Serving Smoke Request:**
    ```bash
-   curl -X POST https://ads.bharattech.com/api/v1/ads/request \
+   curl -X POST https://ads.bharattech.com/api/v1/ad/request \
      -H "Content-Type: application/json" \
      -H "X-API-Key: <test-publisher-key>" \
      -d '{"unit_id": "test-unit-01", "ip": "1.1.1.1", "user_agent": "Mozilla/5.0 SmokeTest"}'

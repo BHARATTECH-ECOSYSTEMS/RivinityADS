@@ -53,6 +53,7 @@ export default function CreativeModeration() {
   const [actionId, setActionId] = useState<number | null>(null);
   const [reasonFor, setReasonFor] = useState<ModerationCreative | null>(null);
   const [reason, setReason] = useState("");
+  const [rejectCategory, setRejectCategory] = useState("POLICY_VIOLATION");
   const [rejectError, setRejectError] = useState<string | null>(null);
 
   const [error, setError] = useState<string | null>(null);
@@ -111,7 +112,7 @@ export default function CreativeModeration() {
         ? approveCreative(creative.id)
         : action === "reopen"
         ? reopenCreative(creative.id)
-        : rejectCreative(creative.id, reason.trim());
+        : rejectCreative(creative.id, reason.trim(), rejectCategory);
 
     request
       .then((updated) => {
@@ -232,6 +233,7 @@ export default function CreativeModeration() {
                             onClick={() => {
                               setReasonFor(creative);
                               setReason("");
+                              setRejectCategory("POLICY_VIOLATION");
                               setRejectError(null);
                             }}
                             disabled={isBusy}
@@ -415,6 +417,28 @@ export default function CreativeModeration() {
                 {rejectError}
               </Alert>
             )}
+
+            <div className="field" style={{ marginBottom: "14px" }}>
+              <label htmlFor="rejection-category" style={{ fontWeight: 600, fontSize: "0.875rem", marginBottom: "6px", display: "block" }}>
+                Policy Category *
+              </label>
+              <select
+                id="rejection-category"
+                value={rejectCategory}
+                onChange={(e) => setRejectCategory(e.target.value)}
+                className="input"
+                style={{ width: "100%" }}
+              >
+                <option value="POLICY_VIOLATION">Policy Violation</option>
+                <option value="UNACCEPTABLE_CONTENT">Unacceptable Content</option>
+                <option value="MALICIOUS_DESTINATION">Malicious Destination</option>
+                <option value="LOW_QUALITY">Low Quality Asset</option>
+                <option value="MISMATCHED_LANDING">Mismatched Landing URL</option>
+                <option value="TECHNICAL_DEFECT">Technical Defect</option>
+                <option value="COPYRIGHT_INFRINGEMENT">Copyright Infringement</option>
+                <option value="OTHER">Other Compliance Concern</option>
+              </select>
+            </div>
 
             <div className="field" style={{ marginBottom: "20px" }}>
               <label htmlFor="rejection-reason" style={{ fontWeight: 600, fontSize: "0.875rem", marginBottom: "6px", display: "block" }}>

@@ -69,6 +69,7 @@ class CampaignUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = None
+    status: int | None = Field(default=None, ge=0, le=4)
     budget_daily: Decimal | None = Field(default=None, ge=0)
     budget_total: Decimal | None = Field(default=None, ge=0)
     bid_type: int | None = Field(default=None, ge=1, le=4)
@@ -78,6 +79,7 @@ class CampaignUpdate(BaseModel):
     start_time: datetime | None = None
     end_time: datetime | None = None
     autopilot: bool | None = None
+    reason: str | None = None
 
 
 class CampaignResponse(ORMModel):
@@ -116,6 +118,12 @@ class SuggestionResponse(ORMModel):
 
 class SuggestionStatusPatch(BaseModel):
     status: str
+
+
+class OptimizationConfigPatch(BaseModel):
+    mode: str | None = None
+    kill_switch: bool | None = None
+    pilot_campaign_ids: list[int] | None = None
 
 
 class OptimizationStatusResponse(BaseModel):
@@ -342,6 +350,7 @@ class PublisherUpdate(BaseModel):
     site_url: str | None = None
     status: int | None = Field(default=None, ge=0, le=4)
     is_sandbox: bool | None = None
+    reason: str | None = None
 
 
 class PublisherResponse(ORMModel):
@@ -366,6 +375,7 @@ class PublisherPropertyUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     domain: str | None = Field(default=None, min_length=1, max_length=255)
     status: int | None = Field(default=None, ge=0, le=4)
+    reason: str | None = None
 
 
 class PublisherPropertyResponse(ORMModel):
@@ -785,6 +795,9 @@ class SLAItem(BaseModel):
     sla_deadline: datetime
     sla_status: str  # "ON_TRACK", "AT_RISK", "BREACHED"
     time_remaining_minutes: int
+    owner: str | None = None
+    status: str = "open"  # "open", "in_review", "escalated", "resolved"
+    triage_action: str | None = None
     details: dict[str, Any] = {}
 
 
@@ -793,9 +806,10 @@ class OperationalAlert(BaseModel):
     severity: str  # "high", "medium", "low"
     title: str
     description: str
-    entity_type: str  # "publisher", "property", "slot", "campaign", "webhook", "payout"
+    entity_type: str  # "publisher", "property", "slot", "campaign", "webhook", "payout", "system"
     entity_id: int | str | None = None
     count: int = 1
+    runbook_url: str | None = None
 
 
 class OperationalExceptionsResponse(BaseModel):
@@ -804,6 +818,8 @@ class OperationalExceptionsResponse(BaseModel):
     unusual_ctrs: list[OperationalAlert] = []
     spend_spikes: list[OperationalAlert] = []
     webhook_payout_failures: list[OperationalAlert] = []
+    consent_failures: list[OperationalAlert] = []
+    worker_redis_health: list[OperationalAlert] = []
     moderation_queue: list[SLAItem] = []
     finance_queue: list[SLAItem] = []
     total_exceptions_count: int = 0

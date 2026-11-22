@@ -302,10 +302,10 @@ export default function AdminDashboard() {
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
             {/* System Alerts Row */}
-            {exceptions.stale_integrations.length + exceptions.no_fill_slots.length + exceptions.unusual_ctrs.length + exceptions.spend_spikes.length + exceptions.webhook_payout_failures.length > 0 && (
+            {exceptions.stale_integrations.length + exceptions.no_fill_slots.length + exceptions.unusual_ctrs.length + exceptions.spend_spikes.length + exceptions.webhook_payout_failures.length + (exceptions.consent_failures?.length || 0) + (exceptions.worker_redis_health?.length || 0) > 0 && (
               <div>
                 <div style={{ fontSize: "0.8125rem", fontWeight: 700, color: "var(--color-text-muted)", textTransform: "uppercase", marginBottom: "8px" }}>
-                  Active Operational Warnings
+                  Active Operational Warnings &amp; Runbooks
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "12px" }}>
                   {[
@@ -314,6 +314,8 @@ export default function AdminDashboard() {
                     ...exceptions.webhook_payout_failures,
                     ...exceptions.stale_integrations,
                     ...exceptions.no_fill_slots,
+                    ...(exceptions.consent_failures || []),
+                    ...(exceptions.worker_redis_health || []),
                   ].map((alert, idx) => (
                     <div
                       key={idx}
@@ -332,9 +334,14 @@ export default function AdminDashboard() {
                           size="sm"
                         />
                       </div>
-                      <div style={{ fontSize: "0.75rem", color: "var(--color-text-secondary)" }}>
+                      <div style={{ fontSize: "0.75rem", color: "var(--color-text-secondary)", marginBottom: "4px" }}>
                         {alert.description}
                       </div>
+                      {alert.runbook_url && (
+                        <div style={{ fontSize: "0.6875rem", color: "var(--color-primary)" }}>
+                          Runbook: <code>{alert.runbook_url}</code>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -363,13 +370,19 @@ export default function AdminDashboard() {
                           <strong>{item.title}</strong>
                           <div style={{ color: "var(--color-text-muted)", fontSize: "11px" }}>
                             {item.time_remaining_minutes < 0 ? `Breached by ${Math.abs(item.time_remaining_minutes)}m` : `${item.time_remaining_minutes}m remaining`}
+                            {item.owner && ` • Owner: ${item.owner}`}
                           </div>
                         </div>
-                        <StatusBadge
-                          status={item.sla_status === "ON_TRACK" ? "success" : item.sla_status === "AT_RISK" ? "warning" : "failed"}
-                          label={item.sla_status}
-                          size="sm"
-                        />
+                        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                          <StatusBadge
+                            status={item.sla_status === "ON_TRACK" ? "success" : item.sla_status === "AT_RISK" ? "warning" : "failed"}
+                            label={item.sla_status}
+                            size="sm"
+                          />
+                          <Link to={item.triage_action || "/admin/creatives"} className="btn btn-secondary btn-sm" style={{ fontSize: "10px", padding: "2px 6px" }}>
+                            Triage
+                          </Link>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -396,13 +409,19 @@ export default function AdminDashboard() {
                           <strong>{item.title}</strong> ({item.entity_name})
                           <div style={{ color: "var(--color-text-muted)", fontSize: "11px" }}>
                             {item.time_remaining_minutes < 0 ? `Breached by ${Math.abs(item.time_remaining_minutes)}m` : `${item.time_remaining_minutes}m remaining`}
+                            {item.owner && ` • Owner: ${item.owner}`}
                           </div>
                         </div>
-                        <StatusBadge
-                          status={item.sla_status === "ON_TRACK" ? "success" : item.sla_status === "AT_RISK" ? "warning" : "failed"}
-                          label={item.sla_status}
-                          size="sm"
-                        />
+                        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                          <StatusBadge
+                            status={item.sla_status === "ON_TRACK" ? "success" : item.sla_status === "AT_RISK" ? "warning" : "failed"}
+                            label={item.sla_status}
+                            size="sm"
+                          />
+                          <Link to={item.triage_action || "/admin/finance"} className="btn btn-secondary btn-sm" style={{ fontSize: "10px", padding: "2px 6px" }}>
+                            Triage
+                          </Link>
+                        </div>
                       </div>
                     ))}
                   </div>

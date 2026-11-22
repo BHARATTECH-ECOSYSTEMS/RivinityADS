@@ -259,7 +259,7 @@ export interface ModerationCreative extends Creative {
 }
 export const listPendingCreatives = () => apiFetch<ModerationCreative[]>("/api/v1/moderation/creatives/pending");
 export const approveCreative = (creativeId: number) => apiFetch<ModerationCreative>(`/api/v1/moderation/creatives/${creativeId}/approve`, { method: "POST" });
-export const rejectCreative = (creativeId: number, reason: string) => apiFetch<ModerationCreative>(`/api/v1/moderation/creatives/${creativeId}/reject`, { method: "POST", body: JSON.stringify({ reason }) });
+export const rejectCreative = (creativeId: number, reason: string, category: string = "POLICY_VIOLATION") => apiFetch<ModerationCreative>(`/api/v1/moderation/creatives/${creativeId}/reject`, { method: "POST", body: JSON.stringify({ reason, category }) });
 export const reopenCreative = (creativeId: number) => apiFetch<ModerationCreative>(`/api/v1/moderation/creatives/${creativeId}/reopen`, { method: "POST" });
 export const refreshSession = async (): Promise<Session> => {
   const response = await apiFetch<{ user: Session["user"]; access_token: string }>("/api/v1/auth/refresh", { method: "POST" });
@@ -572,6 +572,7 @@ export const getAuditLedger = (params?: {
   campaign_id?: number;
   type?: number;
   is_cleared?: boolean;
+  adjustment_reason?: string;
 }) => {
   const query = new URLSearchParams();
   if (params?.start_date) query.set("start_date", params.start_date);
@@ -583,9 +584,20 @@ export const getAuditLedger = (params?: {
   if (params?.campaign_id) query.set("campaign_id", String(params.campaign_id));
   if (params?.type) query.set("type", String(params.type));
   if (params?.is_cleared !== undefined) query.set("is_cleared", String(params.is_cleared));
+  if (params?.adjustment_reason) query.set("adjustment_reason", params.adjustment_reason);
   const qs = query.toString();
   return apiFetch<TransactionResponse[]>(`/api/v1/finance/ledger/audit${qs ? `?${qs}` : ""}`);
 };
+
+export interface PublisherPayoutDetails {
+  publisher_id: number;
+  payout_details: Record<string, any> | null;
+}
+
+export const getPublisherPayoutDetails = (publisherId: number) => {
+  return apiFetch<PublisherPayoutDetails>(`/api/v1/finance/publisher/${publisherId}/payout-details`);
+};
+
 // API Keys
 export interface ApiKey { id: number; publisher_id: number; name: string; key_prefix: string; is_sandbox: boolean; rate_limit_per_minute: number; daily_quota: number; last_used_at: string | null; status: number; created_at: string; revoked_at: string | null; }
 export interface ApiKeyCreateInput { name: string; is_sandbox?: boolean; rate_limit_per_minute?: number; daily_quota?: number; }
@@ -750,6 +762,16 @@ export interface DecisionRevertResult {
 
 export const getOptimizationStatus = (): Promise<OptimizationStatus> =>
   apiFetch<OptimizationStatus>("/api/v1/optimization/status");
+
+export const updateOptimizationStatus = (patch: {
+  mode?: string;
+  kill_switch?: boolean;
+  pilot_campaign_ids?: number[];
+}): Promise<OptimizationStatus> =>
+  apiFetch<OptimizationStatus>("/api/v1/optimization/status", {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
 
 export const listOptimizationDecisions = (params?: {
   campaignId?: number;

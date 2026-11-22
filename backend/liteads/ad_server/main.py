@@ -28,6 +28,7 @@ from liteads.ad_server.routers import (
     health,
     management,
     marketing,
+    ml_governance,
     moderation,
     notifications,
     reference,
@@ -281,6 +282,7 @@ def create_app() -> FastAPI:
     app.include_router(chat.router, prefix="/api/v1", tags=["chat"])
     app.include_router(domain.router, prefix="/api/v1", tags=["domain"])
     app.include_router(moderation.router, prefix="/api/v1", tags=["moderation"])
+    app.include_router(ml_governance.router, prefix="/api/v1", tags=["ml-governance"])
     app.include_router(notifications.router, prefix="/api/v1", tags=["notifications"])
     app.include_router(website.router, prefix="/api/v1/website", tags=["website"])
     app.include_router(conversion.router)

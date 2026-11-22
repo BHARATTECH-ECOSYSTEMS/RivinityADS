@@ -11,6 +11,8 @@ from typing import Any
 
 from liteads.common.logger import get_logger
 from liteads.common.utils import Timer
+from liteads.ml_engine.governance.pii_guard import sanitize_features
+from liteads.ml_engine.governance.telemetry import get_ml_telemetry
 from liteads.ml_engine.serving.validator import validate_model_artifact
 from liteads.schemas.internal import AdCandidate, PredictionResult, UserContext
 
@@ -235,10 +237,12 @@ class MLPredictor(BasePredictor):
         if self._model_predictor is None or not self._model_predictor.is_ready:
             reason = self._validation_error or "model_not_ready"
             fallback_results = await self.fallback_predictor.predict_batch(user_context, candidates)
+            telemetry = get_ml_telemetry()
             for res in fallback_results:
                 res.prediction_mode = "fallback"
                 res.is_fallback = True
                 res.fallback_reason = reason
+                telemetry.record_inference(latency_ms=0.0, is_fallback=True, fallback_reason=reason)
             return fallback_results
 
         with Timer("ml_prediction") as timer:
@@ -249,8 +253,14 @@ class MLPredictor(BasePredictor):
                     timeout=self.timeout_ms / 1000.0,
                 )
 
+                telemetry = get_ml_telemetry()
                 results = []
                 for candidate, ml_result in zip(candidates, ml_results):
+                    telemetry.record_inference(
+                        latency_ms=ml_result.latency_ms,
+                        is_fallback=False,
+                        pctr=ml_result.pctr,
+                    )
                     results.append(
                         PredictionResult(
                             campaign_id=candidate.campaign_id,
@@ -270,24 +280,28 @@ class MLPredictor(BasePredictor):
                 logger.warning(
                     f"ML prediction timed out after {self.timeout_ms}ms; safe fallback to statistical baseline"
                 )
+                telemetry = get_ml_telemetry()
                 fallback_results = await self.fallback_predictor.predict_batch(user_context, candidates)
                 for res in fallback_results:
                     res.prediction_mode = "fallback"
                     res.is_fallback = True
                     res.fallback_reason = "timeout"
                     res.latency_ms = timer.elapsed_ms / len(candidates) if timer.elapsed_ms else self.timeout_ms
+                    telemetry.record_inference(latency_ms=res.latency_ms, is_fallback=True, fallback_reason="timeout")
                 return fallback_results
 
             except Exception as e:
                 logger.warning(
                     f"ML prediction failed: {e}; safe fallback to statistical baseline"
                 )
+                telemetry = get_ml_telemetry()
                 fallback_results = await self.fallback_predictor.predict_batch(user_context, candidates)
                 for res in fallback_results:
                     res.prediction_mode = "fallback"
                     res.is_fallback = True
                     res.fallback_reason = f"error: {str(e)}"
                     res.latency_ms = timer.elapsed_ms / len(candidates) if timer.elapsed_ms else 0.0
+                    telemetry.record_inference(latency_ms=res.latency_ms, is_fallback=True, fallback_reason=f"error: {str(e)}")
                 return fallback_results
 
     def _build_features(
@@ -375,7 +389,7 @@ class MLPredictor(BasePredictor):
                 "slot_ctr": candidate.metadata.get("slot_ctr", None),
                 "hour_ctr": candidate.metadata.get("hour_ctr", None),
             }
-            features.append(feature_dict)
+            features.append(sanitize_features(feature_dict))
 
         return features
 
@@ -460,8 +474,20 @@ class ShadowPredictor(BasePredictor):
         shadow_results: list[PredictionResult],
     ) -> None:
         """Compare baseline and shadow predictions for telemetry."""
+        top1_match = False
+        if baseline_results and shadow_results:
+            b_top_idx = max(range(len(baseline_results)), key=lambda i: baseline_results[i].pctr)
+            s_top_idx = max(range(len(shadow_results)), key=lambda i: shadow_results[i].pctr)
+            top1_match = (b_top_idx == s_top_idx)
+
+        telemetry = get_ml_telemetry()
         for b, s in zip(baseline_results, shadow_results):
             delta_pctr = s.pctr - b.pctr
+            telemetry.record_shadow_comparison(
+                baseline_pctr=b.pctr,
+                shadow_pctr=s.pctr,
+                is_top1_match=top1_match,
+            )
             logger.info(
                 "Shadow prediction comparison",
                 campaign_id=b.campaign_id,

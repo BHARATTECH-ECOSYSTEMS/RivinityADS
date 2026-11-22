@@ -4,6 +4,7 @@ import {
   getCampaign,
   updateCampaign,
   activateCampaign,
+  getCampaignReadiness,
   listAdSets,
   createAdSet,
   pauseAdSet,
@@ -16,6 +17,7 @@ import {
   listAdvertiserDomains,
   getCampaignOptimizationState,
   revertOptimizationDecision,
+  type CampaignReadinessResponse,
   type AdvertiserReporting,
   type AdvertiserDomain,
   type CampaignOptimizationState,
@@ -75,6 +77,8 @@ export default function CampaignDetail() {
   const [suggestionsError, setSuggestionsError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activationLoading, setActivationLoading] = useState(false);
+  const [readiness, setReadiness] = useState<CampaignReadinessResponse | null>(null);
+  const [readinessLoading, setReadinessLoading] = useState(false);
   const [updatingAutopilot, setUpdatingAutopilot] = useState(false);
 
   // Optimization state & revert
@@ -145,6 +149,19 @@ export default function CampaignDetail() {
       if (nextAdSets.length > 0 && !selectedAdSetId) {
         setSelectedAdSetId(nextAdSets[0].id);
       }
+      if (nextCampaign?.status === 5) {
+        setReadinessLoading(true);
+        try {
+          const rd = await getCampaignReadiness(campaignId);
+          setReadiness(rd);
+        } catch {
+          setReadiness(null);
+        } finally {
+          setReadinessLoading(false);
+        }
+      } else {
+        setReadiness(null);
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Could not load campaign details");
     }
@@ -196,8 +213,14 @@ export default function CampaignDetail() {
     try {
       const activated = await activateCampaign(campaign.id);
       setCampaign(activated);
+      await reload();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Campaign activation rejected by server");
+      // Re-query readiness to update displayed blockers
+      try {
+        const rd = await getCampaignReadiness(campaign.id);
+        setReadiness(rd);
+      } catch {}
     } finally {
       setActivationLoading(false);
     }
@@ -350,8 +373,9 @@ export default function CampaignDetail() {
               <Button
                 variant="primary"
                 onClick={handleActivateCampaign}
-                isLoading={activationLoading}
-                disabled={activationLoading}
+                isLoading={activationLoading || readinessLoading}
+                disabled={activationLoading || readinessLoading || (readiness !== null && (!readiness.is_ready || readiness.blockers.length > 0))}
+                title={readiness && !readiness.is_ready ? `Launch blocked: ${readiness.blockers[0]?.message || "Unmet launch requirements"}` : "Activate Campaign"}
               >
                 🚀 Activate Campaign
               </Button>
@@ -373,6 +397,34 @@ export default function CampaignDetail() {
       {error && (
         <Alert variant="error" style={{ marginBottom: "var(--space-6)" }}>
           {error}
+        </Alert>
+      )}
+
+      {campaign.status === 5 && readiness && !readiness.is_ready && readiness.blockers.length > 0 && (
+        <Alert
+          variant="error"
+          title={`Campaign Not Ready for Launch (${readiness.blockers.length} Blocker${readiness.blockers.length > 1 ? "s" : ""})`}
+          style={{ marginBottom: "var(--space-6)" }}
+        >
+          <p style={{ margin: "0 0 var(--space-2) 0", fontSize: "var(--font-size-sm)" }}>
+            The following launch prerequisites must be resolved before this campaign can be activated:
+          </p>
+          <ul style={{ margin: 0, paddingLeft: "var(--space-4)", fontSize: "var(--font-size-sm)" }}>
+            {readiness.blockers.map((b, idx) => (
+              <li key={idx} style={{ marginBottom: "4px" }}>
+                <strong>[{b.entity_type.toUpperCase()}{b.entity_name ? `: ${b.entity_name}` : ""}]</strong> {b.message}
+              </li>
+            ))}
+          </ul>
+          <div style={{ marginTop: "var(--space-3)" }}>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => navigate(`/advertiser/campaigns/new?campaign_id=${campaign.id}&step=4`)}
+            >
+              Open Launch Review Step
+            </Button>
+          </div>
         </Alert>
       )}
 

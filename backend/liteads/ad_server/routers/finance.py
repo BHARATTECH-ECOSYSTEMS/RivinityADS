@@ -2,8 +2,9 @@
 Finance API endpoints.
 """
 
-from datetime import date, time, datetime
+from datetime import date, time, datetime, timezone
 import json
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select, or_, and_
@@ -31,6 +32,7 @@ from liteads.schemas.finance import (
     PayoutRequest, 
     PublisherAdjustmentRequest,
     PublisherEarningsBreakdownResponse,
+    PublisherPayoutDetailsResponse,
     ReconciliationRequest,
     ReconciliationResponse,
     TransactionResponse,
@@ -41,6 +43,36 @@ from liteads.ad_server.services.razorpay_client import get_razorpay_client, Razo
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/finance", tags=["finance"])
+
+_BANK_ACC_REGEX = re.compile(r'\b(?:\d{4}[-\s]?){2,3}\d{4}\b|\b\d{9,18}\b')
+
+
+def mask_bank_account_str(text: str | None) -> str | None:
+    """Mask credit card or bank account sequences leaving only the last 4 digits."""
+    if not text:
+        return text
+
+    def _repl(m: re.Match) -> str:
+        s = m.group(0).replace(" ", "").replace("-", "")
+        if len(s) >= 4:
+            return f"****{s[-4:]}"
+        return "****"
+
+    return _BANK_ACC_REGEX.sub(_repl, text)
+
+
+def mask_payout_details(details: dict | None) -> dict | None:
+    """Mask sensitive fields within publisher payout details dictionary."""
+    if not details or not isinstance(details, dict):
+        return details
+    masked = dict(details)
+    if "account_number" in masked and masked["account_number"]:
+        acc = str(masked["account_number"]).strip()
+        masked["account_number"] = f"****{acc[-4:]}" if len(acc) > 4 else "****"
+    for secret_key in ("secret", "token", "password", "api_key", "key"):
+        if secret_key in masked:
+            masked[secret_key] = "[REDACTED]"
+    return masked
 
 
 @router.get("/advertiser/{advertiser_id}/ledger", response_model=LedgerResponse)
@@ -65,9 +97,16 @@ async def get_advertiser_ledger(
     )
     transactions = result.scalars().all()
 
+    tx_responses = []
+    for tx in transactions:
+        m = TransactionResponse.model_validate(tx)
+        if m.description:
+            m.description = mask_bank_account_str(m.description)
+        tx_responses.append(m)
+
     return LedgerResponse(
         balance=adv.balance,
-        transactions=[TransactionResponse.model_validate(tx) for tx in transactions],
+        transactions=tx_responses,
     )
 
 
@@ -296,10 +335,35 @@ async def get_publisher_ledger(
     )
     transactions = result.scalars().all()
 
+    tx_responses = []
+    for tx in transactions:
+        m = TransactionResponse.model_validate(tx)
+        if m.description:
+            m.description = mask_bank_account_str(m.description)
+        tx_responses.append(m)
+
     return LedgerResponse(
         balance=pub.balance,
-        transactions=[TransactionResponse.model_validate(tx) for tx in transactions],
+        transactions=tx_responses,
     )
+
+
+@router.get("/publisher/{publisher_id}/payout-details", response_model=PublisherPayoutDetailsResponse)
+async def get_publisher_payout_details(
+    publisher_id: int,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(verified_user),
+) -> PublisherPayoutDetailsResponse:
+    """Retrieve publisher payout details with sensitive bank account and secret masking."""
+    pub = await session.get(Publisher, publisher_id)
+    if not pub:
+        raise HTTPException(status_code=404, detail="Publisher not found")
+
+    if user.role != "admin" and pub.owner_user_id != user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access payout details")
+
+    masked = mask_payout_details(pub.payout_details)
+    return PublisherPayoutDetailsResponse(publisher_id=publisher_id, payout_details=masked)
 
 
 @router.post("/publisher/{publisher_id}/payout", response_model=TransactionResponse)
@@ -354,7 +418,13 @@ async def list_publisher_payouts(
     )
     result = await session.execute(stmt)
     records = result.scalars().all()
-    return [PayoutRecordResponse.model_validate(r) for r in records]
+    records_out = []
+    for r in records:
+        m = PayoutRecordResponse.model_validate(r)
+        if m.notes:
+            m.notes = mask_bank_account_str(m.notes)
+        records_out.append(m)
+    return records_out
 
 
 @router.post("/publisher/{publisher_id}/payout/{payout_id}/reject", response_model=TransactionResponse)
@@ -723,10 +793,16 @@ async def manual_publisher_adjustment(
                 action="manual_payment_adjustment",
                 details=json.dumps({
                     "publisher_id": publisher_id,
+                    "target": f"publisher:{publisher_id}",
+                    "actor_email": user.email,
+                    "actor_role": user.role,
                     "amount": str(payload.amount),
                     "reason": payload.reason,
                     "reference_id": payload.reference_id,
+                    "previous_state": "finalised",
+                    "new_state": "adjusted",
                     "admin_email": user.email,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 }),
             )
         )
@@ -800,6 +876,7 @@ async def get_audit_ledger(
     campaign_id: int | None = Query(default=None),
     tx_type: int | None = Query(default=None, alias="type"),
     is_cleared: bool | None = Query(default=None),
+    adjustment_reason: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
@@ -826,10 +903,18 @@ async def get_audit_ledger(
         query = query.where(Transaction.type == tx_type)
     if is_cleared is not None:
         query = query.where(Transaction.is_cleared == is_cleared)
+    if adjustment_reason:
+        query = query.where(Transaction.description.ilike(f"%{adjustment_reason}%"))
 
     query = query.offset(offset).limit(limit)
     res = await session.execute(query)
     txs = res.scalars().all()
-    return [TransactionResponse.model_validate(tx) for tx in txs]
+    resp_list = []
+    for tx in txs:
+        m = TransactionResponse.model_validate(tx)
+        if m.description:
+            m.description = mask_bank_account_str(m.description)
+        resp_list.append(m)
+    return resp_list
 
 

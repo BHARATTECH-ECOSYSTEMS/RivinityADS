@@ -83,9 +83,16 @@ async def approve_creative(
         details=json.dumps({
             "creative_id": creative.id,
             "campaign_id": creative.campaign_id,
+            "target": f"creative:{creative.id}",
+            "actor_email": user.email,
+            "actor_role": user.role,
             "previous_status": int(prev_status),
             "new_status": int(ModerationStatus.APPROVED),
+            "previous_state": int(prev_status),
+            "new_state": int(ModerationStatus.APPROVED),
+            "reason": "Administrative approval",
             "moderator_email": user.email,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }),
     )
     session.add(audit)
@@ -132,11 +139,17 @@ async def reject_creative(
         details=json.dumps({
             "creative_id": creative.id,
             "campaign_id": creative.campaign_id,
+            "target": f"creative:{creative.id}",
+            "actor_email": user.email,
+            "actor_role": user.role,
             "previous_status": int(prev_status),
             "new_status": int(ModerationStatus.REJECTED),
+            "previous_state": int(prev_status),
+            "new_state": int(ModerationStatus.REJECTED),
             "category": category,
             "reason": payload.reason,
             "moderator_email": user.email,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }),
     )
     session.add(audit)

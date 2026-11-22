@@ -41,6 +41,7 @@ class CampaignReadinessResponse(BaseModel):
     campaign_name: str
     status: int
     status_name: str
+    lifecycle_state: str = "Draft"
     is_ready: bool
     blockers: list[ReadinessIssue] = []
     warnings: list[ReadinessIssue] = []
@@ -84,6 +85,7 @@ async def validate_campaign_readiness(
             campaign_name="Unknown",
             status=0,
             status_name="UNKNOWN",
+            lifecycle_state="Draft",
             is_ready=False,
             blockers=blockers,
             warnings=warnings,
@@ -120,6 +122,7 @@ async def validate_campaign_readiness(
             campaign_name="Unknown",
             status=0,
             status_name="UNKNOWN",
+            lifecycle_state="Draft",
             is_ready=False,
             blockers=blockers,
             warnings=warnings,
@@ -141,6 +144,7 @@ async def validate_campaign_readiness(
             campaign_name=campaign.name,
             status=campaign.status,
             status_name="UNAUTHORIZED",
+            lifecycle_state="Draft",
             is_ready=False,
             blockers=blockers,
             warnings=warnings,
@@ -555,6 +559,50 @@ async def validate_campaign_readiness(
     approved_count = len([c for c in all_creatives if c.moderation_status == ModerationStatus.APPROVED.value])
     verified_count = sum(1 for c in all_creatives if verified_domains_cache.get(urlparse(c.landing_url).netloc.split(":")[0].lower(), False))
 
+    # Determine user-visible lifecycle state
+    if campaign.status == Status.DELETED:
+        lifecycle_state = "Archived"
+    elif campaign.status in (Status.PAUSED, Status.INACTIVE):
+        lifecycle_state = "Paused"
+    elif campaign.status == Status.ACTIVE:
+        if campaign.end_time:
+            end_tz = campaign.end_time if campaign.end_time.tzinfo else campaign.end_time.replace(tzinfo=timezone.utc)
+            if end_tz < now_utc:
+                lifecycle_state = "Completed"
+            else:
+                start_tz = campaign.start_time if campaign.start_time and campaign.start_time.tzinfo else (campaign.start_time.replace(tzinfo=timezone.utc) if campaign.start_time else None)
+                if start_tz and start_tz > now_utc:
+                    lifecycle_state = "Scheduled"
+                else:
+                    lifecycle_state = "Active"
+        else:
+            start_tz = campaign.start_time if campaign.start_time and campaign.start_time.tzinfo else (campaign.start_time.replace(tzinfo=timezone.utc) if campaign.start_time else None)
+            if start_tz and start_tz > now_utc:
+                lifecycle_state = "Scheduled"
+            else:
+                lifecycle_state = "Active"
+    elif campaign.status in (Status.DRAFT, Status.PENDING):
+        has_rejected = any(c.moderation_status == ModerationStatus.REJECTED.value for c in all_creatives)
+        has_pending = any(c.moderation_status == ModerationStatus.PENDING_REVIEW.value for c in active_creatives)
+        if has_rejected:
+            lifecycle_state = "Rejected"
+        elif has_pending:
+            lifecycle_state = "Pending Review"
+        elif blockers:
+            missing_setup_codes = {"NO_CREATIVES", "NO_ACTIVE_CREATIVES", "NO_ACTIVE_AD_SETS", "MISSING_TARGETING"}
+            if any(b.code in missing_setup_codes for b in blockers):
+                lifecycle_state = "Needs Setup"
+            else:
+                lifecycle_state = "Needs Changes"
+        else:
+            start_tz = campaign.start_time if campaign.start_time and campaign.start_time.tzinfo else (campaign.start_time.replace(tzinfo=timezone.utc) if campaign.start_time else None)
+            if start_tz and start_tz > now_utc:
+                lifecycle_state = "Scheduled"
+            else:
+                lifecycle_state = "Approved / Eligible"
+    else:
+        lifecycle_state = "Draft"
+
     summary = {
         "wallet_balance": float(advertiser.balance),
         "budget_daily": float(campaign.budget_daily),
@@ -574,6 +622,7 @@ async def validate_campaign_readiness(
         "verified_creatives": verified_count,
         "unverified_creatives": len(all_creatives) - verified_count,
         "has_targeting": has_campaign_targeting or has_ad_set_targeting,
+        "lifecycle_state": lifecycle_state,
         "ad_sets": ad_set_summaries,
     }
 
@@ -582,6 +631,7 @@ async def validate_campaign_readiness(
         campaign_name=campaign.name,
         status=campaign.status,
         status_name=status_name,
+        lifecycle_state=lifecycle_state,
         is_ready=len(blockers) == 0,
         blockers=blockers,
         warnings=warnings,

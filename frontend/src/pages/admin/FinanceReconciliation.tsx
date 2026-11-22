@@ -509,11 +509,11 @@ export default function FinanceReconciliation() {
                         <td>
                           {tx.is_cleared === false ? (
                             <span style={{ fontSize: "11px", padding: "2px 6px", background: "#fef3c7", color: "#b45309", borderRadius: "var(--radius-sm)", fontWeight: 600 }}>
-                              Hold Window
+                              Estimated (Hold Window)
                             </span>
                           ) : (
                             <span style={{ fontSize: "11px", padding: "2px 6px", background: "#f1f5f9", color: "#475569", borderRadius: "var(--radius-sm)", fontWeight: 500 }}>
-                              Cleared
+                              Finalised / Settled
                             </span>
                           )}
                         </td>

@@ -60,16 +60,16 @@ SELECT count(*) FROM campaigns;
 
 -- 2. Verify financial ledger balance consistency
 SELECT 
-    w.advertiser_id,
-    w.balance AS wallet_balance,
-    COALESCE(SUM(l.amount), 0) AS calculated_ledger_balance,
-    (w.balance - COALESCE(SUM(l.amount), 0)) AS drift
-FROM advertiser_wallets w
-LEFT JOIN financial_ledger_entries l ON w.advertiser_id = l.advertiser_id
-GROUP BY w.advertiser_id, w.balance
-HAVING (w.balance - COALESCE(SUM(l.amount), 0)) != 0;
+    a.id AS advertiser_id,
+    a.balance AS wallet_balance,
+    COALESCE(SUM(t.amount), 0) AS calculated_ledger_balance,
+    (a.balance - COALESCE(SUM(t.amount), 0)) AS drift
+FROM advertisers a
+LEFT JOIN transactions t ON a.id = t.advertiser_id
+GROUP BY a.id, a.balance
+HAVING (a.balance - COALESCE(SUM(t.amount), 0)) != 0;
 
--- 3. Verify Alembic schema migration version
+-- 3. Verify Alembic schema migration version (must match authoritative head: x3y4z5a6b7c8)
 SELECT version_num FROM alembic_version;
 ```
 If the drift query returns 0 rows, the financial state is completely consistent and ad serving may safely be resumed.

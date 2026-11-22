@@ -185,3 +185,6 @@ class DomainVerificationService:
         result = await self.session.execute(stmt)
         return result.first() is not None
 
+    # Alias for convenience
+    is_url_verified = is_url_verified_for_advertiser
+

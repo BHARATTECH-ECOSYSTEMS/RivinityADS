@@ -24,13 +24,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from liteads.models.ad import (
     Campaign,
     Advertiser,
+    Creative,
     Suggestion,
     CampaignChangeLog,
     CampaignChangeLog as CampaignChangeLogModel,
     TargetingRule,
     OptimizationDecision,
 )
-from liteads.models.base import Status
+from liteads.models.base import Status, ModerationStatus
+from liteads.ad_server.services.domain_verification import DomainVerificationService
 from liteads.ad_server.services.optimization_policy import OptimizationPolicyResult
 from liteads.common.cache import redis_client
 from liteads.common.config import get_settings
@@ -210,10 +212,18 @@ class OptimizationExecutor:
         # 3. LIMITED PILOT MODE: Bounded autopilot for explicitly opted-in pilot campaigns
         if effective_mode == "limited_pilot":
             pilot_ids = settings.optimization.pilot_campaign_ids
-            # CRITICAL FAIL-CLOSED RULE (Phase 6): An empty pilot allowlist means ZERO eligible pilot campaigns.
-            if not pilot_ids:
+            sanitized_pilot_ids: set[int] = set()
+            if isinstance(pilot_ids, (list, tuple, set)):
+                for pid in pilot_ids:
+                    try:
+                        sanitized_pilot_ids.add(int(pid))
+                    except (ValueError, TypeError):
+                        pass
+
+            # CRITICAL FAIL-CLOSED RULE (Phase 6): An empty or invalid pilot allowlist means ZERO eligible pilot campaigns.
+            if not sanitized_pilot_ids:
                 logger.warning(
-                    "Limited pilot mode active but pilot_campaign_ids is empty; failing closed to suggestions_only",
+                    "Limited pilot mode active but pilot_campaign_ids is empty or invalid; failing closed to suggestions_only",
                     campaign_id=campaign.id,
                 )
                 await self._execute_autopilot_off(
@@ -239,7 +249,7 @@ class OptimizationExecutor:
                 )
                 return
 
-            is_pilot_campaign = campaign.id in pilot_ids
+            is_pilot_campaign = campaign.id in sanitized_pilot_ids
             if campaign.autopilot and is_pilot_campaign:
                 # Check pilot spend delta limit
                 if policy_result.proposed_budget_delta is not None:
@@ -543,6 +553,33 @@ class OptimizationExecutor:
         # Check global and campaign kill switch
         if settings.optimization.kill_switch:
             raise OptimizationExecutionError("Optimization kill switch is active")
+
+        # Check creative compliance: if creatives exist, ensure at least one is approved and none are rejected
+        stmt_creatives = select(Creative).where(
+            Creative.campaign_id == campaign.id,
+            Creative.status != Status.DELETED,
+        )
+        c_res = await self.session.execute(stmt_creatives)
+        creatives = c_res.scalars().all()
+        if creatives:
+            if any(getattr(c, "moderation_status", None) == ModerationStatus.REJECTED for c in creatives):
+                raise OptimizationExecutionError("Campaign has rejected creatives; autopilot execution disallowed")
+            approved_creatives = [
+                c for c in creatives
+                if getattr(c, "moderation_status", None) == ModerationStatus.APPROVED
+            ]
+            if not approved_creatives:
+                raise OptimizationExecutionError("Campaign has no approved creatives; autopilot execution disallowed")
+
+            domain_service = DomainVerificationService(self.session)
+            for c in approved_creatives:
+                dest_url = getattr(c, "landing_url", None)
+                if dest_url:
+                    is_verified = await domain_service.is_url_verified_for_advertiser(campaign.advertiser_id, dest_url)
+                    if not is_verified:
+                        raise OptimizationExecutionError(
+                            f"Creative destination domain for '{dest_url}' is not verified; autopilot execution disallowed"
+                        )
 
         # Database-enforced fencing token check
         if fencing_token is not None:

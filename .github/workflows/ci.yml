@@ -29,9 +29,13 @@ jobs:
           cache: "pip"
           cache-dependency-path: "backend/pyproject.toml"
 
-      - name: Install Backend Dependencies
+      - name: Install CPU PyTorch Wheel
         run: |
           python -m pip install --upgrade pip
+          pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
+
+      - name: Install Backend Dependencies
+        run: |
           pip install -e "backend[dev]"
 
       - name: Validate Alembic Migration Head
@@ -52,17 +56,23 @@ jobs:
 
       - name: Run Core & Regression Pytest Suites
         run: |
-          pytest backend/tests/test_api/test_phase0_migration_truthfulness.py \
+          pytest backend/tests/test_ad_server/test_health.py \
+                 backend/tests/test_ad_server/test_ad.py \
+                 backend/tests/test_api/test_phase0_migration_truthfulness.py \
                  backend/tests/test_api/test_phase1_visitor_consent.py \
                  backend/tests/test_api/test_phase1_visitor_consent_gate.py \
                  backend/tests/test_api/test_phase2_channel_conformance.py \
                  backend/tests/test_api/test_phase3_publisher_verification.py \
+                 backend/tests/test_api/test_phase4_advertiser_campaign_readiness.py \
                  backend/tests/test_api/test_phase7_ad_quality_and_admin_ops.py \
                  backend/tests/test_api/test_phase11_conversion_measurement.py \
                  backend/tests/test_api/test_phase10f_monetization_consent.py \
                  backend/tests/test_api/test_phase10g_security_e2e.py \
                  backend/tests/test_api/test_phase9_3_persistence_lifecycle.py \
                  backend/tests/test_api/test_finance_api.py \
+                 backend/tests/test_api/test_phase5_financial_event_pipeline_proof.py \
+                 backend/tests/test_api/test_phase6_laya_decision_hardening.py \
+                 backend/tests/test_api/test_phase8_ml_governance.py \
                  -v --tb=short
 
   frontend-quality:
@@ -127,9 +137,13 @@ jobs:
           cache: "pip"
           cache-dependency-path: "backend/pyproject.toml"
 
-      - name: Install Backend Dependencies
+      - name: Install CPU PyTorch Wheel
         run: |
           python -m pip install --upgrade pip
+          pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
+
+      - name: Install Backend Dependencies
+        run: |
           pip install -e "backend[dev]"
 
       - name: Run PostgreSQL Migration & Concurrency Verification

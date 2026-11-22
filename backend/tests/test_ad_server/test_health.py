@@ -19,4 +19,4 @@ async def test_live(client: AsyncClient) -> None:
     """Test liveness endpoint."""
     response = await client.get("/live")
     assert response.status_code == 200
-    assert response.json() == {"alive": True}
+    assert response.json() == {"alive": True, "status": "alive"}

@@ -5,17 +5,23 @@ Tests for ad serving endpoints.
 from typing import Any
 
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient
 from liteads.ad_server.main import app
-from liteads.common.security import authenticate_s2s_or_user
-from liteads.models import User, AdSlot, Publisher
+from liteads.common.security import AuthenticatedAdCaller, authenticate_ad_request
+from liteads.models import AdSlot, Publisher
 from liteads.common.database import get_session
 
-@pytest.fixture(autouse=True)
+@pytest_asyncio.fixture(autouse=True)
 async def override_auth(test_db):
-    async def mock_auth():
-        return {"type": "user", "entity": User(id=1, role="admin", email="test@test.com")}
-    app.dependency_overrides[authenticate_s2s_or_user] = mock_auth
+    async def mock_ad_auth():
+        return AuthenticatedAdCaller(
+            is_authenticated=True,
+            auth_type="api_key",
+            publisher_id=1,
+            api_key={"id": 1, "is_sandbox": False, "rate_limit_per_minute": 1000, "daily_quota": 10000},
+        )
+    app.dependency_overrides[authenticate_ad_request] = mock_ad_auth
     
     # Create dummy slot for tests
     publisher = Publisher(id=1, name="test_pub", status=1)
@@ -24,8 +30,16 @@ async def override_auth(test_db):
     test_db.add(slot)
     await test_db.commit()
     
-    yield
-    app.dependency_overrides.pop(authenticate_s2s_or_user, None)
+    try:
+        yield
+    finally:
+        app.dependency_overrides.pop(authenticate_ad_request, None)
+        try:
+            await test_db.delete(slot)
+            await test_db.delete(publisher)
+            await test_db.commit()
+        except Exception:
+            pass
 
 @pytest.mark.asyncio
 async def test_ad_request_empty(

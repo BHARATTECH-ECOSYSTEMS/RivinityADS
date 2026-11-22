@@ -192,3 +192,11 @@ class PublisherAdjustmentRequest(BaseModel):
     campaign_id: int | None = None
 
 
+class PublisherPayoutDetailsResponse(BaseModel):
+    """Publisher payout account details with sensitive bank details masked."""
+
+    publisher_id: int
+    payout_details: dict[str, Any] | None = None
+
+
+

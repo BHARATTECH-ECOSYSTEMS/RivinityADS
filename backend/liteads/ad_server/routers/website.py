@@ -3,6 +3,7 @@
 import base64
 import copy
 from datetime import datetime, timezone
+import json
 import secrets
 from typing import Annotated, Any
 
@@ -36,7 +37,7 @@ from liteads.common.database import get_session
 from liteads.common.logger import get_logger
 from liteads.common.security import current_user, require_roles, verified_user
 from liteads.ad_server.services.monetization_eligibility import evaluate_monetization_eligibility
-from liteads.models.auth import User
+from liteads.models.auth import AuditLog, User
 from liteads.models.base import Status
 from liteads.models.publisher import AdSlot, Publisher, PublisherProperty
 from liteads.models.website import (
@@ -1393,6 +1394,7 @@ async def disable_monetization(
     """Disable monetization immediately, falling back to non-billable ad placeholders."""
     project = await _get_project_with_access(id, user, session, for_update=True)
 
+    prev_status = project.monetization_status
     project.monetization_status = WebsiteMonetizationStatus.DISABLED
     project.monetization_consent = None
 
@@ -1414,6 +1416,23 @@ async def disable_monetization(
         recorded_at=datetime.now(timezone.utc),
     )
     session.add(log)
+
+    session.add(
+        AuditLog(
+            user_id=user.id,
+            action="website_monetization_disabled",
+            details=json.dumps({
+                "project_id": project.id,
+                "target": f"website_project:{project.id}",
+                "actor_email": user.email,
+                "actor_role": user.role,
+                "previous_state": int(prev_status) if prev_status is not None else None,
+                "new_state": int(WebsiteMonetizationStatus.DISABLED),
+                "reason": "Website monetization disabled",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }),
+        )
+    )
 
     await session.commit()
     await session.refresh(project)

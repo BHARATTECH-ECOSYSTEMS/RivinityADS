@@ -24,7 +24,8 @@ from liteads.common.config import get_settings
 from liteads.models.ad import Advertiser, Campaign, Creative, AdEvent, CampaignAssignment
 from liteads.models.base import EventType, Status
 from liteads.models.publisher import Publisher
-from liteads.models.finance import Transaction
+from liteads.models.finance import Transaction, PaymentRequest, PublisherPayout
+from liteads.ad_server.services.billing import BillingService
 from liteads.ad_server.services.conversion_service import ConversionService
 from liteads.common.tracking_sig import sign_click_token
 from liteads.common.alembic_utils import (
@@ -565,6 +566,139 @@ async def main(argv: list[str] | None = None) -> int:
             adv_retry = await session.get(Advertiser, adv_id)
             assert adv_retry.balance == Decimal("450.0000"), f"Duplicate charge occurred! {adv_retry.balance}"
             print("PASS: Repeated request deduplicated idempotently with strictly zero duplicate charge!")
+
+        # ── Test 6: Concurrent Duplicate Razorpay Webhook Deliveries ──
+        print("\n=== Test 6: Concurrent Duplicate Razorpay Webhook Deliveries ===")
+        async with async_session_factory() as session:
+            adv_obj = await session.get(Advertiser, adv_id)
+            initial_adv_balance = adv_obj.balance
+            pr = PaymentRequest(
+                advertiser_id=adv_id,
+                amount=Decimal("250.0000"),
+                currency="INR",
+                provider_order_id="order_race_test_1",
+                status="pending",
+            )
+            session.add(pr)
+            await session.commit()
+
+        async def webhook_delivery_worker(worker_id: int):
+            async with async_session_factory() as session:
+                try:
+                    stmt = select(Transaction).where(Transaction.reference_id == "order_race_test_1")
+                    res = await session.execute(stmt)
+                    if res.scalar_one_or_none():
+                        return {"status": "already_processed", "worker": worker_id}
+
+                    await BillingService.record_deposit(
+                        session=session,
+                        advertiser_id=adv_id,
+                        amount=Decimal("250.0000"),
+                        currency="INR",
+                        reference_id="order_race_test_1",
+                        provider_event_id="evt_race_test_1",
+                        description="Razorpay Top-up Concurrent",
+                    )
+                    await session.commit()
+                    return {"status": "success", "worker": worker_id}
+                except IntegrityError:
+                    await session.rollback()
+                    return {"status": "already_processed", "worker": worker_id}
+
+        results = await asyncio.gather(webhook_delivery_worker(1), webhook_delivery_worker(2))
+        print(f"Webhook delivery race results: {results}")
+        statuses = [r["status"] for r in results]
+        assert "success" in statuses, f"Expected at least one success, got {statuses}"
+        assert statuses.count("success") == 1, f"Expected exactly one success, got {statuses}"
+        assert statuses.count("already_processed") == 1, f"Expected exactly one duplicate caught, got {statuses}"
+
+        async with async_session_factory() as session:
+            adv_after_webhook = await session.get(Advertiser, adv_id)
+            expected_adv_bal = initial_adv_balance + Decimal("250.0000")
+            assert adv_after_webhook.balance == expected_adv_bal, (
+                f"Advertiser balance mismatch: expected {expected_adv_bal}, got {adv_after_webhook.balance}"
+            )
+            tx_count_stmt = select(func.count()).where(Transaction.reference_id == "order_race_test_1")
+            tx_count = (await session.execute(tx_count_stmt)).scalar()
+            assert tx_count == 1, f"Expected exactly 1 ledger transaction, got {tx_count}"
+            print("PASS: Concurrent duplicate Razorpay webhooks credited wallet strictly once with 1 immutable ledger row!")
+
+        # ── Test 7: Competing Simultaneous Payout Requests Against Exact Available Balance ──
+        print("\n=== Test 7: Competing Simultaneous Payout Requests (No Overdraw) ===")
+        async with async_session_factory() as session:
+            pub_obj = await session.get(Publisher, pub_id)
+            pub_obj.balance = Decimal("200.0000")
+            await session.commit()
+
+        async def payout_worker(worker_id: int):
+            async with async_session_factory() as session:
+                try:
+                    payout, tx = await BillingService.request_payout(
+                        session=session,
+                        publisher_id=pub_id,
+                        amount=Decimal("200.0000"),
+                        reference_id=f"payout_race_worker_{worker_id}",
+                    )
+                    await session.commit()
+                    return {"status": "success", "payout_id": payout.id, "worker": worker_id}
+                except (ValueError, IntegrityError) as e:
+                    await session.rollback()
+                    return {"status": "rejected", "error": str(e), "worker": worker_id}
+
+        payout_results = await asyncio.gather(payout_worker(1), payout_worker(2))
+        print(f"Payout race results: {payout_results}")
+        p_statuses = [r["status"] for r in payout_results]
+        assert p_statuses.count("success") == 1, f"Expected exactly 1 success, got {p_statuses}"
+        assert p_statuses.count("rejected") == 1, f"Expected exactly 1 rejection, got {p_statuses}"
+
+        async with async_session_factory() as session:
+            pub_check = await session.get(Publisher, pub_id)
+            assert pub_check.balance == Decimal("0.0000"), (
+                f"Publisher balance overdrawn! Expected 0.0000, got {pub_check.balance}"
+            )
+            q_po = select(PublisherPayout).where(PublisherPayout.publisher_id == pub_id, PublisherPayout.amount == Decimal("200.0000"))
+            payouts = (await session.execute(q_po)).scalars().all()
+            assert len(payouts) == 1, f"Expected 1 payout record, found {len(payouts)}"
+            assert payouts[0].status == "requested"
+            print("PASS: Competing payout requests allowed strictly 1 reservation and rejected the second; zero overdraw!")
+
+        # ── Test 8: Concurrent Duplicate Impression / CPA Charges Deduplication ──
+        print("\n=== Test 8: Concurrent Duplicate Impression / CPA Charges Deduplication ===")
+        async with async_session_factory() as session:
+            adv_obj = await session.get(Advertiser, adv_id)
+            adv_bal_before_imp = adv_obj.balance
+
+        canonical_imp_key = f"cpa:{camp_id}:ORD-CONCURRENT-CPA-DEDUP"
+
+        async def charge_worker(worker_id: int):
+            async with async_session_factory() as session:
+                try:
+                    res = await BillingService.process_cpa_charge(
+                        session=session,
+                        advertiser_id=adv_id,
+                        campaign_id=camp_id,
+                        cost=Decimal("25.0000"),
+                        order_id="ORD-CONCURRENT-CPA-DEDUP",
+                    )
+                    await session.commit()
+                    return {"status": "success", "result": res, "worker": worker_id}
+                except IntegrityError:
+                    await session.rollback()
+                    return {"status": "duplicate_caught", "worker": worker_id}
+
+        charge_results = await asyncio.gather(charge_worker(1), charge_worker(2))
+        print(f"Charge race results: {charge_results}")
+
+        async with async_session_factory() as session:
+            adv_bal_after = (await session.get(Advertiser, adv_id)).balance
+            expected_bal = adv_bal_before_imp - Decimal("25.0000")
+            assert adv_bal_after == expected_bal, f"Expected {expected_bal}, got {adv_bal_after}"
+
+            tx_stmt = select(func.count()).where(Transaction.reference_id == canonical_imp_key)
+            tx_cnt = (await session.execute(tx_stmt)).scalar()
+            assert tx_cnt == 1, f"Expected exactly 1 spend transaction, got {tx_cnt}"
+            print("PASS: Concurrent duplicate charges deduplicated cleanly at PostgreSQL level with zero double billing!")
+
 
         await engine.dispose()
         print(f"\nALL POSTGRESQL CONCURRENCY & LEDGER AUDIT TESTS PASSED (HEAD {expected_head})!")

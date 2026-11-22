@@ -45,7 +45,9 @@ def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
 
 @pytest_asyncio.fixture(autouse=True)
 async def cleanup_redis_between_tests():
-    """Ensure Redis tracking keys do not leak across test runs."""
+    """Ensure Redis tracking keys and in-memory rate limits do not leak across test runs."""
+    from liteads.ad_server.services.publisher_verification import _IN_MEMORY_VERIFY_RATE_LIMITS
+    _IN_MEMORY_VERIFY_RATE_LIMITS.clear()
     from liteads.common.cache import redis_client
     if redis_client.connected:
         try:
@@ -55,6 +57,7 @@ async def cleanup_redis_between_tests():
         except Exception:
             pass
     yield
+    _IN_MEMORY_VERIFY_RATE_LIMITS.clear()
     if redis_client.connected:
         try:
             keys = await redis_client.client.keys("trk:*")

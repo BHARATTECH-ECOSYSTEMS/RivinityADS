@@ -39,6 +39,12 @@ class OptimizationPolicyService:
     Evaluates optimization decisions against business rules and guardrails.
     
     This service is PURE and READ-ONLY. It does not modify any state.
+
+    Calibration Caveat:
+        Model confidence estimates from Laya/SystemOne sidecar may not be strictly
+        calibrated probabilities across low-volume tails. Downstream decisions must
+        enforce hard bounding, minimum impression thresholds (>=500), and objective
+        conversion evidence before execution.
     """
 
     VALID_ACTIONS = {

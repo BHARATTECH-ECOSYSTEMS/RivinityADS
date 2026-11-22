@@ -6,7 +6,7 @@ Procedures for managing upstream provider degradation (Razorpay payment gateway,
 ---
 
 ## 1. Third-Party Isolation Philosophy
-Core ad serving (`/api/v1/ads/request`) and tracking (`/api/v1/track/*`) must **never depend synchronously** on third-party APIs. All third-party interactions (billing, emails, LLM/embeddings) are managed via circuit breakers, local database outbox queues, or asynchronous background workers.
+Core ad serving (`/api/v1/ad/request`) and tracking (`/api/v1/track/*`) must **never depend synchronously** on third-party APIs. All third-party interactions (billing, emails, LLM/embeddings) are managed via circuit breakers, local database outbox queues, or asynchronous background workers.
 
 ---
 

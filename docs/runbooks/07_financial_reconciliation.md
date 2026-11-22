@@ -7,9 +7,9 @@ Procedures for executing daily financial reconciliation, detecting wallet/ledger
 
 ## 1. Accounting Invariants (Mandatory)
 In Bharattech Ads, the financial state is governed by three strict invariants:
-1. **Double-Entry Ledger Authority:** `advertiser_wallets.balance` is a cached projection; `financial_ledger_entries` is the immutable, append-only source of truth.
+1. **Double-Entry Ledger Authority:** `advertisers.balance` is a cached projection; `transactions` is the immutable, append-only source of truth.
 2. **Zero Floating-Point Drift:** All amounts are stored and computed as integer cents or fixed-precision Decimals (`NUMERIC(12, 4)`).
-3. **No Unaudited Mutations:** Direct `UPDATE advertiser_wallets SET balance = ...` without a corresponding `financial_ledger_entry` is strictly prohibited.
+3. **No Unaudited Mutations:** Direct `UPDATE advertisers SET balance = ...` without a corresponding `transactions` entry is strictly prohibited.
 
 ---
 
@@ -19,16 +19,16 @@ The automated reconciliation worker runs nightly at 00:00 UTC. To run the reconc
 docker compose -f backend/docker-compose.prod.yml exec ad-server \
   python -c "
 import asyncio
-from liteads.common.database import init_db, db
+from liteads.common.database import get_session
 from liteads.ad_server.services.billing import reconcile_all_wallets
 
 async def main():
-    await init_db()
-    async with db.session() as s:
+    async for s in get_session():
         anomalies = await reconcile_all_wallets(s)
         print(f'Reconciliation completed. Discrepancies found: {len(anomalies)}')
         for a in anomalies:
             print(f'Advertiser {a.advertiser_id}: Wallet={a.wallet_balance}, Ledger={a.ledger_balance}, Drift={a.drift}')
+        break
 
 asyncio.run(main())
 "
@@ -41,20 +41,20 @@ If `LiteAdsFinancialLedgerDrift` alert fires:
 1. Identify the affected advertiser ID from alert labels or query:
    ```sql
    SELECT 
-       w.advertiser_id,
-       w.balance AS wallet_balance,
-       COALESCE(SUM(l.amount), 0) AS ledger_sum,
-       (w.balance - COALESCE(SUM(l.amount), 0)) AS drift
-   FROM advertiser_wallets w
-   LEFT JOIN financial_ledger_entries l ON w.advertiser_id = l.advertiser_id
-   GROUP BY w.advertiser_id, w.balance
-   HAVING (w.balance - COALESCE(SUM(l.amount), 0)) != 0;
+       a.id AS advertiser_id,
+       a.balance AS wallet_balance,
+       COALESCE(SUM(t.amount), 0) AS ledger_sum,
+       (a.balance - COALESCE(SUM(t.amount), 0)) AS drift
+   FROM advertisers a
+   LEFT JOIN transactions t ON a.id = t.advertiser_id
+   GROUP BY a.id, a.balance
+   HAVING (a.balance - COALESCE(SUM(t.amount), 0)) != 0;
    ```
 2. **Root Cause Analysis:**
    - Inspect transaction logs for interrupted database sessions during balance reservation.
    - Check if an uncommitted spend reservation was released improperly.
 3. **Resolution:**
-   - Always resolve discrepancies by posting a compensating ledger entry with type `AUDIT_CORRECTION` and an explicit reason.
+   - Always resolve discrepancies by posting a compensating ledger entry with type `ADJUSTMENT` (or `REFUND`) and an explicit description.
    - Never overwrite the balance directly without an audit record.
 
 ---
@@ -64,33 +64,35 @@ When issuing an operational refund (e.g., fraud mitigation or dispute resolution
 ```sql
 BEGIN;
 
--- 1. Insert immutable ledger entry
-INSERT INTO financial_ledger_entries (
+-- 1. Insert immutable transaction entry
+INSERT INTO transactions (
     id,
     advertiser_id,
-    entry_type,
+    type,
     amount,
     currency,
     reference_id,
     description,
+    is_cleared,
     created_at
 ) VALUES (
     gen_random_uuid(),
-    'advertiser-uuid-here',
+    1,
     'REFUND',
     25.0000,
     'USD',
     'INCIDENT-2026-11-12-FRAUD',
     'Approved operational refund for fraudulent ad unit activity per Runbook 06',
+    true,
     NOW()
 );
 
--- 2. Update cached wallet balance atomically
-UPDATE advertiser_wallets
+-- 2. Update cached advertiser balance atomically
+UPDATE advertisers
 SET 
     balance = balance + 25.0000,
     updated_at = NOW()
-WHERE advertiser_id = 'advertiser-uuid-here';
+WHERE id = 1;
 
 COMMIT;
 ```

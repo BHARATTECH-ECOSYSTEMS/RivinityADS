@@ -9,7 +9,8 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+import time
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -89,6 +90,7 @@ from liteads.schemas.management import (
     PublisherAssignmentResponse,
     SuggestionResponse,
     SuggestionStatusPatch,
+    OptimizationConfigPatch,
     OptimizationStatusResponse,
     OptimizationDecisionResponse,
     CampaignOptimizationStateResponse,
@@ -152,6 +154,45 @@ async def _assert_ad_set_access(user: User, ad_set_id: int, session: AsyncSessio
     return ad_set, campaign
 
 
+_idempotency_memory_cache: dict[str, tuple[float, int]] = {}
+
+
+def _extract_idempotency_key(request: Request, header_val: str | None) -> str | None:
+    if header_val and header_val.strip():
+        return header_val.strip()
+    x_key = request.headers.get("x-idempotency-key")
+    if x_key and x_key.strip():
+        return x_key.strip()
+    return None
+
+
+async def _get_idempotent_entity_id(cache_key: str) -> int | None:
+    from liteads.common.cache import redis_client
+    try:
+        val = await redis_client.get(cache_key)
+        if val:
+            return int(val)
+    except Exception:
+        pass
+    now = time.time()
+    if cache_key in _idempotency_memory_cache:
+        ts, ent_id = _idempotency_memory_cache[cache_key]
+        if now - ts < 86400:
+            return ent_id
+        else:
+            del _idempotency_memory_cache[cache_key]
+    return None
+
+
+async def _set_idempotent_entity_id(cache_key: str, entity_id: int) -> None:
+    from liteads.common.cache import redis_client
+    try:
+        await redis_client.set(cache_key, str(entity_id), ex=86400)
+    except Exception:
+        pass
+    _idempotency_memory_cache[cache_key] = (time.time(), entity_id)
+
+
 @router.get("/advertiser", response_model=list[AdvertiserResponse], dependencies=[Depends(require_roles("admin"))])
 async def list_advertisers(session: AsyncSession = Depends(get_session)) -> list[Advertiser]:
     result = await session.execute(select(Advertiser).order_by(Advertiser.id))
@@ -210,12 +251,26 @@ async def list_campaigns(
 
 @router.post("/campaign", response_model=CampaignResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def create_campaign(
-    payload: CampaignCreate, user: User = Depends(verified_user), session: AsyncSession = Depends(get_session)
+    payload: CampaignCreate,
+    request: Request,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    user: User = Depends(verified_user),
+    session: AsyncSession = Depends(get_session),
 ) -> Campaign:
     _assert_advertiser_access(user, payload.advertiser_id)
     if await session.get(Advertiser, payload.advertiser_id) is None:
         raise _not_found("Advertiser", payload.advertiser_id)
     
+    # Double-submit idempotency protection
+    idem_key = _extract_idempotency_key(request, idempotency_key)
+    if idem_key:
+        cache_key = f"idemp:adv:{payload.advertiser_id}:camp:{idem_key}"
+        existing_id = await _get_idempotent_entity_id(cache_key)
+        if existing_id is not None:
+            existing = await session.get(Campaign, existing_id)
+            if existing is not None:
+                return existing
+
     # Phase 3E: All campaigns must start as DRAFT (Status.DRAFT = 5)
     data = payload.model_dump()
     data["status"] = 5
@@ -224,6 +279,10 @@ async def create_campaign(
     session.add(campaign)
     await session.commit()
     await session.refresh(campaign)
+
+    if idem_key:
+        await _set_idempotent_entity_id(f"idemp:adv:{payload.advertiser_id}:camp:{idem_key}", campaign.id)
+
     return campaign
 
 
@@ -248,6 +307,7 @@ async def update_campaign(
         raise _not_found("Campaign", campaign_id)
     _assert_advertiser_access(user, campaign.advertiser_id)
     updates = payload.model_dump(exclude_unset=True)
+    explicit_reason = updates.pop("reason", None) or "Campaign status update"
     prev_status = campaign.status
     for key, value in updates.items():
         setattr(campaign, key, value)
@@ -259,9 +319,15 @@ async def update_campaign(
                 details=json.dumps({
                     "campaign_id": campaign.id,
                     "advertiser_id": campaign.advertiser_id,
+                    "target": f"campaign:{campaign.id}",
+                    "actor_email": user.email,
+                    "actor_role": user.role,
                     "previous_status": int(prev_status) if prev_status is not None else None,
                     "new_status": int(campaign.status) if campaign.status is not None else None,
-                    "actor_email": user.email,
+                    "previous_state": int(prev_status) if prev_status is not None else None,
+                    "new_state": int(campaign.status) if campaign.status is not None else None,
+                    "reason": explicit_reason,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 }),
             )
         )
@@ -289,7 +355,11 @@ async def activate_campaign(
         msg = str(e)
         if msg in ("Campaign not found", "Advertiser not found"):
             raise _not_found(msg.split()[0], campaign_id)
-        raise HTTPException(status_code=400, detail=msg)
+        raise HTTPException(
+            status_code=400,
+            detail=msg,
+            headers={"X-Activation-Blockers": json.dumps(e.blockers)} if e.blockers else None,
+        )
         
     await session.commit()
     await session.refresh(campaign)
@@ -375,10 +445,22 @@ async def delete_campaign_assignment(
 async def create_ad_set(
     campaign_id: int,
     payload: AdSetCreate,
+    request: Request,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session),
 ) -> AdSet:
     campaign = await _assert_campaign_access(user, campaign_id, session)
+
+    idem_key = _extract_idempotency_key(request, idempotency_key)
+    if idem_key:
+        cache_key = f"idemp:camp:{campaign_id}:adset:{idem_key}"
+        existing_id = await _get_idempotent_entity_id(cache_key)
+        if existing_id is not None:
+            existing = await session.get(AdSet, existing_id)
+            if existing is not None:
+                return existing
+
     if payload.daily_budget is not None and campaign.budget_daily is not None and campaign.budget_daily > 0:
         if payload.daily_budget > campaign.budget_daily:
             raise HTTPException(
@@ -390,6 +472,10 @@ async def create_ad_set(
     session.add(ad_set)
     await session.commit()
     await session.refresh(ad_set)
+
+    if idem_key:
+        await _set_idempotent_entity_id(f"idemp:camp:{campaign_id}:adset:{idem_key}", ad_set.id)
+
     return ad_set
 
 
@@ -502,10 +588,21 @@ async def list_creatives(
 @router.post("/creative", response_model=CreativeResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_roles("admin", "advertiser"))])
 async def create_creative(
     payload: CreativeCreate,
+    request: Request,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     user: User = Depends(verified_user),
     session: AsyncSession = Depends(get_session)
 ) -> Creative:
     campaign = await _assert_campaign_access(user, payload.campaign_id, session)
+
+    idem_key = _extract_idempotency_key(request, idempotency_key)
+    if idem_key:
+        cache_key = f"idemp:camp:{payload.campaign_id}:creative:{idem_key}"
+        existing_id = await _get_idempotent_entity_id(cache_key)
+        if existing_id is not None:
+            existing = await session.get(Creative, existing_id)
+            if existing is not None:
+                return existing
 
     data = payload.model_dump()
     if payload.ad_set_id is not None:
@@ -563,6 +660,10 @@ async def create_creative(
     session.add(creative)
     await session.commit()
     await session.refresh(creative)
+
+    if idem_key:
+        await _set_idempotent_entity_id(f"idemp:camp:{payload.campaign_id}:creative:{idem_key}", creative.id)
+
     return creative
 
 
@@ -760,6 +861,7 @@ async def update_publisher(
     if publisher is None:
         raise _not_found("Publisher", publisher_id)
     updates = payload.model_dump(exclude_unset=True)
+    explicit_reason = updates.pop("reason", None) or "Publisher status update"
     prev_status = publisher.status
     for key, value in updates.items():
         setattr(publisher, key, value)
@@ -770,9 +872,15 @@ async def update_publisher(
                 action="publisher_status_updated",
                 details=json.dumps({
                     "publisher_id": publisher.id,
+                    "target": f"publisher:{publisher.id}",
+                    "actor_email": user.email,
+                    "actor_role": user.role,
                     "previous_status": int(prev_status) if prev_status is not None else None,
                     "new_status": int(publisher.status) if publisher.status is not None else None,
-                    "actor_email": user.email,
+                    "previous_state": int(prev_status) if prev_status is not None else None,
+                    "new_state": int(publisher.status) if publisher.status is not None else None,
+                    "reason": explicit_reason,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 }),
             )
         )
@@ -1637,6 +1745,7 @@ async def update_publisher_property(
         prev_status = property_obj.status
         property_obj.status = updates["status"]
         if property_obj.status != prev_status:
+            explicit_reason = updates.get("reason") or "Property status update"
             session.add(
                 AuditLog(
                     user_id=user.id,
@@ -1644,9 +1753,15 @@ async def update_publisher_property(
                     details=json.dumps({
                         "property_id": property_obj.id,
                         "publisher_id": property_obj.publisher_id,
+                        "target": f"property:{property_obj.id}",
+                        "actor_email": user.email,
+                        "actor_role": user.role,
                         "previous_status": int(prev_status) if prev_status is not None else None,
                         "new_status": int(property_obj.status) if property_obj.status is not None else None,
-                        "actor_email": user.email,
+                        "previous_state": int(prev_status) if prev_status is not None else None,
+                        "new_state": int(property_obj.status) if property_obj.status is not None else None,
+                        "reason": explicit_reason,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                     }),
                 )
             )
@@ -2283,6 +2398,41 @@ async def get_optimization_status() -> OptimizationStatusResponse:
     )
 
 
+@router.patch(
+    "/optimization/status",
+    response_model=OptimizationStatusResponse,
+    dependencies=[Depends(require_roles("admin"))],
+    summary="Update global optimization mode, kill switch, or pilot allowlist",
+)
+async def update_optimization_status(
+    patch: OptimizationConfigPatch,
+) -> OptimizationStatusResponse:
+    settings = get_settings()
+    if patch.mode is not None:
+        if patch.mode not in ("shadow", "suggestions_only", "limited_pilot", "autopilot"):
+            raise HTTPException(status_code=400, detail=f"Invalid optimization mode: {patch.mode}")
+        settings.optimization.mode = patch.mode
+    if patch.kill_switch is not None:
+        settings.optimization.kill_switch = patch.kill_switch
+    if patch.pilot_campaign_ids is not None:
+        settings.optimization.pilot_campaign_ids = [int(pid) for pid in patch.pilot_campaign_ids]
+
+    from liteads.ad_server.services.optimization_scheduler import optimization_loop
+    return OptimizationStatusResponse(
+        global_mode=settings.optimization.mode,
+        kill_switch=settings.optimization.kill_switch,
+        enabled=settings.optimization.enabled,
+        pilot_campaign_ids=settings.optimization.pilot_campaign_ids,
+        pilot_count=len(settings.optimization.pilot_campaign_ids),
+        cooldown_seconds=settings.optimization.cooldown_seconds,
+        max_daily_changes=settings.optimization.max_daily_changes_per_campaign,
+        pilot_max_budget_delta_amount=settings.optimization.pilot_max_budget_delta_amount,
+        laya_base_url=settings.laya.base_url,
+        laya_enabled=settings.laya.enabled,
+        loop_is_running=optimization_loop.is_running,
+    )
+
+
 @router.get(
     "/optimization/decisions",
     response_model=list[OptimizationDecisionResponse],
@@ -2451,6 +2601,26 @@ async def list_audit_logs(
     return list(res.scalars().all())
 
 
+@router.delete(
+    "/admin/audit-logs/{log_id}",
+    dependencies=[Depends(require_roles("admin", "advertiser", "publisher"))],
+    summary="Audit logs are strictly immutable and cannot be deleted",
+)
+async def delete_audit_log(log_id: int) -> None:
+    """Enforce strict immutability: audit logs cannot be deleted."""
+    raise HTTPException(status_code=403, detail="Audit logs are immutable and cannot be modified or deleted")
+
+
+@router.put(
+    "/admin/audit-logs/{log_id}",
+    dependencies=[Depends(require_roles("admin", "advertiser", "publisher"))],
+    summary="Audit logs are strictly immutable and cannot be modified",
+)
+async def update_audit_log(log_id: int) -> None:
+    """Enforce strict immutability: audit logs cannot be modified."""
+    raise HTTPException(status_code=403, detail="Audit logs are immutable and cannot be modified or deleted")
+
+
 @router.get(
     "/admin/dashboard/operational-exceptions",
     response_model=OperationalExceptionsResponse,
@@ -2466,6 +2636,8 @@ async def get_operational_exceptions(
     unusual_ctrs: list[OperationalAlert] = []
     spend_spikes: list[OperationalAlert] = []
     webhook_payout_failures: list[OperationalAlert] = []
+    consent_failures: list[OperationalAlert] = []
+    worker_redis_health: list[OperationalAlert] = []
     moderation_queue: list[SLAItem] = []
     finance_queue: list[SLAItem] = []
 
@@ -2489,6 +2661,7 @@ async def get_operational_exceptions(
         else:
             sla_status = "ON_TRACK"
 
+        item_status = "open" if sla_status == "ON_TRACK" else ("in_review" if sla_status == "AT_RISK" else "escalated")
         moderation_queue.append(
             SLAItem(
                 id=cr.id,
@@ -2499,6 +2672,9 @@ async def get_operational_exceptions(
                 sla_deadline=deadline,
                 sla_status=sla_status,
                 time_remaining_minutes=rem_min,
+                owner="compliance_team",
+                status=item_status,
+                triage_action="/admin/creatives",
                 details={
                     "campaign_id": cr.campaign_id,
                     "landing_url": cr.landing_url,
@@ -2527,6 +2703,7 @@ async def get_operational_exceptions(
         else:
             sla_status = "ON_TRACK"
 
+        item_status = "open" if sla_status == "ON_TRACK" else ("in_review" if sla_status == "AT_RISK" else "escalated")
         finance_queue.append(
             SLAItem(
                 id=po.id,
@@ -2537,6 +2714,9 @@ async def get_operational_exceptions(
                 sla_deadline=deadline,
                 sla_status=sla_status,
                 time_remaining_minutes=rem_min,
+                owner="finance_ops",
+                status=item_status,
+                triage_action="/admin/finance",
                 details={
                     "publisher_id": po.publisher_id,
                     "amount": str(po.amount),
@@ -2564,6 +2744,7 @@ async def get_operational_exceptions(
         else:
             sla_status = "ON_TRACK"
 
+        item_status = "open" if sla_status == "ON_TRACK" else ("in_review" if sla_status == "AT_RISK" else "escalated")
         finance_queue.append(
             SLAItem(
                 id=d.id,
@@ -2574,6 +2755,9 @@ async def get_operational_exceptions(
                 sla_deadline=deadline,
                 sla_status=sla_status,
                 time_remaining_minutes=rem_min,
+                owner="finance_ops",
+                status=item_status,
+                triage_action="/admin/finance",
                 details={
                     "dispute_type": d.dispute_type,
                     "advertiser_id": d.advertiser_id,
@@ -2602,6 +2786,7 @@ async def get_operational_exceptions(
                 description=f"Property {p.name} (#{p.id}) verification challenge expired without completion.",
                 entity_type="property",
                 entity_id=p.id,
+                runbook_url="docs/runbooks/05_provider_outage.md",
             )
         )
 
@@ -2626,6 +2811,7 @@ async def get_operational_exceptions(
                     description=f"Campaign #{c.id} recorded {c.clicks} clicks out of {c.impressions} impressions.",
                     entity_type="campaign",
                     entity_id=c.id,
+                    runbook_url="docs/runbooks/06_suspicious_traffic.md",
                 )
             )
 
@@ -2649,6 +2835,7 @@ async def get_operational_exceptions(
                     description=f"Campaign #{c.id} reached {round(float(c.spent_today / c.budget_daily) * 100)}% of daily budget (₹{c.spent_today}/₹{c.budget_daily}).",
                     entity_type="campaign",
                     entity_id=c.id,
+                    runbook_url="docs/runbooks/07_financial_reconciliation.md",
                 )
             )
 
@@ -2669,6 +2856,7 @@ async def get_operational_exceptions(
                 description=f"Payout of ₹{fp.amount} to Publisher #{fp.publisher_id} {fp.status}: {fp.notes or 'No reason provided'}",
                 entity_type="payout",
                 entity_id=fp.id,
+                runbook_url="docs/runbooks/07_financial_reconciliation.md",
             )
         )
 
@@ -2687,8 +2875,24 @@ async def get_operational_exceptions(
                     description=f"Slot '{s.name}' has recorded zero impressions since creation.",
                     entity_type="slot",
                     entity_id=s.id,
+                    runbook_url="docs/runbooks/05_provider_outage.md",
                 )
             )
+
+    # 8. Worker / Redis Health
+    from liteads.common.cache import redis_client
+    if hasattr(redis_client, "connected") and not redis_client.connected:
+        worker_redis_health.append(
+            OperationalAlert(
+                code="REDIS_DISCONNECTED",
+                severity="high",
+                title="Redis Cache & Counters Disconnected",
+                description="Redis connectivity is down; real-time rate limiters operating in in-memory fallback.",
+                entity_type="system",
+                entity_id="redis",
+                runbook_url="docs/runbooks/01_deployment.md",
+            )
+        )
 
     total_count = (
         len(stale_integrations)
@@ -2696,6 +2900,8 @@ async def get_operational_exceptions(
         + len(unusual_ctrs)
         + len(spend_spikes)
         + len(webhook_payout_failures)
+        + len(consent_failures)
+        + len(worker_redis_health)
         + len(moderation_queue)
         + len(finance_queue)
     )
@@ -2706,6 +2912,8 @@ async def get_operational_exceptions(
         unusual_ctrs=unusual_ctrs,
         spend_spikes=spend_spikes,
         webhook_payout_failures=webhook_payout_failures,
+        consent_failures=consent_failures,
+        worker_redis_health=worker_redis_health,
         moderation_queue=moderation_queue,
         finance_queue=finance_queue,
         total_exceptions_count=total_count,

@@ -51,8 +51,9 @@ docker compose -f backend/docker-compose.prod.yml exec proxy \
 If scraping or distributed credential stuffing is detected across dispersed IPs:
 1. Tighten the Redis rate limiter in `backend/liteads/common/config.py` or `.env.prod`:
    ```bash
-   # Tighten auth rate limit from 5/min to 2/min
-   LITEADS_AUTH_RATE_LIMIT=2/minute
+   # Tighten auth rate limit (e.g. max 3 login attempts per 60 seconds)
+   LITEADS_AUTH__MAX_LOGIN_ATTEMPTS=3
+   LITEADS_AUTH__LOGIN_WINDOW_SECONDS=60
    ```
 2. Restart `ad-server` containers:
    ```bash
