@@ -215,6 +215,3 @@ Production operational procedures are documented in detail in `docs/runbooks/`:
 
 ---
 
-## License
-
-This project is licensed under the Apache 2.0 License. See [LICENSE](LICENSE) for details.
