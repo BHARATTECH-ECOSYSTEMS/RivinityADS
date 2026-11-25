@@ -132,7 +132,7 @@ Before tagging a production release candidate (RC), a mandatory 24-hour staging 
 Once per quarter or prior to major database migrations:
 1. Generate an encrypted database snapshot using `backend/scripts/backup_db.py`.
 2. Restore the encrypted backup into an isolated staging database per `Runbook 03`.
-3. Verify table counts, zero ledger drift, and authoritative migration head (`x3y4z5a6b7c8`).
+3. Verify table counts, zero ledger drift, and authoritative migration head (`y4z5a6b7c8d9`).
 
 ### 3.3 Production Rollback Drill
 Verify team capability to execute zero-downtime rollback per `Runbook 02`:
@@ -147,7 +147,7 @@ Verify team capability to execute zero-downtime rollback per `Runbook 02`:
 Before flipping traffic to a new release, all items must receive explicit sign-off:
 
 - [ ] **CI Pipeline Green:** All 4 required GitHub Actions checks green on the release commit.
-- [ ] **Alembic Single-Head:** Migration tree contains exactly 1 head matching `x3y4z5a6b7c8`.
+- [ ] **Alembic Single-Head:** Migration tree contains exactly 1 head matching `y4z5a6b7c8d9`.
 - [ ] **Security Secrets Verification:** No default passwords in production `.env`; `LITEADS_AUTH__JWT_SECRET` and `LITEADS_TRACKING__SECRET` exceed 32 characters.
 - [ ] **Deterministic Serving Invariant:** Ad serving defaults to statistical CTR/CVR scoring; ML prediction flag disabled or gated behind fallback.
 - [ ] **Financial Ledger Audit:** Nightly reconciliation confirms zero discrepancy between `advertisers.balance` and `transactions` sums.

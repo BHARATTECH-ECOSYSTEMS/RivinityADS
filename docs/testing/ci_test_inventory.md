@@ -154,7 +154,7 @@ Executed in the `PostgreSQL Concurrency & Ledger Integration` (`postgres-integra
 | `backend/tests/test_scripts/test_backup_restore.py` (`test_live_postgresql_two_database_integration`) | Real `pg_dump` encrypted archive creation from migrated `liteads` DB -> real `psql` restore into `liteads_restore_target` -> post-restore Alembic head & financial ledger reconciliation verification. |
 | `backend/tests/test_api/test_phase1_financial_integrity.py` | Exercises its `pg_engine` PostgreSQL ledger concurrency test alongside unit checks against live PostgreSQL 15. |
 | `backend/tests/test_api/test_phase5_financial_pipeline.py` | Exercises its `pg_engine` PostgreSQL financial pipeline concurrency test against live PostgreSQL 15. |
-| `backend/scripts/verify_postgres_phase11_concurrency.py` | Loads `backend/scripts/init_db.sql` into disposable `liteads_phase11_pg_audit_db`, runs clean Alembic upgrade to authoritative head (`x3y4z5a6b7c8`), verifies geo unique constraint, wallet concurrency, payout locking, and rollback. |
+| `backend/scripts/verify_postgres_phase11_concurrency.py` | Loads `backend/scripts/init_db.sql` into disposable `liteads_phase11_pg_audit_db`, runs clean Alembic upgrade to authoritative head (`y4z5a6b7c8d9`), verifies geo unique constraint, wallet concurrency, payout locking, and rollback. |
 
 ---
 
@@ -213,7 +213,7 @@ The suites below are **intentionally excluded from automated PR unit CI (`backen
 | `backend/tests/test_api/test_phase5_wu3_ratelimit.py` | Fails `11` tests requiring live Redis rate-limit/daily-quota atomic counters. | Owner: Publisher Platform / SRE team (requires live Redis service). |
 | `backend/tests/test_api/test_phase5_wu4_compliance.py` | Fails `7` tests predating current AdSet/channel/disclosure pipeline setup. | Covered by `test_phase5_channel_adapters.py` & `test_phase2_channel_conformance.py`; owner: Ad Serving team. |
 | `backend/tests/test_api/test_phase6_wu1_publisher_stats.py` | Fails `2` tests (`test_click_tracking_updates_correct_slot_daily_row`, `test_repeated_events_preserve_metric_semantics`) predating current signed click & stats aggregation path. | Covered by `test_phase3_measurement.py` & `test_phase11_conversion_measurement.py`; owner: Analytics team. |
-| `backend/tests/test_api/test_phase7a_adset_migration.py` | Fails `1` test (`test_alembic_single_head_k3c4d5e6f7a8`) pinned to superseded historical revision `k3c4d5e6f7a8` instead of current Alembic head (`x3y4z5a6b7c8`). | Live Alembic single-head & upgrade/downgrade verification enforced by `test_phase0_migration_truthfulness.py` and `verify_postgres_phase11_concurrency.py`; owner: Database / Migrations team. |
+| `backend/tests/test_api/test_phase7a_adset_migration.py` | Fails `1` test (`test_alembic_single_head_k3c4d5e6f7a8`) pinned to superseded historical revision `k3c4d5e6f7a8` instead of current Alembic head (`y4z5a6b7c8d9`). | Live Alembic single-head & upgrade/downgrade verification enforced by `test_phase0_migration_truthfulness.py` and `verify_postgres_phase11_concurrency.py`; owner: Database / Migrations team. |
 
 ---
 
