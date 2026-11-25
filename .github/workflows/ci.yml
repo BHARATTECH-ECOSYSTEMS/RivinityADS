@@ -270,10 +270,25 @@ jobs:
           cache: "pip"
           cache-dependency-path: "backend/pyproject.toml"
 
-      - name: Install PostgreSQL Client Tools
+      - name: Install PostgreSQL 15 Client Tools
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y postgresql-client
+          if ! apt-cache show postgresql-client-15 >/dev/null 2>&1; then
+            sudo apt-get install -y --no-install-recommends curl ca-certificates gnupg
+            . /etc/os-release
+            sudo install -d -m 0755 /etc/apt/keyrings
+            curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor --yes -o /etc/apt/keyrings/pgdg.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+            sudo apt-get update
+          fi
+          sudo apt-get install -y --no-install-recommends postgresql-client-15
+          echo "/usr/lib/postgresql/15/bin" >> "$GITHUB_PATH"
+          export PATH="/usr/lib/postgresql/15/bin:$PATH"
+          which pg_dump && pg_dump --version
+          which psql && psql --version
+          pg_dump --version | grep -qE '(^|[^0-9])15\.' || { echo "ERROR: Expected pg_dump 15.x, got: $(pg_dump --version)"; exit 1; }
+          psql --version | grep -qE '(^|[^0-9])15\.' || { echo "ERROR: Expected psql 15.x, got: $(psql --version)"; exit 1; }
 
       - name: Install CPU PyTorch Wheel
         run: |
