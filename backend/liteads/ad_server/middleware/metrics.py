@@ -194,6 +194,16 @@ LEDGER_UNBALANCED_TRANSACTIONS_TOTAL = Counter(
     "Total unbalanced financial ledger transactions detected during reconciliation",
 )
 
+# Dedicated background worker heartbeat metrics
+WORKER_HEARTBEAT_TYPES = ("optimization", "webhook", "notification", "digest")
+WORKER_HEARTBEAT_REDIS_PREFIX = "worker:heartbeat:"
+
+WORKER_LAST_HEARTBEAT_TIMESTAMP = Gauge(
+    "liteads_worker_last_heartbeat_timestamp",
+    "Unix timestamp of the last recorded worker execution heartbeat",
+    ["worker_type"],
+)
+
 
 # =============================================================================
 # Metrics Middleware
@@ -270,8 +280,18 @@ async def metrics_endpoint() -> StarletteResponse:
     """
     Prometheus metrics endpoint.
 
-    Returns metrics in Prometheus text format.
+    Returns metrics in Prometheus text format, refreshing cross-container worker
+    heartbeats from Redis and outbox diagnostics gauges when connected.
     """
+    await sync_worker_heartbeats_from_redis()
+    try:
+        from liteads.common.database import db
+        if db._session_factory is not None:
+            from liteads.ad_server.services.outbox_diagnostics import collect_outbox_diagnostics
+            await collect_outbox_diagnostics(update_metrics=True)
+    except Exception as exc:
+        logger.debug(f"Skipping outbox metrics refresh on /metrics scrape: {exc}")
+
     return StarletteResponse(
         content=generate_latest(),
         media_type="text/plain; charset=utf-8",
@@ -391,3 +411,43 @@ def update_outbox_gauge(
 def record_ledger_discrepancy(count: int = 1) -> None:
     """Record an unbalanced financial ledger discrepancy."""
     LEDGER_UNBALANCED_TRANSACTIONS_TOTAL.inc(count)
+
+
+def record_worker_heartbeat(worker_type: str, timestamp: float | None = None) -> float:
+    """Record a worker heartbeat Unix timestamp in Prometheus."""
+    ts = float(timestamp) if timestamp is not None else time.time()
+    WORKER_LAST_HEARTBEAT_TIMESTAMP.labels(worker_type=worker_type).set(ts)
+    return ts
+
+
+async def publish_worker_heartbeat(worker_type: str, timestamp: float | None = None) -> float:
+    """Record heartbeat locally and persist it to Redis for cross-container scraping."""
+    ts = record_worker_heartbeat(worker_type, timestamp)
+    try:
+        from liteads.common.cache import redis_client
+        if redis_client.connected:
+            await redis_client.set(
+                f"{WORKER_HEARTBEAT_REDIS_PREFIX}{worker_type}",
+                str(ts),
+                ttl=86400,
+            )
+    except Exception as exc:
+        logger.debug(f"Unable to persist worker heartbeat for {worker_type} to Redis: {exc}")
+    return ts
+
+
+async def sync_worker_heartbeats_from_redis() -> dict[str, float]:
+    """Refresh worker heartbeat gauges from Redis heartbeat keys."""
+    synced: dict[str, float] = {}
+    try:
+        from liteads.common.cache import redis_client
+        if redis_client.connected:
+            for wtype in WORKER_HEARTBEAT_TYPES:
+                raw = await redis_client.get(f"{WORKER_HEARTBEAT_REDIS_PREFIX}{wtype}")
+                if raw is not None:
+                    ts = float(raw)
+                    WORKER_LAST_HEARTBEAT_TIMESTAMP.labels(worker_type=wtype).set(ts)
+                    synced[wtype] = ts
+    except Exception as exc:
+        logger.debug(f"Unable to sync worker heartbeats from Redis: {exc}")
+    return synced

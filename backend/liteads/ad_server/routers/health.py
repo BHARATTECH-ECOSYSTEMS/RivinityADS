@@ -191,20 +191,29 @@ async def dependencies_check(
     else:
         deps["payment_provider"] = DependencyStatus(status="unconfigured", latency_ms=None)
 
-    # 6. Laya sidecar check
-    if settings.laya.enabled and settings.laya.base_url:
-        t0 = time.perf_counter()
-        try:
-            import httpx
-            async with httpx.AsyncClient(timeout=1.0) as http_client:
-                r = await http_client.get(f"{settings.laya.base_url}/health")
-                laya_lat = round((time.perf_counter() - t0) * 1000, 2)
-                deps["laya_sidecar"] = DependencyStatus(
-                    status="ok" if r.status_code == 200 else "unreachable",
-                    latency_ms=laya_lat,
-                )
-        except Exception:
-            deps["laya_sidecar"] = DependencyStatus(status="unreachable", latency_ms=None)
+    # 6. Laya sidecar check (external dependency)
+    if settings.laya.enabled:
+        if not settings.laya.base_url:
+            deps["laya_sidecar"] = DependencyStatus(status="unconfigured", latency_ms=None)
+        else:
+            t0 = time.perf_counter()
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=1.0) as http_client:
+                    r = await http_client.get(f"{settings.laya.base_url}/health")
+                    laya_lat = round((time.perf_counter() - t0) * 1000, 2)
+                    if r.status_code == 200:
+                        laya_status = "ok"
+                    elif r.status_code >= 500:
+                        laya_status = "degraded"
+                    else:
+                        laya_status = "unreachable"
+                    deps["laya_sidecar"] = DependencyStatus(
+                        status=laya_status,
+                        latency_ms=laya_lat,
+                    )
+            except Exception:
+                deps["laya_sidecar"] = DependencyStatus(status="unreachable", latency_ms=None)
     else:
         deps["laya_sidecar"] = DependencyStatus(status="disabled", latency_ms=None)
 

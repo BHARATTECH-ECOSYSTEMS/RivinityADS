@@ -22,6 +22,7 @@ from sqlalchemy import select, and_, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from liteads.ad_server.middleware.metrics import record_conversion
 from liteads.ad_server.services.billing import BillingService
 from liteads.common.logger import get_logger
 from liteads.common.cache import redis_client
@@ -433,13 +434,15 @@ class ConversionService:
                     )
             raise
 
-        # 9. Update campaign stats only if non-test
-        if not is_test and campaign:
-            campaign.conversions += 1
-            if resolved_creative_id:
-                creat = await self.session.get(Creative, resolved_creative_id)
-                if creat:
-                    creat.conversions += 1
+        # 9. Update campaign stats and Prometheus counter only if non-test
+        if not is_test:
+            record_conversion(resolved_campaign_id or 0, resolved_creative_id or 0)
+            if campaign:
+                campaign.conversions += 1
+                if resolved_creative_id:
+                    creat = await self.session.get(Creative, resolved_creative_id)
+                    if creat:
+                        creat.conversions += 1
 
         return ConversionResult(
             success=True,

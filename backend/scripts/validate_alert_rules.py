@@ -297,7 +297,7 @@ def main():
         print("=" * 80)
         sys.exit(1)
     else:
-        print("PASS: All 8 alert rules, metric schemas, PromQL expressions, and runbooks verified cleanly.")
+        print(f"PASS: All {summary['rules_checked']} alert rules, metric schemas, PromQL expressions, and runbooks verified cleanly.")
         print("=" * 80)
         sys.exit(0)
 

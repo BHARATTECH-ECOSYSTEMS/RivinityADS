@@ -16,7 +16,7 @@ In Bharattech Ads, the financial state is governed by three strict invariants:
 ## 2. Daily Reconciliation Routine
 The automated reconciliation worker runs nightly at 00:00 UTC. To run the reconciliation audit on demand:
 ```bash
-docker compose -f backend/docker-compose.prod.yml exec ad-server \
+docker compose --env-file .env.prod -f backend/docker-compose.prod.yml exec ad-server \
   python -c "
 import asyncio
 from liteads.common.database import get_session

@@ -1,0 +1,123 @@
+# RivinityADS Vulnerability Scanning & Artifact-Tied CycloneDX SBOM Generation (P1-05)
+name: "Security Scan & Artifact SBOM"
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Weekly Monday 04:00 UTC
+    - cron: '0 4 * * 1'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  trivy-and-sbom:
+    name: Trivy Vulnerability Scan & Artifact SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Node.js & Build Frontend Artifact
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: "npm"
+          cache-dependency-path: "frontend/package-lock.json"
+
+      - name: Build Frontend Production Bundle
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build Production Backend Docker Image
+        run: |
+          IMAGE_TAG="rivinityads-backend:${{ github.sha }}"
+          docker build -f backend/deployment/docker/Dockerfile -t "$IMAGE_TAG" backend
+          IMAGE_ID=$(docker images -q "$IMAGE_TAG")
+          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+          echo "IMAGE_ID=$IMAGE_ID" >> "$GITHUB_ENV"
+
+      - name: Trivy Filesystem Vulnerability & Misconfiguration Scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'CRITICAL,HIGH'
+          format: 'sarif'
+          output: 'trivy-fs.sarif'
+          ignore-unfixed: false
+
+      - name: Trivy Filesystem Summary Table (Transparent Reporting)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'CRITICAL,HIGH'
+          format: 'table'
+          exit-code: '0'
+
+      - name: Trivy Backend Container Image Vulnerability Scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: 'image'
+          image-ref: '${{ env.IMAGE_TAG }}'
+          severity: 'CRITICAL,HIGH'
+          format: 'sarif'
+          output: 'trivy-image.sarif'
+          ignore-unfixed: false
+
+      - name: Trivy Backend Image Summary Table (Transparent Reporting)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: 'image'
+          image-ref: '${{ env.IMAGE_TAG }}'
+          severity: 'CRITICAL,HIGH'
+          format: 'table'
+          exit-code: '0'
+
+      - name: Upload Trivy SARIF Findings to GitHub Security
+        uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
+        if: always()
+        with:
+          sarif_file: '.'
+
+      - name: Generate Artifact-Tied CycloneDX SBOM (Container Image)
+        uses: anchore/sbom-action@dfcb83b97731532d72be422cbc51ee64adb6fd56 # v0.24.4
+        with:
+          image: '${{ env.IMAGE_TAG }}'
+          format: 'cyclonedx-json'
+          output-file: 'sbom-backend-${{ github.sha }}.cyclonedx.json'
+
+      - name: Generate Artifact-Tied CycloneDX SBOM (Frontend & Repo Dependencies)
+        uses: anchore/sbom-action@dfcb83b97731532d72be422cbc51ee64adb6fd56 # v0.24.4
+        with:
+          path: './frontend'
+          format: 'cyclonedx-json'
+          output-file: 'sbom-frontend-${{ github.sha }}.cyclonedx.json'
+
+      - name: Record Image Digest & SBOM Provenance Metadata
+        run: |
+          mkdir -p artifacts/sbom
+          mv "sbom-backend-${{ github.sha }}.cyclonedx.json" artifacts/sbom/
+          mv "sbom-frontend-${{ github.sha }}.cyclonedx.json" artifacts/sbom/
+          cat > artifacts/sbom/provenance-${{ github.sha }}.json <<EOF
+          {
+            "commit_sha": "${{ github.sha }}",
+            "image_tag": "${{ env.IMAGE_TAG }}",
+            "image_id": "${{ env.IMAGE_ID }}",
+            "generated_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+      - name: Upload Build-Tied SBOM Artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cyclonedx-sbom-${{ github.sha }}
+          path: artifacts/sbom/
+          retention-days: 90

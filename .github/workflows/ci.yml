@@ -20,10 +20,10 @@ jobs:
       LITEADS_TRACKING__SECRET: "test_tracking_secret_must_be_at_least_32_characters_long_for_validation"
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
           cache: "pip"
@@ -54,36 +54,166 @@ jobs:
             exit 1
           fi
 
-      - name: Run Core & Regression Pytest Suites
+      - name: Validate Prometheus Alert Rules & Monitoring Config
         run: |
-          pytest backend/tests/test_ad_server/test_health.py \
-                 backend/tests/test_ad_server/test_ad.py \
-                 backend/tests/test_api/test_phase0_migration_truthfulness.py \
-                 backend/tests/test_api/test_phase1_visitor_consent.py \
-                 backend/tests/test_api/test_phase1_visitor_consent_gate.py \
-                 backend/tests/test_api/test_phase2_channel_conformance.py \
-                 backend/tests/test_api/test_phase3_publisher_verification.py \
-                 backend/tests/test_api/test_phase4_advertiser_campaign_readiness.py \
-                 backend/tests/test_api/test_phase7_ad_quality_and_admin_ops.py \
-                 backend/tests/test_api/test_phase11_conversion_measurement.py \
-                 backend/tests/test_api/test_phase10f_monetization_consent.py \
-                 backend/tests/test_api/test_phase10g_security_e2e.py \
-                 backend/tests/test_api/test_phase9_3_persistence_lifecycle.py \
-                 backend/tests/test_api/test_finance_api.py \
-                 backend/tests/test_api/test_phase5_financial_event_pipeline_proof.py \
-                 backend/tests/test_api/test_phase6_laya_decision_hardening.py \
-                 backend/tests/test_api/test_phase8_ml_governance.py \
-                 -v --tb=short
+          python backend/scripts/validate_alert_rules.py
+
+      - name: Validate Prometheus, Alertmanager & Production Compose Config
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "${{ github.workspace }}/backend/deployment/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v2.54.1 check config /etc/prometheus/prometheus.yml
+          docker run --rm --entrypoint promtool \
+            -v "${{ github.workspace }}/backend/deployment/prometheus:/etc/prometheus:ro" \
+            prom/prometheus:v2.54.1 check rules /etc/prometheus/alert_rules.yml
+          docker run --rm --entrypoint amtool \
+            -v "${{ github.workspace }}/backend/deployment/alertmanager:/etc/alertmanager:ro" \
+            prom/alertmanager:v0.27.0 check-config /etc/alertmanager/alertmanager.yml
+          TMP_ENV=$(mktemp)
+          trap 'rm -f "$TMP_ENV"' EXIT
+          cp backend/.env.example "$TMP_ENV"
+          cat >> "$TMP_ENV" <<'EOF'
+          LITEADS_DATABASE__PASSWORD=ci_compose_validation_db_pass
+          LITEADS_REDIS__PASSWORD=ci_compose_validation_redis_pass
+          LITEADS_AUTH__JWT_SECRET=ci_compose_validation_jwt_secret_at_least_32_chars
+          LITEADS_TRACKING__SECRET=ci_compose_validation_tracking_secret_at_least_32
+          LITEADS_SERVER__FRONTEND_URL=https://ads.example.com
+          GRAFANA_ADMIN_PASSWORD=ci_compose_validation_grafana_pass
+          EOF
+          docker compose --env-file "$TMP_ENV" -f backend/docker-compose.prod.yml config --quiet
+
+      - name: Run Full Unit & Regression Pytest Corpus (109 Suites)
+        run: |
+          pytest \
+            backend/tests/test_ml_engine/test_features.py \
+            backend/tests/test_ml_engine/test_models.py \
+            backend/tests/test_rec_engine/test_affinity_ranking.py \
+            backend/tests/test_rec_engine/test_engine.py \
+            backend/tests/test_rec_engine/test_filters.py \
+            backend/tests/test_scripts/test_backup_restore.py \
+            backend/tests/test_scripts/test_ci_and_security_automation.py \
+            backend/tests/test_scripts/test_docs_and_compose_consistency.py \
+            backend/tests/test_scripts/test_monitoring_and_alerts.py \
+            backend/tests/test_ad_server/test_ad.py \
+            backend/tests/test_ad_server/test_auth_regression.py \
+            backend/tests/test_ad_server/test_autopilot_api.py \
+            backend/tests/test_ad_server/test_billing.py \
+            backend/tests/test_ad_server/test_budget_concurrency.py \
+            backend/tests/test_ad_server/test_bug5_rate_limits.py \
+            backend/tests/test_ad_server/test_bug6_tracking.py \
+            backend/tests/test_ad_server/test_bug7_auth.py \
+            backend/tests/test_ad_server/test_creative_xss.py \
+            backend/tests/test_ad_server/test_event.py \
+            backend/tests/test_ad_server/test_health.py \
+            backend/tests/test_ad_server/test_laya_client.py \
+            backend/tests/test_ad_server/test_optimization_executor.py \
+            backend/tests/test_ad_server/test_optimization_policy.py \
+            backend/tests/test_ad_server/test_optimization_prep.py \
+            backend/tests/test_ad_server/test_optimization_scheduler.py \
+            backend/tests/test_ad_server/test_phase12b_monitoring.py \
+            backend/tests/test_ad_server/test_phase2_models.py \
+            backend/tests/test_ad_server/test_phase5_optimization_reliability.py \
+            backend/tests/test_ad_server/test_phase6_wu4_placement_optimizer.py \
+            backend/tests/test_ad_server/test_phase9_1_hyperlocal_contract.py \
+            backend/tests/test_ad_server/test_phase9_2_radius_matching.py \
+            backend/tests/test_ad_server/test_prompt2_optimization_and_laya_contract.py \
+            backend/tests/test_ad_server/test_sector_classifier.py \
+            backend/tests/test_ad_server/test_suggestion_api.py \
+            backend/tests/test_ad_server/test_targeting.py \
+            backend/tests/test_ad_server/test_tools.py \
+            backend/tests/test_ad_server/test_user_profile.py \
+            backend/tests/test_api/test_api_keys.py \
+            backend/tests/test_api/test_auth_email_step1.py \
+            backend/tests/test_api/test_creative_format_validation.py \
+            backend/tests/test_api/test_cross_account_verification.py \
+            backend/tests/test_api/test_finance_api.py \
+            backend/tests/test_api/test_generative_client.py \
+            backend/tests/test_api/test_login_timing_mitigation.py \
+            backend/tests/test_api/test_open_design_phase1.py \
+            backend/tests/test_api/test_open_design_phase2_templates.py \
+            backend/tests/test_api/test_open_design_phase4a_ai.py \
+            backend/tests/test_api/test_open_design_phase4b_ratelimit.py \
+            backend/tests/test_api/test_open_design_phase4c_endpoint.py \
+            backend/tests/test_api/test_open_design_phase4e_regression.py \
+            backend/tests/test_api/test_open_design_phase5_e2e_hardening.py \
+            backend/tests/test_api/test_open_design_phase5_safeguards.py \
+            backend/tests/test_api/test_open_design_phase6_financial_safeguards.py \
+            backend/tests/test_api/test_phase0_migration_truthfulness.py \
+            backend/tests/test_api/test_phase1_financial_integrity.py \
+            backend/tests/test_api/test_phase1_visitor_consent.py \
+            backend/tests/test_api/test_phase1_visitor_consent_gate.py \
+            backend/tests/test_api/test_phase10b_website_builder.py \
+            backend/tests/test_api/test_phase10c_1_security_audit.py \
+            backend/tests/test_api/test_phase10d_1_security_audit.py \
+            backend/tests/test_api/test_phase10e_publisher_slot_integration.py \
+            backend/tests/test_api/test_phase10f_monetization_consent.py \
+            backend/tests/test_api/test_phase10g_security_e2e.py \
+            backend/tests/test_api/test_phase11_conversion_measurement.py \
+            backend/tests/test_api/test_phase2_channel_conformance.py \
+            backend/tests/test_api/test_phase3_measurement.py \
+            backend/tests/test_api/test_phase3_publisher_verification.py \
+            backend/tests/test_api/test_phase3a.py \
+            backend/tests/test_api/test_phase3b.py \
+            backend/tests/test_api/test_phase3c.py \
+            backend/tests/test_api/test_phase3d.py \
+            backend/tests/test_api/test_phase3e.py \
+            backend/tests/test_api/test_phase3e_3.py \
+            backend/tests/test_api/test_phase4_advertiser_campaign_readiness.py \
+            backend/tests/test_api/test_phase4_advertiser_readiness.py \
+            backend/tests/test_api/test_phase4_model_selection.py \
+            backend/tests/test_api/test_phase4a_email.py \
+            backend/tests/test_api/test_phase4b_domain.py \
+            backend/tests/test_api/test_phase4b_outbox.py \
+            backend/tests/test_api/test_phase5_channel_adapters.py \
+            backend/tests/test_api/test_phase5_financial_event_pipeline_proof.py \
+            backend/tests/test_api/test_phase5_financial_pipeline.py \
+            backend/tests/test_api/test_phase5_models.py \
+            backend/tests/test_api/test_phase6_1b_listmonk.py \
+            backend/tests/test_api/test_phase6_1c_marketing_consent.py \
+            backend/tests/test_api/test_phase6_1d_email_marketing.py \
+            backend/tests/test_api/test_phase6_business_profile_website.py \
+            backend/tests/test_api/test_phase6_laya_decision_hardening.py \
+            backend/tests/test_api/test_phase6_laya_hardening.py \
+            backend/tests/test_api/test_phase6_wu1_notification_schema.py \
+            backend/tests/test_api/test_phase6_wu2_notification_dispatcher_worker.py \
+            backend/tests/test_api/test_phase6_wu2_placement_analyzer.py \
+            backend/tests/test_api/test_phase6_wu3_notification_apis.py \
+            backend/tests/test_api/test_phase6_wu3_placement_health_api.py \
+            backend/tests/test_api/test_phase6_wu4_notification_preferences.py \
+            backend/tests/test_api/test_phase7_ad_quality_and_admin_ops.py \
+            backend/tests/test_api/test_phase7_production_security.py \
+            backend/tests/test_api/test_phase7b_adset_serving.py \
+            backend/tests/test_api/test_phase7c_conversational_builder.py \
+            backend/tests/test_api/test_phase8_ml_governance.py \
+            backend/tests/test_api/test_phase9_1_targeting_api.py \
+            backend/tests/test_api/test_phase9_2_radius_serving.py \
+            backend/tests/test_api/test_phase9_3_persistence_lifecycle.py \
+            backend/tests/test_api/test_publisher_assignments.py \
+            backend/tests/test_api/test_reference_api.py \
+            backend/tests/test_api/test_ssrf_webhooks.py \
+            backend/tests/test_api/test_targeting_api.py \
+            backend/tests/test_api/test_verified_user_gatekeeping.py \
+            backend/tests/test_api/test_webhooks.py \
+            --cov=liteads --cov-report=term-missing --cov-report=xml:backend/coverage.xml \
+            -v --tb=short
+
+      - name: Upload Backend Coverage Report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: backend-coverage
+          path: backend/coverage.xml
+          retention-days: 14
 
   frontend-quality:
     name: Frontend Typecheck, Build & Unit Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: "npm"
@@ -119,6 +249,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
+      PYTHONPATH: "backend"
       LITEADS_DATABASE__HOST: "localhost"
       LITEADS_DATABASE__PORT: "5432"
       LITEADS_DATABASE__USER: "liteads"
@@ -126,16 +257,23 @@ jobs:
       LITEADS_DATABASE__NAME: "liteads"
       LITEADS_AUTH__JWT_SECRET: "test_jwt_secret_must_be_at_least_32_characters_long_for_validation"
       LITEADS_TRACKING__SECRET: "test_tracking_secret_must_be_at_least_32_characters_long_for_validation"
+      TEST_DATABASE_URL: "postgresql://liteads:test_pg_password_safe@localhost:5432/liteads"
+      TEST_TARGET_DATABASE_URL: "postgresql://liteads:test_pg_password_safe@localhost:5432/liteads_restore_target"
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
           cache: "pip"
           cache-dependency-path: "backend/pyproject.toml"
+
+      - name: Install PostgreSQL Client Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
 
       - name: Install CPU PyTorch Wheel
         run: |
@@ -150,16 +288,34 @@ jobs:
         run: |
           python backend/scripts/verify_postgres_phase11_concurrency.py
 
+      - name: Prepare Migrated Source & Target PostgreSQL Databases
+        env:
+          PGPASSWORD: "test_pg_password_safe"
+        run: |
+          psql -h localhost -U liteads -d liteads -v ON_ERROR_STOP=1 -f backend/scripts/init_db.sql
+          python -m alembic -c backend/alembic.ini upgrade head
+          psql -h localhost -U liteads -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS liteads_restore_target;"
+          psql -h localhost -U liteads -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE liteads_restore_target;"
+
+      - name: Run Live PostgreSQL Integration & Backup/Restore Pytest Suites
+        run: |
+          pytest \
+            backend/tests/test_ad_server/test_phase5_postgres_concurrency.py \
+            backend/tests/test_scripts/test_backup_restore.py \
+            backend/tests/test_api/test_phase1_financial_integrity.py \
+            backend/tests/test_api/test_phase5_financial_pipeline.py \
+            -v --tb=short
+
   e2e-browser-quality:
     name: Playwright Real-Browser E2E Security Quality Gate
     runs-on: ubuntu-latest
     needs: [frontend-quality]
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: "npm"
@@ -179,7 +335,7 @@ jobs:
 
       - name: Upload Playwright Test Report Artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: playwright-report
           path: frontend/playwright-report/

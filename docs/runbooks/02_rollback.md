@@ -26,10 +26,10 @@ Database migrations must follow the **Expand / Contract pattern**:
 3. If an explicit downgrade is mandated:
    ```bash
    # Check current migration revision
-   docker compose -f backend/docker-compose.prod.yml run --rm migration python backend/scripts/release_migration.py --current
+   docker compose --env-file .env.prod -f backend/docker-compose.prod.yml run --rm migration alembic current
 
    # Step back by 1 revision
-   docker compose -f backend/docker-compose.prod.yml run --rm migration python backend/scripts/release_migration.py --rollback -1
+   docker compose --env-file .env.prod -f backend/docker-compose.prod.yml run --rm migration alembic downgrade -1
    ```
 
 ---
@@ -41,11 +41,11 @@ Database migrations must follow the **Expand / Contract pattern**:
    Update `docker-compose.prod.yml` or the deployment environment variable `IMAGE_TAG=<previous-sha>`.
 3. **Re-deploy API & Workers to Previous Version:**
    ```bash
-   docker compose -f backend/docker-compose.prod.yml up -d --no-deps ad-server webhook-worker optimization-worker notification-worker digest-worker
+   docker compose --env-file .env.prod -f backend/docker-compose.prod.yml up -d --no-deps ad-server webhook-worker optimization-worker notification-worker digest-worker
    ```
 4. **Reload Reverse Proxy Cache:**
    ```bash
-   docker compose -f backend/docker-compose.prod.yml exec proxy nginx -s reload
+   docker compose --env-file .env.prod -f backend/docker-compose.prod.yml exec nginx nginx -s reload
    ```
 
 ---

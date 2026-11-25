@@ -59,7 +59,9 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GROQ_API_KEY=${GROQ_API_KEY:-}
-      - LAYA_BASE_URL=http://laya:8000
+      # Laya Decision Engine (External Dependency - not bundled in Compose)
+      - LAYA_ENABLED=${LAYA_ENABLED:-false}
+      - LAYA_BASE_URL=${LAYA_BASE_URL:-http://laya:8000}
       - RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID:-}
       - RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET:-}
       - RAZORPAY_WEBHOOK_SECRET=${RAZORPAY_WEBHOOK_SECRET:-}
@@ -124,8 +126,10 @@ services:
       - LITEADS_REDIS__HOST=${LITEADS_REDIS__HOST:-redis}
       - LITEADS_REDIS__PORT=${LITEADS_REDIS__PORT:-6379}
       - LITEADS_REDIS__PASSWORD=${LITEADS_REDIS__PASSWORD:?LITEADS_REDIS__PASSWORD must be set}
-      - LAYA_BASE_URL=http://laya:8000
-      - LITEADS_OPTIMIZATION__MODE=${LITEADS_OPTIMIZATION__MODE:-autonomous}
+      # Laya Decision Engine (External Dependency - not bundled in Compose)
+      - LAYA_ENABLED=${LAYA_ENABLED:-false}
+      - LAYA_BASE_URL=${LAYA_BASE_URL:-http://laya:8000}
+      - LITEADS_OPTIMIZATION__MODE=${LITEADS_OPTIMIZATION__MODE:-suggestions_only}
       - LITEADS_OPTIMIZATION__KILL_SWITCH=${LITEADS_OPTIMIZATION__KILL_SWITCH:-false}
       - LITEADS_OPTIMIZATION__INTERVAL_SECONDS=${LITEADS_OPTIMIZATION__INTERVAL_SECONDS:-900}
     depends_on:
@@ -253,6 +257,21 @@ services:
     networks:
       - liteads-internal
 
+  # ── 9b. TLS Certificate Bootstrap & Renewal (Pinned: v2.11.0, Profile: tls) ─
+  certbot:
+    image: certbot/certbot:v2.11.0
+    environment:
+      - TLS_DOMAIN=${TLS_DOMAIN:-}
+      - CERTBOT_EMAIL=${CERTBOT_EMAIL:-}
+    volumes:
+      - certs_data:/etc/nginx/certs
+      - certbot_webroot:/var/www/certbot
+      - letsencrypt_data:/etc/letsencrypt
+    networks:
+      - liteads-internal
+    profiles:
+      - tls
+
   # ── 10. Prometheus Monitoring (Pinned: v2.54.1, Private Network Only) ───────
   prometheus:
     image: prom/prometheus:v2.54.1
@@ -264,6 +283,78 @@ services:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--web.enable-lifecycle'
+    depends_on:
+      - alertmanager
+      - redis-exporter
+      - postgres-exporter
+      - blackbox-exporter
+    restart: unless-stopped
+    networks:
+      - liteads-internal
+    profiles:
+      - monitoring
+
+  # ── 10b. Alertmanager (Pinned: v0.27.0, Private Network Only) ─────────────
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    environment:
+      - ALERTMANAGER_CRITICAL_WEBHOOK_URL=${ALERTMANAGER_CRITICAL_WEBHOOK_URL:-http://alertmanager-webhook.invalid/critical}
+      - ALERTMANAGER_WARNING_WEBHOOK_URL=${ALERTMANAGER_WARNING_WEBHOOK_URL:-http://alertmanager-webhook.invalid/warning}
+    volumes:
+      - ./deployment/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_prod_data:/alertmanager
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        sed -e "s|http://alertmanager-webhook.invalid/critical|$${ALERTMANAGER_CRITICAL_WEBHOOK_URL}|g" \
+            -e "s|http://alertmanager-webhook.invalid/warning|$${ALERTMANAGER_WARNING_WEBHOOK_URL}|g" \
+            /etc/alertmanager/alertmanager.yml > /tmp/alertmanager.yml && \
+        exec /bin/alertmanager --config.file=/tmp/alertmanager.yml --storage.path=/alertmanager --web.listen-address=:9093
+    restart: unless-stopped
+    networks:
+      - liteads-internal
+    profiles:
+      - monitoring
+
+  # ── 10c. Redis Exporter (Pinned: v1.63.0, Private Network Only) ───────────
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.63.0
+    environment:
+      - REDIS_ADDR=redis://redis:6379
+      - REDIS_PASSWORD=${LITEADS_REDIS__PASSWORD:?LITEADS_REDIS__PASSWORD must be set}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - liteads-internal
+    profiles:
+      - monitoring
+
+  # ── 10d. PostgreSQL Exporter (Pinned: v0.15.0, Private Network Only) ──────
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      - DATA_SOURCE_URI=postgres:5432/${LITEADS_DATABASE__NAME:-liteads}?sslmode=disable
+      - DATA_SOURCE_USER=${LITEADS_DATABASE__USER:-liteads}
+      - DATA_SOURCE_PASS=${LITEADS_DATABASE__PASSWORD:?LITEADS_DATABASE__PASSWORD must be set}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - liteads-internal
+    profiles:
+      - monitoring
+
+  # ── 10e. Blackbox HTTP Probe Exporter (Pinned: v0.25.0) ───────────────────
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.25.0
+    volumes:
+      - ./deployment/prometheus/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    command:
+      - '--config.file=/etc/blackbox_exporter/config.yml'
     restart: unless-stopped
     networks:
       - liteads-internal
@@ -295,7 +386,9 @@ volumes:
   redis_prod_data:
   certs_data:
   certbot_webroot:
+  letsencrypt_data:
   prometheus_prod_data:
+  alertmanager_prod_data:
   grafana_prod_data:
 
 networks:

@@ -8,6 +8,7 @@ import asyncio
 import logging
 import signal
 
+from liteads.ad_server.middleware.metrics import publish_worker_heartbeat
 from liteads.ad_server.services.optimization_scheduler import optimization_loop
 from liteads.common.cache import redis_client
 from liteads.common.config import get_settings
@@ -38,14 +39,20 @@ async def main() -> None:
             pass
 
     optimization_loop.start()
+    await publish_worker_heartbeat("optimization")
     logger.info(
         "Dedicated optimization worker loop started. Note: Ensure LITEADS_ENABLE_OPTIMIZATION_WORKER=false "
         "is set on API servers to prevent dual active schedulers."
     )
 
     try:
+        elapsed = 0.0
         while not stop_event.is_set():
             await asyncio.sleep(1.0)
+            elapsed += 1.0
+            if elapsed >= 30.0:
+                await publish_worker_heartbeat("optimization")
+                elapsed = 0.0
     finally:
         logger.info("Shutting down dedicated optimization worker")
         await optimization_loop.stop()

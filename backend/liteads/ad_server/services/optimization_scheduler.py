@@ -25,6 +25,7 @@ from liteads.common.database import db
 from liteads.common.logger import get_logger
 from liteads.models.ad import Campaign, Advertiser
 from liteads.models.base import Status
+from liteads.ad_server.middleware.metrics import publish_worker_heartbeat
 from liteads.ad_server.services.optimization_prep import OptimizationPreparationService
 from liteads.ad_server.services.laya_client import LayaDecisionClient
 from liteads.ad_server.services.optimization_policy import OptimizationPolicyService
@@ -87,8 +88,10 @@ class OptimizationLoopTask:
 
     async def _run_loop(self) -> None:
         while not self._stop_event.is_set():
+            await publish_worker_heartbeat("optimization")
             try:
                 await self._process_cycle()
+                await publish_worker_heartbeat("optimization")
             except asyncio.CancelledError:
                 break
             except Exception as e:

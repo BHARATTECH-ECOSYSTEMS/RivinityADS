@@ -187,35 +187,47 @@ def test_topology_defaults_in_process_schedulers_by_environment():
 # -----------------------------------------------------------------------------
 def test_encrypted_backup_creation_and_restore_drill(tmp_path: Path):
     """Verify backup creation, AES-256-GCM encryption, checksum validation, and restore drill."""
+    from unittest.mock import MagicMock, patch
+
     passphrase = "MasterBackupSuperSecretPassphrase2026!"
     output_dir = tmp_path / "backups"
     off_host_dir = tmp_path / "off_host"
+    db_url = "postgresql://liteads:test_secret@localhost:5432/liteads"
+    mock_sql = b"-- RivinityADS Database Dump\nCREATE TABLE advertisers (id SERIAL PRIMARY KEY);\n"
 
-    # 1. Create encrypted backup
-    backup_file = create_backup(
-        passphrase=passphrase,
-        output_dir=output_dir,
-        off_host_dir=off_host_dir,
-        retention_days=10,
-    )
-    assert backup_file.exists()
-    assert backup_file.name.endswith(".dump.enc")
+    def _mock_pg_dump(cmd, stdout=None, stderr=None, shell=False):
+        if stdout:
+            stdout.write(mock_sql)
+        return MagicMock(returncode=0, stderr=b"")
 
-    # Verify SHA-256 manifest exists and matches
-    sha_file = Path(str(backup_file) + ".sha256")
-    assert sha_file.exists()
-    expected_hash = hashlib.sha256(backup_file.read_bytes()).hexdigest()
-    assert expected_hash in sha_file.read_text(encoding="utf-8")
+    with patch("shutil.which", return_value="/usr/bin/pg_dump"), \
+         patch("subprocess.run", side_effect=_mock_pg_dump):
+        # 1. Create encrypted backup
+        backup_file = create_backup(
+            passphrase=passphrase,
+            output_dir=output_dir,
+            db_url=db_url,
+            off_host_dir=off_host_dir,
+            retention_days=10,
+        )
+        assert backup_file.exists()
+        assert backup_file.name.endswith(".enc")
 
-    # Verify off-host copy
-    off_host_backup = off_host_dir / backup_file.name
-    assert off_host_backup.exists()
-    assert hashlib.sha256(off_host_backup.read_bytes()).hexdigest() == expected_hash
+        # Verify SHA-256 manifest exists and matches
+        sha_file = Path(str(backup_file) + ".sha256")
+        assert sha_file.exists()
+        expected_hash = hashlib.sha256(backup_file.read_bytes()).hexdigest()
+        assert expected_hash in sha_file.read_text(encoding="utf-8")
 
-    # 2. Run restore drill
-    drill_report = run_restore_drill(backup_file, passphrase)
-    assert drill_report["status"] == "success"
-    assert drill_report["decrypted_size_bytes"] > 0
+        # Verify off-host copy
+        off_host_backup = off_host_dir / backup_file.name
+        assert off_host_backup.exists()
+        assert hashlib.sha256(off_host_backup.read_bytes()).hexdigest() == expected_hash
+
+        # 2. Run restore drill
+        drill_report = run_restore_drill(backup_file, passphrase)
+        assert drill_report["status"] == "success"
+        assert drill_report["decrypted_size_bytes"] > 0
 
 
 def test_restore_drill_rejects_tampered_ciphertext(tmp_path: Path):
@@ -356,7 +368,7 @@ def test_xss_sanitizer_blocks_forbidden_tags_and_style_attributes():
 
 
 def test_production_compose_and_sbom_integrity():
-    """Verify production Docker Compose uses pinned immutable tags and SBOM exists."""
+    """Verify production Docker Compose uses pinned immutable tags, baseline SBOM exists, and dynamic SBOM workflow is configured."""
     prod_compose_path = Path(__file__).resolve().parent.parent.parent / "docker-compose.prod.yml"
     assert prod_compose_path.exists(), "docker-compose.prod.yml must exist"
     compose_text = prod_compose_path.read_text(encoding="utf-8")
@@ -364,10 +376,14 @@ def test_production_compose_and_sbom_integrity():
     # Verify no :latest image tags in production compose
     assert ":latest" not in compose_text, "Production docker-compose must not use ':latest' image tags"
 
-    # Verify SBOM exists and is valid CycloneDX format
+    # Verify baseline CycloneDX SBOM snapshot exists
     sbom_path = Path(__file__).resolve().parent.parent.parent / "deployment" / "sbom.json"
-    assert sbom_path.exists(), "SBOM file deployment/sbom.json must exist"
+    assert sbom_path.exists(), "Baseline SBOM file deployment/sbom.json must exist"
     sbom_data = json.loads(sbom_path.read_text(encoding="utf-8"))
     assert sbom_data.get("bomFormat") == "CycloneDX"
     assert len(sbom_data.get("components", [])) > 50
+
+    # Verify dynamic artifact-tied SBOM CI workflow is configured
+    sbom_workflow = Path(__file__).resolve().parent.parent.parent.parent / ".github" / "workflows" / "security-scan-and-sbom.yml"
+    assert sbom_workflow.exists(), "Artifact-tied SBOM workflow security-scan-and-sbom.yml must exist"
 

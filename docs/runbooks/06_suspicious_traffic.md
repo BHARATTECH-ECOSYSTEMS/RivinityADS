@@ -17,11 +17,11 @@ Trigger an investigation if any of the following alerts fire:
 Inspect reverse proxy access logs to isolate abusive IPs, CIDR blocks, or suspicious user-agents:
 ```bash
 # Top 20 requesting IP addresses in the past hour
-docker compose -f backend/docker-compose.prod.yml exec proxy \
+docker compose --env-file .env.prod -f backend/docker-compose.prod.yml exec nginx \
   awk '{print $1}' /var/log/nginx/access.log | sort | uniq -c | sort -nr | head -n 20
 
 # Top requesting User-Agents
-docker compose -f backend/docker-compose.prod.yml exec proxy \
+docker compose --env-file .env.prod -f backend/docker-compose.prod.yml exec nginx \
   awk -F\" '{print $6}' /var/log/nginx/access.log | sort | uniq -c | sort -nr | head -n 10
 ```
 
@@ -31,8 +31,8 @@ docker compose -f backend/docker-compose.prod.yml exec proxy \
 1. **Immediate Redis Blocklist:**
    Block an offending IP address directly in Redis for 24 hours:
    ```bash
-   docker compose -f backend/docker-compose.prod.yml exec redis \
-     redis-cli -a "$REDIS_PASSWORD" SET "blocklist:ip:198.51.100.42" 1 EX 86400
+   docker compose --env-file .env.prod -f backend/docker-compose.prod.yml exec redis \
+     redis-cli -a "$LITEADS_REDIS__PASSWORD" SET "blocklist:ip:198.51.100.42" 1 EX 86400
    ```
 2. **Nginx Edge Block (Static CIDR):**
    Add the offending IP or subnet to `/etc/nginx/conf.d/blocklist.conf`:
@@ -42,7 +42,7 @@ docker compose -f backend/docker-compose.prod.yml exec proxy \
    ```
    Reload Nginx without downtime:
    ```bash
-   docker compose -f backend/docker-compose.prod.yml exec proxy nginx -s reload
+   docker compose --env-file .env.prod -f backend/docker-compose.prod.yml exec nginx nginx -s reload
    ```
 
 ---
@@ -57,7 +57,7 @@ If scraping or distributed credential stuffing is detected across dispersed IPs:
    ```
 2. Restart `ad-server` containers:
    ```bash
-   docker compose -f backend/docker-compose.prod.yml restart ad-server
+   docker compose --env-file .env.prod -f backend/docker-compose.prod.yml restart ad-server
    ```
 
 ---

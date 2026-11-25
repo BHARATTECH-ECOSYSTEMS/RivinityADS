@@ -18,6 +18,7 @@ from typing import Any
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from liteads.ad_server.middleware.metrics import record_ledger_discrepancy
 from liteads.models.ad import AdEvent, Advertiser, Campaign
 from liteads.models.base import EventType, TransactionType
 from liteads.models.finance import Transaction, PublisherPayout, PaymentRequest
@@ -280,6 +281,8 @@ class ReconciliationService:
 
         # 6. Unresolved Discrepancies Queue (strictly never silently auto-balanced)
         status = "BALANCED" if len(discrepancy_list) == 0 else "DISCREPANCY_DETECTED"
+        if discrepancy_list:
+            record_ledger_discrepancy(len(discrepancy_list))
         now_iso = datetime.now(timezone.utc).isoformat()
 
         formatted_discrepancies = [

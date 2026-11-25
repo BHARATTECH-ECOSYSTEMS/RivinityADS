@@ -10,6 +10,7 @@ import os
 from typing import Any, Optional
 import uuid
 
+from liteads.ad_server.middleware.metrics import publish_worker_heartbeat
 from liteads.ad_server.services.publisher_digest_service import (
     BATCH_STATUS_FAILURE,
     BATCH_STATUS_NO_OP,
@@ -262,6 +263,7 @@ class WeeklyDigestTask:
 
     async def _run_loop(self) -> None:
         """Main loop executing digest cycles periodically with restart-delay awareness."""
+        await publish_worker_heartbeat("digest")
         # Check if a cycle ran recently before this process started
         try:
             initial_delay = await self.get_remaining_interval()
@@ -278,8 +280,10 @@ class WeeklyDigestTask:
             logger.warning("Error computing initial digest delay; proceeding with loop", error=str(e))
 
         while not self._stop_event.is_set():
+            await publish_worker_heartbeat("digest")
             try:
                 summary = await self._process_cycle()
+                await publish_worker_heartbeat("digest")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -499,9 +503,21 @@ async def main() -> None:
     await redis_client.connect()
 
     worker = WeeklyDigestTask()
+
+    async def _digest_heartbeat_daemon() -> None:
+        while True:
+            await publish_worker_heartbeat("digest")
+            await asyncio.sleep(30.0)
+
+    hb_task = asyncio.create_task(_digest_heartbeat_daemon())
     try:
         await worker._run_loop()
     finally:
+        hb_task.cancel()
+        try:
+            await hb_task
+        except asyncio.CancelledError:
+            pass
         await redis_client.close()
         await close_db()
 

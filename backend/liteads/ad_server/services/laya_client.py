@@ -60,8 +60,10 @@ class LayaDecisionClient:
         self,
         client: httpx.AsyncClient | None = None,
         timeout: float | None = None,
+        enabled: bool | None = None,
     ):
         self.settings = get_settings()
+        self.enabled = enabled if enabled is not None else self.settings.laya.enabled
         self.base_url = self.settings.laya.base_url.rstrip("/")
         default_timeout = self.settings.laya.timeout_ms / 1000.0
         # Enforce bounded timeout (between 0.1s and 60.0s)
@@ -82,6 +84,10 @@ class LayaDecisionClient:
             LayaUnavailableError: If the Laya service is unreachable or times out.
             LayaMalformedResponseError: If the response is invalid JSON or violates schema.
         """
+        if not self.enabled:
+            logger.info("Laya decision requested but service is disabled in configuration")
+            raise LayaUnavailableError("Laya decision service is disabled (LAYA_ENABLED=false)")
+
         payload = {
             "state": state,
             "questions": {

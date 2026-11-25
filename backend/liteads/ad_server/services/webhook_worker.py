@@ -17,6 +17,7 @@ import uuid
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from liteads.ad_server.middleware.metrics import publish_worker_heartbeat
 from liteads.ad_server.services.webhook_dispatcher import _deliver, _sign_payload
 from liteads.common.cache import redis_client
 from liteads.common.database import db
@@ -351,8 +352,17 @@ class WebhookOutboxWorker:
     ) -> None:
         """Continuous worker execution loop with graceful shutdown support."""
         logger.info(f"Starting WebhookOutboxWorker [{self.worker_id}]")
+        last_heartbeat = 0.0
+        loop = asyncio.get_running_loop()
+        await publish_worker_heartbeat("webhook")
+        last_heartbeat = loop.time()
+
         while stop_event is None or not stop_event.is_set():
             try:
+                now = loop.time()
+                if now - last_heartbeat >= 30.0:
+                    await publish_worker_heartbeat("webhook")
+                    last_heartbeat = now
                 count = await self.run_once(session_factory)
                 if count == 0:
                     await asyncio.sleep(poll_interval)
@@ -417,8 +427,9 @@ async def main() -> None:
     from liteads.common.database import init_db, close_db
 
     settings = get_settings()
-    logger.info("Initializing database connection for standalone webhook worker")
+    logger.info("Initializing database and Redis connection for standalone webhook worker")
     await init_db()
+    await redis_client.connect()
 
     worker = WebhookOutboxWorker()
     stop_event = asyncio.Event()
@@ -430,6 +441,7 @@ async def main() -> None:
             stop_event=stop_event,
         )
     finally:
+        await redis_client.close()
         await close_db()
 
 

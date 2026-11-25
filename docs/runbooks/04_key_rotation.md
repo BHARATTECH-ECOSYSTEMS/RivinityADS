@@ -17,7 +17,7 @@ To avoid immediately invalidating all active advertiser/admin sessions, rotate J
    - New tokens are signed with the new secret; existing tokens signed with the previous secret remain valid until their expiration (default: 60 minutes).
 3. **Deploy API Instances:**
    ```bash
-   docker compose -f backend/docker-compose.prod.yml up -d --no-deps ad-server
+   docker compose --env-file .env.prod -f backend/docker-compose.prod.yml up -d --no-deps ad-server
    ```
 4. **Phase 2 (Deprecate Old Secret):**
    - After the token expiration window (e.g., 2 hours), remove `LITEADS_AUTH__JWT_SECRET_PREVIOUS`.
@@ -44,7 +44,7 @@ Tracking tokens (impressions, clicks, conversions) are time-limited (TTL default
 3. Update `RAZORPAY_WEBHOOK_SECRET` in `.env.prod`.
 4. Restart the API servers:
    ```bash
-   docker compose -f backend/docker-compose.prod.yml up -d --no-deps ad-server
+   docker compose --env-file .env.prod -f backend/docker-compose.prod.yml up -d --no-deps ad-server
    ```
 5. Update and activate the new webhook secret in Razorpay Dashboard.
 6. Trigger a test webhook event from Razorpay and verify `200 OK` in server logs.
@@ -56,10 +56,10 @@ Tracking tokens (impressions, clicks, conversions) are time-limited (TTL default
    ```sql
    ALTER USER liteads WITH PASSWORD '<new-secure-password>';
    ```
-2. Update `POSTGRES_PASSWORD` in `.env.prod`.
+2. Update `LITEADS_DATABASE__PASSWORD` (and `POSTGRES_PASSWORD` if mirrored) in `.env.prod`.
 3. Perform rolling restarts of all containers communicating with PostgreSQL:
    ```bash
-   docker compose -f backend/docker-compose.prod.yml restart ad-server webhook-worker optimization-worker notification-worker digest-worker
+   docker compose --env-file .env.prod -f backend/docker-compose.prod.yml restart ad-server webhook-worker optimization-worker notification-worker digest-worker
    ```
 4. Verify `/health/dependencies` reports `database: ok`.
 

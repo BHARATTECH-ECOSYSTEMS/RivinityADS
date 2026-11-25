@@ -62,12 +62,10 @@ Core ad serving (`/api/v1/ad/request`) and tracking (`/api/v1/track/*`) must **n
    - When Laya sidecar is unreachable, the ranking engine automatically falls back to statistical CTR/CVR scoring without failing ad requests.
    - Optimization worker catches sidecar connection errors and logs warnings, preserving active campaign bids.
 2. **Recovery Action:**
-   - Check Laya container logs:
+   - Check external Laya service logs and reachability from the API host:
      ```bash
-     docker compose -f backend/docker-compose.prod.yml logs --tail 100 laya
+     curl -s -f "${LAYA_BASE_URL}/health"
      ```
-   - Restart Laya service if stalled:
-     ```bash
-     docker compose -f backend/docker-compose.prod.yml restart laya
-     ```
+   - If the external Laya service is undergoing maintenance or unreachable, ensure `LAYA_ENABLED=false` is exported in the environment. This immediately halts outbound HTTP calls and allows the optimizer and ad server to run in fail-closed heuristic mode.
+   - Note: Laya is an external decision service and is NOT packaged or restarted via `docker-compose.prod.yml`.
 

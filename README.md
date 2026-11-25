@@ -101,18 +101,51 @@ The platform enforces strict non-negotiable security and reliability invariants:
 - Python 3.11+ (for local backend development)
 - Node.js 22+ & npm (for local frontend development)
 
-### 1. Run with Docker Compose
+### 1. Run with Docker Compose (Production)
 ```bash
 # Clone the repository
 git clone https://github.com/BHARATTECH-ECOSYSTEMS/RivinityADS.git
 cd RivinityADS
 
-# Copy environment template and configure secrets
-cp .env.example .env.prod
+# Copy canonical environment template to gitignored .env.prod and replace all secrets/URLs
+cp backend/.env.example .env.prod
+# Required in .env.prod: LITEADS_DATABASE__PASSWORD, LITEADS_REDIS__PASSWORD,
+# LITEADS_AUTH__JWT_SECRET (>=32 chars), LITEADS_TRACKING__SECRET (>=32 chars),
+# LITEADS_SERVER__FRONTEND_URL (https://...), GRAFANA_ADMIN_PASSWORD
+
+# Validate rendered production Compose configuration
+docker compose --env-file .env.prod -f backend/docker-compose.prod.yml config --quiet
+
+# Bootstrap TLS certificates into certs_data BEFORE starting nginx
+# (Nginx will exit if /etc/nginx/certs/fullchain.pem or privkey.pem is missing.)
+# Option A (Production Let's Encrypt standalone issuance while port 80 is free):
+docker compose --env-file .env.prod -f backend/docker-compose.prod.yml --profile tls run --rm -p 80:80 --entrypoint sh certbot -c '
+  certbot certonly --standalone --non-interactive --agree-tos \
+    -m "${CERTBOT_EMAIL}" -d "${TLS_DOMAIN}" && \
+  cp -L "/etc/letsencrypt/live/${TLS_DOMAIN}/fullchain.pem" /etc/nginx/certs/fullchain.pem && \
+  cp -L "/etc/letsencrypt/live/${TLS_DOMAIN}/privkey.pem" /etc/nginx/certs/privkey.pem && \
+  chmod 600 /etc/nginx/certs/privkey.pem
+'
+# Option B (Staging / local smoke test with ephemeral self-signed certificate; see Runbook 01 for external cert copy):
+# mkdir -p /tmp/rivinity-selfsigned && \
+# openssl req -x509 -nodes -newkey rsa:2048 -days 30 \
+#   -keyout /tmp/rivinity-selfsigned/privkey.pem \
+#   -out /tmp/rivinity-selfsigned/fullchain.pem \
+#   -subj "/CN=localhost" && \
+# docker compose --env-file .env.prod -f backend/docker-compose.prod.yml --profile tls run --rm \
+#   --entrypoint sh -v /tmp/rivinity-selfsigned:/tmp/src:ro certbot -c \
+#   'cp /tmp/src/fullchain.pem /etc/nginx/certs/fullchain.pem && cp /tmp/src/privkey.pem /etc/nginx/certs/privkey.pem && chmod 600 /etc/nginx/certs/privkey.pem' && \
+# rm -rf /tmp/rivinity-selfsigned
+
+# Verify TLS certificates exist before starting stack
+docker compose --env-file .env.prod -f backend/docker-compose.prod.yml run --rm --no-deps --entrypoint sh nginx -c \
+  'test -s /etc/nginx/certs/fullchain.pem && test -s /etc/nginx/certs/privkey.pem && echo "TLS certs verified"'
 
 # Start full production stack
-docker compose -f backend/docker-compose.prod.yml up -d
+docker compose --env-file .env.prod -f backend/docker-compose.prod.yml up -d
 ```
+
+See [Runbook 01: Production Deployment](docs/runbooks/01_deployment.md) for TLS renewal (`certbot renew` + `nginx -s reload`), rolling upgrades, and backup prerequisites.
 
 ### 2. Local Backend Development
 ```bash
@@ -128,8 +161,8 @@ pip install -e "backend[dev]"
 # Run database migrations
 python -m alembic -c backend/alembic.ini upgrade head
 
-# Start FastAPI development server
-uvicorn liteads.ad_server.main:app --port 8000 --reload
+# Start FastAPI development server (from repository root)
+PYTHONPATH=backend uvicorn liteads.ad_server.main:app --port 8000 --reload
 ```
 
 ### 3. Local Frontend Development
@@ -212,6 +245,7 @@ Production operational procedures are documented in detail in `docs/runbooks/`:
 - [Runbook 08: Inventory Disclosure & Programmatic Standards](docs/runbooks/08_inventory_disclosure_and_programmatic_standards.md) — ads.txt, app-ads.txt, sellers.json, and supply chain transparency.
 - [Runbook 09: ML Model Governance & Training Operations](docs/runbooks/09_ml_model_governance_and_training.md) — Offline model lifecycle, data split contracts, shadow deployment, and rollback.
 - [Runbook 10: Release Governance, Branch Protection & Soak Rehearsal](docs/runbooks/10_release_governance_and_soak_rehearsal.md) — Production branch protection policies, vulnerability SLA triage, and pre-launch checklist.
+- [Runbook 11: Monitoring, Exporters & Alert Delivery](docs/runbooks/11_monitoring_and_alerting.md) — Prometheus exporters, Alertmanager severity routing, silencing, and synthetic alert verification.
 
 ---
 

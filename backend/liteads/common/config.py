@@ -193,7 +193,11 @@ class TrackingSettings(BaseSettings):
 
 
 class LayaSettings(BaseSettings):
-    """Laya sidecar configuration."""
+    """Laya decision engine sidecar configuration.
+
+    Laya is an external decision optimization sidecar service (not bundled in Compose).
+    Set LAYA_ENABLED=false or LITEADS_LAYA__ENABLED=false when Laya is not deployed.
+    """
 
     model_config = SettingsConfigDict(
         env_prefix="LAYA_",
@@ -803,11 +807,18 @@ def get_settings() -> Settings:
     flat_config["llm_provider"] = os.getenv("LLM_PROVIDER", "openai").lower()
 
     laya = flat_config.get("laya", LayaSettings())
-    flat_config["laya"] = laya.model_copy(
-        update={
-            "base_url": os.getenv("LAYA_BASE_URL", laya.base_url),
-        }
+    laya_enabled_env = (
+        os.getenv("LITEADS_LAYA__ENABLED")
+        or os.getenv("LITEADS_LAYA_ENABLED")
+        or os.getenv("LAYA_ENABLED")
     )
+    laya_updates = {
+        "base_url": os.getenv("LITEADS_LAYA__BASE_URL") or os.getenv("LAYA_BASE_URL", laya.base_url),
+    }
+    if laya_enabled_env is not None:
+        laya_updates["enabled"] = laya_enabled_env.lower() in ("true", "1", "yes", "on")
+
+    flat_config["laya"] = laya.model_copy(update=laya_updates)
 
     payment = flat_config.get("payment", PaymentSettings())
     flat_config["payment"] = payment.model_copy(
@@ -846,8 +857,15 @@ def get_settings() -> Settings:
         or os.getenv("LITEADS_OPTIMIZATION_MODE")
         or os.getenv("OPTIMIZATION_MODE")
     )
-    if opt_mode and opt_mode.lower() in ("shadow", "suggestions_only", "limited_pilot", "autopilot"):
-        opt_updates["mode"] = opt_mode.lower()
+    if opt_mode is not None and opt_mode.strip() != "":
+        opt_mode_clean = opt_mode.strip().lower()
+        if opt_mode_clean in ("shadow", "suggestions_only", "limited_pilot", "autopilot"):
+            opt_updates["mode"] = opt_mode_clean
+        else:
+            raise ValueError(
+                f"Invalid optimization mode '{opt_mode}'. Supported modes are: "
+                "'shadow', 'suggestions_only', 'limited_pilot', 'autopilot'."
+            )
 
     # 2. Kill Switch
     opt_kill = (

@@ -5,6 +5,7 @@ Middleware for ad server.
 from liteads.ad_server.middleware.metrics import (
     MetricsMiddleware,
     metrics_endpoint,
+    publish_worker_heartbeat,
     record_ad_request,
     record_cache_hit,
     record_cache_miss,
@@ -14,15 +15,19 @@ from liteads.ad_server.middleware.metrics import (
     record_db_query_latency,
     record_filter_latency,
     record_impression,
+    record_ledger_discrepancy,
     record_ml_prediction_latency,
     record_ranking_latency,
     record_retrieval_latency,
+    record_worker_heartbeat,
     set_model_version,
+    sync_worker_heartbeats_from_redis,
 )
 
 __all__ = [
     "MetricsMiddleware",
     "metrics_endpoint",
+    "publish_worker_heartbeat",
     "record_ad_request",
     "record_impression",
     "record_click",
@@ -35,5 +40,8 @@ __all__ = [
     "record_cache_hit",
     "record_cache_miss",
     "record_db_query_latency",
+    "record_ledger_discrepancy",
+    "record_worker_heartbeat",
     "set_model_version",
+    "sync_worker_heartbeats_from_redis",
 ]

@@ -1,8 +1,8 @@
-# Prometheus Alert Rules for RivinityADS (Phase 7 Production Hardening)
+# Prometheus Alert Rules for RivinityADS (P1-02 Real Telemetry Alignment)
 # Operational monitoring and alert definitions for Ad Server, dependencies, outbox, workers, and financial integrity.
 #
 # Rules conform to standard Prometheus v2 alert rule schema.
-# All expressions reference real metrics emitted by liteads or standard probes.
+# Every expression references real metrics emitted by liteads or configured exporters/probes.
 
 groups:
   - name: rivinity_ads_operational_alerts
@@ -16,7 +16,7 @@ groups:
         annotations:
           summary: "Ad Server 5xx error rate is above 1% (current: {{ $value }}%)"
           description: "Elevated HTTP 5xx responses observed across API endpoints over the last 5 minutes."
-          runbook_url: "docs/runbooks/05_provider_outage.md"
+          runbook_url: "docs/runbooks/11_monitoring_and_alerting.md#runbook-alerts-5xx"
           threshold_status: "operational_slo"
 
       # Alert 2: Ad Server High p95 Latency (> 500ms)
@@ -31,31 +31,43 @@ groups:
           runbook_url: "docs/runbooks/06_suspicious_traffic.md"
           threshold_status: "operational_slo"
 
-      # Alert 3: Database Connection Failure
+      # Alert 3: PostgreSQL Database Connection Failure (via postgres-exporter)
       - alert: DatabaseDependencyUnreachable
-        expr: liteads_db_query_latency_seconds_count == 0 or probe_success{instance="ad-server:8000/health/ready"} == 0
+        expr: pg_up == 0 or up{job="postgres"} == 0
         for: 1m
         labels:
-          severity: page
+          severity: critical
         annotations:
-          summary: "PostgreSQL database connection is unreachable by the Ad Server"
-          description: "Ad Server readiness probe indicates PostgreSQL database dependency is down or unreachable."
+          summary: "PostgreSQL database is unreachable"
+          description: "postgres-exporter reports pg_up == 0 or exporter target down."
           runbook_url: "docs/runbooks/03_database_restore.md"
           threshold_status: "deterministic_invariant"
 
-      # Alert 4: Redis Connection Failure
+      # Alert 4: Redis Cache/Rate-Limiter Connection Failure (via redis-exporter)
       - alert: RedisDependencyUnreachable
-        expr: probe_success{instance="redis:6379"} == 0
+        expr: redis_up == 0 or up{job="redis"} == 0
         for: 1m
         labels:
-          severity: page
+          severity: critical
         annotations:
           summary: "Redis cache/rate-limiting instance is unreachable"
-          description: "Blackbox health check failed to ping Redis instance on port 6379."
+          description: "redis-exporter reports redis_up == 0 or exporter target down."
           runbook_url: "docs/runbooks/05_provider_outage.md"
           threshold_status: "deterministic_invariant"
 
-      # Alert 5: Outbox Backlog Age Exceeded (> 600s)
+      # Alert 5: Ad Server Readiness Probe Failure (via blackbox-exporter)
+      - alert: AdServerReadinessProbeFailed
+        expr: probe_success{job="blackbox-http", instance="http://ad-server:8000/health/ready"} == 0 or up{job="liteads"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ad Server readiness probe failed or target unreachable"
+          description: "Blackbox HTTP probe to /health/ready failed or Prometheus cannot scrape ad-server:8000/metrics."
+          runbook_url: "docs/runbooks/11_monitoring_and_alerting.md#runbook-alerts-readiness"
+          threshold_status: "deterministic_invariant"
+
+      # Alert 6: Outbox Backlog Age Exceeded (> 600s)
       - alert: OutboxProcessingBacklogHigh
         expr: liteads_outbox_oldest_age_seconds > 600
         for: 5m
@@ -67,19 +79,19 @@ groups:
           runbook_url: "docs/runbooks/05_provider_outage.md"
           threshold_status: "operational_slo"
 
-      # Alert 6: Outbox Dead-Letter Failure Spike / Webhook Retry Exhaustion
+      # Alert 7: Outbox Dead-Letter Failure Spike (> 25 permanently failed jobs)
       - alert: OutboxDeadLetterSpike
-        expr: increase(liteads_outbox_failed_count[15m]) > 25
+        expr: liteads_outbox_failed_count > 25
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "Over 25 outbox jobs permanently dead-lettered in queue {{ $labels.queue }} over 15m"
-          description: "Spike in permanent delivery failures due to destination 4xx rejections, SSRF blocks, or retry exhaustion."
+          summary: "Over 25 permanently failed outbox jobs in queue {{ $labels.queue }} (current: {{ $value }})"
+          description: "High count of dead-lettered webhook/notification deliveries due to destination rejections, SSRF blocks, or retry exhaustion."
           runbook_url: "docs/runbooks/05_provider_outage.md"
           threshold_status: "provisional_baseline"
 
-      # Alert 7: Dedicated Worker Heartbeat Missing / Worker Failure
+      # Alert 8: Dedicated Worker Heartbeat Missing / Worker Stalled (> 300s)
       - alert: DedicatedWorkerExecutionStalled
         expr: time() - liteads_worker_last_heartbeat_timestamp > 300
         for: 5m
@@ -87,25 +99,25 @@ groups:
           severity: critical
         annotations:
           summary: "Worker heartbeat for {{ $labels.worker_type }} is missing for over 5 minutes"
-          description: "Background worker container has stopped updating its heartbeat or crashed."
-          runbook_url: "docs/runbooks/01_deployment.md"
+          description: "Background worker container has stopped updating its Redis-synced heartbeat or crashed."
+          runbook_url: "docs/runbooks/11_monitoring_and_alerting.md#runbook-alerts-workers"
           threshold_status: "operational_slo"
 
-      # Alert 8: Spend / Revenue Mismatch & Ledger Drift
+      # Alert 9: Spend / Revenue Mismatch & Ledger Drift
       - alert: FinancialLedgerDiscrepancy
         expr: liteads_ledger_unbalanced_transactions_total > 0
         for: 1m
         labels:
-          severity: page
+          severity: critical
         annotations:
-          summary: "Unbalanced financial ledger entry detected! Debit and credit sums must match."
-          description: "Critical double-entry bookkeeping violation detected by ledger audit reconciliation."
+          summary: "Unbalanced financial ledger discrepancy detected during reconciliation!"
+          description: "Double-entry reconciliation audit reported unbalanced transactions or wallet drift."
           runbook_url: "docs/runbooks/07_financial_reconciliation.md"
           threshold_status: "zero_tolerance_invariant"
 
-      # Alert 9: Conversion Anomaly Spike (Potential Fraud / IVT)
+      # Alert 10: Conversion Anomaly Spike (Potential Fraud / IVT)
       - alert: ConversionAnomalySpike
-        expr: increase(liteads_events_total{event_type="conversion"}[10m]) > 200
+        expr: sum(increase(liteads_ad_conversions_total[10m])) > 200
         for: 5m
         labels:
           severity: warning
@@ -115,7 +127,7 @@ groups:
           runbook_url: "docs/runbooks/06_suspicious_traffic.md"
           threshold_status: "provisional_anomaly"
 
-      # Alert 10: Laya Sidecar High Timeout Rate (> 5.0%)
+      # Alert 11: Laya Sidecar High Timeout Rate (> 5.0%)
       - alert: LayaSidecarElevatedTimeouts
         expr: (sum(rate(liteads_laya_errors_total{error_category="timeout"}[10m])) / sum(rate(liteads_laya_requests_total[10m]))) * 100 > 5.0
         for: 10m

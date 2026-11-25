@@ -26,6 +26,8 @@ import uuid
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from liteads.ad_server.middleware.metrics import publish_worker_heartbeat
+from liteads.common.cache import redis_client
 from liteads.common.database import db
 from liteads.common.email import EmailDeliveryError, send_email
 from liteads.models.notification import NotificationDelivery
@@ -375,9 +377,16 @@ class NotificationDeliveryWorker:
         """Run the persistent polling and delivery loop until stop_event is signaled."""
         logger.info("NotificationDeliveryWorker polling loop started", extra={"worker_id": self.worker_id})
         factory = self._get_session_factory(session_factory)
+        loop = asyncio.get_running_loop()
+        await publish_worker_heartbeat("notification")
+        last_heartbeat = loop.time()
 
         while stop_event is None or not stop_event.is_set():
             try:
+                now = loop.time()
+                if now - last_heartbeat >= 30.0:
+                    await publish_worker_heartbeat("notification")
+                    last_heartbeat = now
                 processed = await self.run_once(session_factory=factory)
                 if processed == 0:
                     if stop_event:
@@ -445,8 +454,9 @@ async def main() -> None:
     from liteads.common.database import close_db, init_db
 
     settings = get_settings()
-    logger.info("Initializing database connection for standalone notification worker")
+    logger.info("Initializing database and Redis connection for standalone notification worker")
     await init_db()
+    await redis_client.connect()
 
     worker = NotificationDeliveryWorker()
     stop_event = asyncio.Event()
@@ -458,6 +468,7 @@ async def main() -> None:
             stop_event=stop_event,
         )
     finally:
+        await redis_client.close()
         await close_db()
 
 

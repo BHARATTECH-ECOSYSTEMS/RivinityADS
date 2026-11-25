@@ -7,7 +7,7 @@ Step-by-step restoration of PostgreSQL from an encrypted, authenticated backup a
 
 ## 1. Prerequisites
 1. **Backup Artifact:** Encrypted backup archive (`*.sql.gz.enc`) and companion SHA-256 checksum manifest (`*.sha256`).
-2. **Decryption Key:** The backup passphrase (`BACKUP_PASSPHRASE` environment variable or `--passphrase` parameter).
+2. **Decryption Key:** The backup passphrase (`BACKUP_PASSPHRASE` or `BACKUP_ENCRYPTION_KEY` environment variable or `--passphrase` parameter).
 3. **Target Database Instance:** A provisioned PostgreSQL server accessible via connection string.
 
 ---
@@ -18,7 +18,13 @@ Before restoring into any database, verify the cryptographic integrity of the ba
 # 1. Verify SHA-256 checksum
 sha256sum -c backup_20261112_180000.sql.gz.enc.sha256
 ```
-*Note:* The restoration script (`restore_db.py`) uses AES-256-GCM authenticated encryption. Any tampered ciphertext byte or altered GCM auth tag will cause immediate decryption failure before any database connection is opened.
+*Note:* The restoration script (`restore_db.py`) uses AES-256-GCM authenticated encryption. Any tampered ciphertext byte or altered GCM auth tag will cause immediate decryption failure before any database connection is opened. You can also run an offline verification drill using `--verify-only`:
+```bash
+python backend/scripts/restore_db.py \
+  --input /var/backups/liteads/backup_20261112_180000.sql.gz.enc \
+  --passphrase "$BACKUP_PASSPHRASE" \
+  --verify-only
+```
 
 ---
 
@@ -28,11 +34,11 @@ Execute the automated restore script using `--verify` to inspect table counts an
 # Export the backup passphrase securely
 export BACKUP_PASSPHRASE="<production-backup-passphrase>"
 
-# Execute restoration to target database
+# Execute restoration to target database (add --allow-production-target when targeting production)
 python backend/scripts/restore_db.py \
   --input /var/backups/liteads/backup_20261112_180000.sql.gz.enc \
   --passphrase "$BACKUP_PASSPHRASE" \
-  --db-url "postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@postgres:5432/liteads" \
+  --db-url "postgresql://${LITEADS_DATABASE__USER}:${LITEADS_DATABASE__PASSWORD}@postgres:5432/liteads" \
   --verify
 ```
 
