@@ -173,14 +173,31 @@ async def _create_base_entities(
 # 1. Payment Webhook Integrity & Concurrency
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def test_razorpay_webhook_signatures_and_payload_validation(client: AsyncClient, test_db: AsyncSession):
+@pytest.fixture
+def razorpay_webhook_test_settings(monkeypatch):
+    """Inject synthetic non-production Razorpay credentials without relying on local .env."""
+    import liteads.ad_server.services.razorpay_client as razorpay_client_module
+
+    webhook_secret = "test_webhook_secret_key_12345678"
+    monkeypatch.setenv("RAZORPAY_KEY_ID", "rzp_test_ci_dummy")
+    monkeypatch.setenv("RAZORPAY_KEY_SECRET", "rzp_test_ci_secret_dummy")
+    monkeypatch.setenv("RAZORPAY_WEBHOOK_SECRET", webhook_secret)
+    monkeypatch.setattr(razorpay_client_module, "_client_instance", None)
+    get_settings.cache_clear()
+    yield webhook_secret
+    get_settings.cache_clear()
+
+
+async def test_razorpay_webhook_signatures_and_payload_validation(
+    client: AsyncClient,
+    test_db: AsyncSession,
+    razorpay_webhook_test_settings: str,
+):
     """Webhook strictly rejects missing or forged signatures, invalid currencies, and invalid amounts."""
     adv, _, _, _, _, _ = await _create_base_entities(test_db, "webhook_val")
     await test_db.commit()
 
-    webhook_secret = "test_webhook_secret_key_12345678"
-    settings = get_settings()
-    settings.payment.webhook_secret = webhook_secret
+    webhook_secret = razorpay_webhook_test_settings
 
     order_id = f"order_val_{uuid.uuid4().hex[:6]}"
     valid_payload = {
@@ -247,13 +264,16 @@ async def test_razorpay_webhook_signatures_and_payload_validation(client: AsyncC
     assert res_zero.json()["reason"] == "invalid amount"
 
 
-async def test_razorpay_webhook_idempotency_and_provider_event_id(client: AsyncClient, test_db: AsyncSession):
+async def test_razorpay_webhook_idempotency_and_provider_event_id(
+    client: AsyncClient,
+    test_db: AsyncSession,
+    razorpay_webhook_test_settings: str,
+):
     """Valid webhook credits advertiser wallet, persists provider_event_id, and deduplicates repeated calls."""
     adv, _, _, _, _, _ = await _create_base_entities(test_db, "webhook_dedup", advertiser_balance=Decimal("100.00"))
     await test_db.commit()
 
-    webhook_secret = "test_webhook_secret_key_12345678"
-    get_settings().payment.webhook_secret = webhook_secret
+    webhook_secret = razorpay_webhook_test_settings
 
     order_id = f"order_idemp_{uuid.uuid4().hex[:6]}"
     provider_event_id = f"evt_rzp_{uuid.uuid4().hex[:8]}"

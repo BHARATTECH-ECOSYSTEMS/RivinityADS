@@ -540,8 +540,10 @@ async def test_symlink_escape_rejection(tmp_path: Path):
     try:
         os.symlink(outside_secret, symlink_path)
         # Attempt to resolve the symlink through the storage service
-        with pytest.raises(SymlinkEscapeError):
+        with pytest.raises((SymlinkEscapeError, PathTraversalError)) as exc_info:
             service.resolve_safe_path(owner_id, proj_id, "escaped_link.txt", must_exist=True)
+        assert "outside_secret" not in str(exc_info.value)
+        assert str(tmp_path) not in str(exc_info.value)
     except OSError:
         # On Windows unprivileged environments without symlink permission, symlink creation is skipped
         pass
