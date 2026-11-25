@@ -42,7 +42,7 @@ from scripts.restore_db import (
 TEST_PASSPHRASE = "StrongTestPassphrase2026!With32CharsLong"
 VALID_MOCK_SQL = b"""-- RivinityADS Database Dump
 CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY);
-INSERT INTO alembic_version (version_num) VALUES ('x3y4z5a6b7c8');
+INSERT INTO alembic_version (version_num) VALUES ('y4z5a6b7c8d9');
 
 CREATE TABLE advertisers (id INTEGER PRIMARY KEY, name VARCHAR(255), balance NUMERIC(12, 4));
 INSERT INTO advertisers (id, name, balance) VALUES (1, 'Acme Corp', 500.0000);
@@ -347,7 +347,7 @@ def test_restore_psql_subprocess_failure():
 # -----------------------------------------------------------------------------
 # 6. Post-Restore Schema & Ledger Verification Tests (using SQLite for mocking)
 # -----------------------------------------------------------------------------
-def _setup_sqlite_db(db_path: Path, alembic_version: str = "x3y4z5a6b7c8", wallet: float = 500.0, ledger_sum: float = 500.0):
+def _setup_sqlite_db(db_path: Path, alembic_version: str = "y4z5a6b7c8d9", wallet: float = 500.0, ledger_sum: float = 500.0):
     conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
     cursor.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY)")
@@ -369,7 +369,7 @@ def test_post_restore_verification_alembic_mismatch(tmp_path: Path):
     _setup_sqlite_db(db_file, alembic_version="wrong_old_version")
 
     with pytest.raises(ValueError, match="Alembic head mismatch"):
-        verify_restored_database(f"sqlite:///{db_file}", expected_head="x3y4z5a6b7c8")
+        verify_restored_database(f"sqlite:///{db_file}", expected_head="y4z5a6b7c8d9")
 
 
 def test_post_restore_verification_ledger_drift_detected(tmp_path: Path):
@@ -379,7 +379,7 @@ def test_post_restore_verification_ledger_drift_detected(tmp_path: Path):
     _setup_sqlite_db(db_file, wallet=500.0, ledger_sum=400.0)
 
     with pytest.raises(ValueError, match="Financial ledger drift detected"):
-        verify_restored_database(f"sqlite:///{db_file}", expected_head="x3y4z5a6b7c8")
+        verify_restored_database(f"sqlite:///{db_file}", expected_head="y4z5a6b7c8d9")
 
 
 def test_post_restore_verification_success(tmp_path: Path):
@@ -387,9 +387,9 @@ def test_post_restore_verification_success(tmp_path: Path):
     db_file = tmp_path / "test_ok.db"
     _setup_sqlite_db(db_file, wallet=500.0, ledger_sum=500.0)
 
-    report = verify_restored_database(f"sqlite:///{db_file}", expected_head="x3y4z5a6b7c8")
+    report = verify_restored_database(f"sqlite:///{db_file}", expected_head="y4z5a6b7c8d9")
     assert report["status"] == "success"
-    assert report["alembic_versions"] == ["x3y4z5a6b7c8"]
+    assert report["alembic_versions"] == ["y4z5a6b7c8d9"]
     assert report["table_counts"]["advertisers"] == 1
     assert report["ledger_drift_free"] is True
 
@@ -424,7 +424,7 @@ def test_live_postgresql_two_database_integration(tmp_path: Path):
         passphrase=passphrase,
         verify=True,
         allow_production=False,
-        expected_head="x3y4z5a6b7c8",
+        expected_head="y4z5a6b7c8d9",
     )
     assert restore_result["status"] == "success"
     assert restore_result["verification"]["ledger_drift_free"] is True

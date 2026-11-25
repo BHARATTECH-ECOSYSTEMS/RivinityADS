@@ -89,7 +89,7 @@ The platform enforces strict non-negotiable security and reliability invariants:
 - **Cryptographic Event Protection:** Impression, click, and conversion URLs are secured with HMAC-SHA256 signatures, tamper-proof payloads, and expiration timestamps.
 - **Webhook Raw-Byte Verification:** Razorpay payment webhooks verify cryptographic signatures against the raw unparsed request payload before executing atomic balance credits.
 - **DB-Level Concurrency & Idempotency:** Financial transactions and conversion attribution utilize database row locks (`SELECT ... FOR UPDATE`) and unique constraint deduplication to prevent double-billing and replay attacks.
-- **Single Alembic Migration Head:** Linear database migration history strictly pinned to authoritative head `x3y4z5a6b7c8`.
+- **Single Alembic Migration Head:** Linear database migration history strictly pinned to authoritative head `y4z5a6b7c8d9`.
 - **Fail-Safe Serving Default:** Ad ranking defaults to statistical CTR/CVR scoring. Serving never fails open into unverified third parties or uncalibrated ML models.
 
 ---
@@ -248,4 +248,3 @@ Production operational procedures are documented in detail in `docs/runbooks/`:
 - [Runbook 11: Monitoring, Exporters & Alert Delivery](docs/runbooks/11_monitoring_and_alerting.md) — Prometheus exporters, Alertmanager severity routing, silencing, and synthetic alert verification.
 
 ---
-

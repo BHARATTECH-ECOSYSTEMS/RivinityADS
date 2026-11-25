@@ -20,7 +20,7 @@ backend/
 │   ├── models/                 # SQLAlchemy 2.0 async database models
 │   ├── schemas/                # Pydantic v2 validation schemas
 │   └── common/                 # Database connection pools, Redis client, logging, and configuration
-├── alembic/                    # Database migration scripts (authoritative head: x3y4z5a6b7c8)
+├── alembic/                    # Database migration scripts (authoritative head: y4z5a6b7c8d9)
 ├── scripts/                    # Operational tooling (backup, restore, PostgreSQL concurrency tests)
 └── tests/                      # Multi-phase pytest suites and regression tests
 ```
@@ -66,7 +66,7 @@ export LITEADS_TRACKING__SECRET=super_secure_tracking_secret_at_least_32_chars
 
 Alembic manages all schema migrations. Maintain a strictly linear migration graph with exactly **one head**:
 ```bash
-# Check authoritative migration head (expected: x3y4z5a6b7c8)
+# Check authoritative migration head (expected: y4z5a6b7c8d9)
 python -m alembic -c backend/alembic.ini heads
 
 # Upgrade database to latest schema

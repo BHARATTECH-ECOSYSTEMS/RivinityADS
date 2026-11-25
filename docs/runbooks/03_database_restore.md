@@ -75,8 +75,7 @@ LEFT JOIN transactions t ON a.id = t.advertiser_id
 GROUP BY a.id, a.balance
 HAVING (a.balance - COALESCE(SUM(t.amount), 0)) != 0;
 
--- 3. Verify Alembic schema migration version (must match authoritative head: x3y4z5a6b7c8)
+-- 3. Verify Alembic schema migration version (must match authoritative head: y4z5a6b7c8d9)
 SELECT version_num FROM alembic_version;
 ```
 If the drift query returns 0 rows, the financial state is completely consistent and ad serving may safely be resumed.
-
