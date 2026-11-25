@@ -81,11 +81,19 @@ jobs:
           format: 'table'
           exit-code: '0'
 
-      - name: Upload Trivy SARIF Findings to GitHub Security
+      - name: Upload Trivy Filesystem SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
         if: always()
         with:
-          sarif_file: '.'
+          sarif_file: 'trivy-fs.sarif'
+          category: 'trivy-fs'
+
+      - name: Upload Trivy Container Image SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
+        if: always()
+        with:
+          sarif_file: 'trivy-image.sarif'
+          category: 'trivy-image'
 
       - name: Generate Artifact-Tied CycloneDX SBOM (Container Image)
         uses: anchore/sbom-action@dfcb83b97731532d72be422cbc51ee64adb6fd56 # v0.24.4

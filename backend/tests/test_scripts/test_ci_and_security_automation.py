@@ -160,7 +160,7 @@ def test_codeql_workflow_covers_python_and_javascript():
 
 def test_security_scan_and_sbom_workflow_configured_properly():
     """Security workflow must run Trivy FS/image scans and generate commit-SHA CycloneDX SBOMs."""
-    _load_yaml(SECURITY_SBOM_WORKFLOW_PATH)
+    data = _load_yaml(SECURITY_SBOM_WORKFLOW_PATH)
     raw = SECURITY_SBOM_WORKFLOW_PATH.read_text(encoding="utf-8")
     assert "aquasecurity/trivy-action" in raw
     assert "anchore/sbom-action" in raw
@@ -169,6 +169,24 @@ def test_security_scan_and_sbom_workflow_configured_properly():
     assert "CRITICAL,HIGH" in raw
     assert "upload-sarif" in raw
     assert "upload-artifact" in raw
+
+    upload_steps = [
+        step
+        for job_cfg in data.get("jobs", {}).values()
+        for step in job_cfg.get("steps", [])
+        if "github/codeql-action/upload-sarif" in str(step.get("uses", ""))
+    ]
+    assert len(upload_steps) == 2
+    categories = set()
+    for step in upload_steps:
+        with_cfg = step.get("with", {})
+        sarif_file = str(with_cfg.get("sarif_file", "")).strip()
+        category = str(with_cfg.get("category", "")).strip()
+        assert sarif_file.endswith(".sarif") and "*" not in sarif_file and "/" not in sarif_file
+        assert category, f"Missing SARIF category in step: {step.get('name')}"
+        assert category not in categories, f"Duplicate SARIF category '{category}'"
+        categories.add(category)
+    assert categories == {"trivy-fs", "trivy-image"}
 
 
 def test_all_workflow_actions_pinned_to_40_char_hex_sha():
