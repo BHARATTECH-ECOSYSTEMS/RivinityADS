@@ -129,11 +129,13 @@ def test_ci_workflow_preserves_required_job_names_and_expansions():
 
     pg_job = jobs["postgres-integration"]
     pg_steps_text = "\n".join(str(step.get("run", "")) for step in pg_job["steps"])
-    assert "postgresql-client" in pg_steps_text
+    assert "postgresql-client-15" in pg_steps_text
     assert "verify_postgres_phase11_concurrency.py" in pg_steps_text
     assert "test_phase5_postgres_concurrency.py" in pg_steps_text
     assert "test_backup_restore.py" in pg_steps_text
     assert "TEST_DATABASE_URL" in str(pg_job.get("env", {})) or "TEST_DATABASE_URL" in ci_text
+    assert pg_job["env"]["RAZORPAY_KEY_ID"] == "test_razorpay_key"
+    assert pg_job["env"]["RAZORPAY_KEY_SECRET"] == "test_razorpay_secret"
 
 
 def test_dependabot_config_covers_required_ecosystems():

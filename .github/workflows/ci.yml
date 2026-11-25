@@ -257,6 +257,8 @@ jobs:
       LITEADS_DATABASE__NAME: "liteads"
       LITEADS_AUTH__JWT_SECRET: "test_jwt_secret_must_be_at_least_32_characters_long_for_validation"
       LITEADS_TRACKING__SECRET: "test_tracking_secret_must_be_at_least_32_characters_long_for_validation"
+      RAZORPAY_KEY_ID: "test_razorpay_key"
+      RAZORPAY_KEY_SECRET: "test_razorpay_secret"
       TEST_DATABASE_URL: "postgresql://liteads:test_pg_password_safe@localhost:5432/liteads"
       TEST_TARGET_DATABASE_URL: "postgresql://liteads:test_pg_password_safe@localhost:5432/liteads_restore_target"
     steps:
@@ -273,7 +275,9 @@ jobs:
       - name: Install PostgreSQL Client Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-client
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-client-15
 
       - name: Install CPU PyTorch Wheel
         run: |
