@@ -38,7 +38,6 @@ from scripts.restore_db import (
     verify_checksum,
     verify_restored_database,
 )
-
 TEST_PASSPHRASE = "StrongTestPassphrase2026!With32CharsLong"
 VALID_MOCK_SQL = b"""-- RivinityADS Database Dump
 CREATE TABLE alembic_version (version_num VARCHAR(32) PRIMARY KEY);
@@ -424,7 +423,7 @@ def test_live_postgresql_two_database_integration(tmp_path: Path):
         passphrase=passphrase,
         verify=True,
         allow_production=False,
-        expected_head="x3y4z5a6b7c8",
+        expected_head="y4z5a6b7c8d9",
     )
     assert restore_result["status"] == "success"
     assert restore_result["verification"]["ledger_drift_free"] is True
