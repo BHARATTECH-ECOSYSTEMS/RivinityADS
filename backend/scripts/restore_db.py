@@ -7,7 +7,7 @@ Features:
 - Decompresses gzip stream.
 - Production target guardrail: refuses restore into production environment or hosts without explicit `--allow-production-target`.
 - Executes real database restore into target PostgreSQL instance via `psql` (or `pg_restore` for custom format).
-- Post-restore verification: connects to database, checks Alembic revision head `x3y4z5a6b7c8`, critical core tables, and verifies financial ledger balance reconciliation (zero drift).
+- Post-restore verification: connects to database, checks Alembic revision head `y4z5a6b7c8d9`, critical core tables, and verifies financial ledger balance reconciliation (zero drift).
 - Disaster recovery drill mode: `--verify-only` performs integrity verification without touching the database.
 """
 
@@ -28,7 +28,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 KDF_ITERATIONS = 100_000
-DEFAULT_EXPECTED_HEAD = "x3y4z5a6b7c8"
+DEFAULT_EXPECTED_HEAD = "y4z5a6b7c8d9"
 
 
 def normalize_db_url(url: str) -> str:
@@ -434,7 +434,7 @@ def main() -> None:
     parser.add_argument(
         "--expected-head",
         default=DEFAULT_EXPECTED_HEAD,
-        help="Expected authoritative Alembic revision head (default: x3y4z5a6b7c8)",
+        help="Expected authoritative Alembic revision head (default: y4z5a6b7c8d9)",
     )
 
     args = parser.parse_args()
