@@ -402,9 +402,68 @@ def test_post_restore_verification_success(tmp_path: Path):
     reason="Live PostgreSQL 15 two-database integration test requires TEST_DATABASE_URL environment variable",
 )
 def test_live_postgresql_two_database_integration(tmp_path: Path):
-    """Live integration test: dumps db_source with real pg_dump, restores to db_target via psql."""
+    """Live integration test: dumps isolated balanced db_source with real pg_dump, restores to db_target via psql."""
+    import asyncio
+    from decimal import Decimal
+    import asyncpg
+
     source_url = os.environ["TEST_DATABASE_URL"]
     target_url = os.getenv("TEST_TARGET_DATABASE_URL", source_url + "_target")
+
+    async def _seed_balanced_source() -> None:
+        conn = await asyncpg.connect(normalize_db_url(source_url))
+        try:
+            await conn.execute(
+                "TRUNCATE TABLE transactions, creatives, campaigns, ad_slots, publishers, advertisers RESTART IDENTITY CASCADE"
+            )
+            adv_id = await conn.fetchval(
+                """
+                INSERT INTO advertisers (name, company, balance, status)
+                VALUES ($1, $2, $3, $4)
+                RETURNING id
+                """,
+                "Backup Restore Balanced Advertiser",
+                "RivinityADS Test Org",
+                Decimal("500.00"),
+                1,
+            )
+            await conn.execute(
+                """
+                INSERT INTO publishers (name, status)
+                VALUES ($1, $2)
+                """,
+                "Backup Restore Balanced Publisher",
+                1,
+            )
+            await conn.execute(
+                """
+                INSERT INTO campaigns (advertiser_id, name, budget_daily, budget_total, bid_type, bid_amount, status)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                adv_id,
+                "Backup Restore Balanced Campaign",
+                Decimal("100.00"),
+                Decimal("500.00"),
+                1,
+                Decimal("5.0000"),
+                1,
+            )
+            await conn.execute(
+                """
+                INSERT INTO transactions (type, amount, currency, advertiser_id, reference_id, description)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                """,
+                1,
+                Decimal("500.000000"),
+                "INR",
+                adv_id,
+                "backup_restore_seed_deposit_1",
+                "Balanced initial deposit for two-database restore integration test",
+            )
+        finally:
+            await conn.close()
+
+    asyncio.run(_seed_balanced_source())
 
     passphrase = "MasterIntegrationTestPassphrase2026!"
     output_dir = tmp_path / "live_backups"
@@ -428,3 +487,7 @@ def test_live_postgresql_two_database_integration(tmp_path: Path):
     )
     assert restore_result["status"] == "success"
     assert restore_result["verification"]["ledger_drift_free"] is True
+    assert restore_result["verification"]["table_counts"]["advertisers"] == 1
+    assert restore_result["verification"]["table_counts"]["publishers"] == 1
+    assert restore_result["verification"]["table_counts"]["campaigns"] == 1
+    assert restore_result["verification"]["table_counts"]["transactions"] == 1

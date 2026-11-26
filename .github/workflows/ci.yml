@@ -257,7 +257,7 @@ jobs:
       LITEADS_DATABASE__NAME: "liteads"
       LITEADS_AUTH__JWT_SECRET: "test_jwt_secret_must_be_at_least_32_characters_long_for_validation"
       LITEADS_TRACKING__SECRET: "test_tracking_secret_must_be_at_least_32_characters_long_for_validation"
-      TEST_DATABASE_URL: "postgresql://liteads:test_pg_password_safe@localhost:5432/liteads"
+      TEST_DATABASE_URL: "postgresql://liteads:test_pg_password_safe@localhost:5432/liteads_backup_source"
       TEST_TARGET_DATABASE_URL: "postgresql://liteads:test_pg_password_safe@localhost:5432/liteads_restore_target"
     steps:
       - name: Checkout Code
@@ -309,6 +309,11 @@ jobs:
         run: |
           psql -h localhost -U liteads -d liteads -v ON_ERROR_STOP=1 -f backend/scripts/init_db.sql
           python -m alembic -c backend/alembic.ini upgrade head
+          psql -h localhost -U liteads -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS liteads_backup_source;"
+          psql -h localhost -U liteads -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE liteads_backup_source;"
+          psql -h localhost -U liteads -d liteads_backup_source -v ON_ERROR_STOP=1 -f backend/scripts/init_db.sql
+          LITEADS_DATABASE__NAME=liteads_backup_source python -m alembic -c backend/alembic.ini upgrade head
+          psql -h localhost -U liteads -d liteads_backup_source -v ON_ERROR_STOP=1 -c "TRUNCATE TABLE creatives, campaigns, ad_slots, publishers, advertisers RESTART IDENTITY CASCADE;"
           psql -h localhost -U liteads -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS liteads_restore_target;"
           psql -h localhost -U liteads -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE liteads_restore_target;"
 
