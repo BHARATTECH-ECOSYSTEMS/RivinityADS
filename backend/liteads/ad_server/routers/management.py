@@ -1550,12 +1550,12 @@ async def _enrich_property_telemetry(session: AsyncSession, properties: list[Pub
         return
     prop_ids = [p.id for p in properties]
     slots_res = await session.execute(
-        select(AdSlot.property_id, AdSlot.slot_id).where(AdSlot.property_id.in_(prop_ids))
+        select(AdSlot.property_id, AdSlot.id).where(AdSlot.property_id.in_(prop_ids))
     )
-    prop_to_slot_ids: dict[int, list[str]] = {}
-    for prop_id, slot_id_str in slots_res.all():
+    prop_to_slot_ids: dict[int, list[int]] = {}
+    for prop_id, slot_pk in slots_res.all():
         if prop_id:
-            prop_to_slot_ids.setdefault(prop_id, []).append(slot_id_str)
+            prop_to_slot_ids.setdefault(prop_id, []).append(slot_pk)
 
     all_slot_ids = [sid for sids in prop_to_slot_ids.values() for sid in sids]
     if all_slot_ids:
@@ -1567,7 +1567,7 @@ async def _enrich_property_telemetry(session: AsyncSession, properties: list[Pub
             )
             .group_by(PublisherDailyStat.slot_id)
         )
-        slot_last_imp: dict[str, datetime] = {row[0]: row[1] for row in stats_res.all() if row[1]}
+        slot_last_imp: dict[int, datetime] = {row[0]: row[1] for row in stats_res.all() if row[1]}
         for prop in properties:
             sids = prop_to_slot_ids.get(prop.id, [])
             last_imps = [slot_last_imp[sid] for sid in sids if sid in slot_last_imp]

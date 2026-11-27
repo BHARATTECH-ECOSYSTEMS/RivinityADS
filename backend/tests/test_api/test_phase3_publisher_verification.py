@@ -13,7 +13,7 @@ Verifies:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import patch
 import pytest
@@ -29,7 +29,7 @@ from liteads.ad_server.services.publisher_verification import (
 )
 from liteads.models.ad import AdEvent, AdSet, Advertiser, Campaign, Creative
 from liteads.models.auth import User
-from liteads.models.publisher import AdSlot, Publisher, PublisherProperty, Status
+from liteads.models.publisher import AdSlot, Publisher, PublisherDailyStat, PublisherProperty, Status
 
 pytestmark = pytest.mark.asyncio
 
@@ -857,4 +857,53 @@ async def test_async_property_serialization_missing_greenlet_safety(client: Asyn
         assert isinstance(verify_data["health_warnings"], list)
     finally:
         set_test_dns_resolver(None)
+
+
+async def test_property_telemetry_uses_slot_integer_pk(client: AsyncClient, test_db: AsyncSession):
+    """_enrich_property_telemetry must query PublisherDailyStat.slot_id with AdSlot.id (int), not AdSlot.slot_id (str)."""
+    token, user_id = await _register_user(client, "pub_telemetry_fk@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    pub = await _create_publisher_for_user(test_db, user_id, "Telemetry FK Publisher")
+
+    create_res = await client.post(
+        f"/api/v1/publisher/{pub.id}/property",
+        headers=headers,
+        json={"name": "Telemetry Blog", "domain": "telemetryblog.example"},
+    )
+    assert create_res.status_code == 201, create_res.text
+    prop_id = create_res.json()["id"]
+
+    slot = AdSlot(
+        publisher_id=pub.id,
+        property_id=prop_id,
+        slot_id="banner_600",
+        name="Banner 600",
+        format=1,
+        width=600,
+        height=100,
+        status=Status.ACTIVE,
+    )
+    test_db.add(slot)
+    await test_db.flush()
+
+    stat = PublisherDailyStat(
+        publisher_id=pub.id,
+        slot_id=slot.id,
+        stat_date=date.today(),
+        impressions=5,
+        clicks=1,
+        conversions=0,
+        earnings=Decimal("0.50"),
+    )
+    test_db.add(stat)
+    await test_db.commit()
+
+    list_res = await client.get(
+        f"/api/v1/publisher/{pub.id}/property",
+        headers=headers,
+    )
+    assert list_res.status_code == 200, list_res.text
+    props = list_res.json()
+    target = next(p for p in props if p["id"] == prop_id)
+    assert target["last_impression_at"] is not None
 
