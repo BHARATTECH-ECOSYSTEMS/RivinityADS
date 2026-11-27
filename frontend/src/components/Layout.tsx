@@ -1,8 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { NavLink, Outlet, useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import VerificationBanner from "./VerificationBanner";
 import NotificationBell from "./NotificationBell";
+import { EditorFocusContext, isWebsiteEditorPath } from "./EditorFocusContext";
 import type { Role } from "../types";
 
 const NAV: Record<Role, { to: string; label: string }[]> = {
@@ -52,13 +53,31 @@ export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
+  const [editorFocusMounted, setEditorFocusMounted] = useState(false);
 
-  // Close mobile navigation drawer whenever route location changes
+  const isEditorFocusMode = isWebsiteEditorPath(location.pathname) || editorFocusMounted;
+
+  const closeSidebarDrawer = useCallback(() => {
+    setIsMobileNavOpen(false);
+  }, []);
+
+  const toggleSidebarDrawer = useCallback(() => {
+    setIsMobileNavOpen((prev) => !prev);
+  }, []);
+
+  // Close navigation drawer whenever route location changes
   useEffect(() => {
     setIsMobileNavOpen(false);
   }, [location.pathname]);
 
-  // Handle Escape key to close mobile drawer
+  // Reset drawer state when leaving editor focus mode
+  useEffect(() => {
+    if (!isEditorFocusMode) {
+      setIsMobileNavOpen(false);
+    }
+  }, [isEditorFocusMode]);
+
+  // Handle Escape key to close navigation drawer
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape" && isMobileNavOpen) {
@@ -69,20 +88,36 @@ export default function Layout() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isMobileNavOpen]);
 
+  const editorFocusValue = useMemo(
+    () => ({
+      isEditorFocusMode,
+      isSidebarDrawerOpen: isMobileNavOpen,
+      toggleSidebarDrawer,
+      closeSidebarDrawer,
+      setEditorFocusMounted,
+    }),
+    [isEditorFocusMode, isMobileNavOpen, toggleSidebarDrawer, closeSidebarDrawer]
+  );
+
   if (!session) return null;
   const { user } = session;
 
   return (
-    <div className="shell">
+    <EditorFocusContext.Provider value={editorFocusValue}>
+    <div
+      className={isEditorFocusMode ? "shell is-editor-focus" : "shell"}
+      data-editor-focus={isEditorFocusMode ? "true" : "false"}
+    >
       <a href="#main-content" className="skip-link">
         Skip to main content
       </a>
 
-      {/* Mobile drawer backdrop */}
+      {/* Navigation drawer backdrop (mobile or editor focus mode) */}
       {isMobileNavOpen && (
         <div
           className="mobile-nav-backdrop"
-          onClick={() => setIsMobileNavOpen(false)}
+          data-testid="sidebar-backdrop"
+          onClick={closeSidebarDrawer}
           aria-hidden="true"
         />
       )}
@@ -92,13 +127,16 @@ export default function Layout() {
         id="app-sidebar"
         className={`sidebar ${isMobileNavOpen ? "is-open" : ""}`}
         aria-label="Main Navigation"
+        aria-hidden={isEditorFocusMode && !isMobileNavOpen ? true : undefined}
+        data-editor-focus={isEditorFocusMode ? "true" : "false"}
+        data-collapsed={isEditorFocusMode && !isMobileNavOpen ? "true" : "false"}
       >
         <div className="sidebar-brand-wrapper">
           <div className="brand">RivinityADS</div>
           <button
             type="button"
             className="sidebar-close-btn"
-            onClick={() => setIsMobileNavOpen(false)}
+            onClick={closeSidebarDrawer}
             aria-label="Close navigation menu"
           >
             <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -142,7 +180,7 @@ export default function Layout() {
             <button
               type="button"
               className="mobile-nav-toggle"
-              onClick={() => setIsMobileNavOpen((prev) => !prev)}
+              onClick={toggleSidebarDrawer}
               aria-label="Toggle navigation menu"
               aria-expanded={isMobileNavOpen}
               aria-controls="app-sidebar"
@@ -177,10 +215,15 @@ export default function Layout() {
 
         <VerificationBanner />
 
-        <main id="main-content" className="content" tabIndex={-1}>
+        <main
+          id="main-content"
+          className={isEditorFocusMode ? "content content--editor-focus" : "content"}
+          tabIndex={-1}
+        >
           <Outlet />
         </main>
       </div>
     </div>
+    </EditorFocusContext.Provider>
   );
 }

@@ -2697,9 +2697,67 @@ pre {
    RivinityADS Phase 10D: Visual Website Builder Editor Styles
    ========================================================================== */
 
+/* Website Editor Focus Mode: auto-hide sidebar + full-bleed canvas */
+.shell.is-editor-focus .main {
+  width: 100%;
+}
+
+.content.content--editor-focus {
+  padding: 0;
+  max-width: none;
+  width: 100%;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.shell.is-editor-focus .sidebar {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: var(--sidebar-width);
+  max-width: 85vw;
+  z-index: 1000;
+  transform: translateX(-100%);
+  visibility: hidden;
+  transition: transform var(--transition-normal), visibility var(--transition-normal);
+  box-shadow: none;
+  overflow-y: auto;
+}
+
+.shell.is-editor-focus .sidebar.is-open {
+  transform: translateX(0);
+  visibility: visible;
+  box-shadow: var(--shadow-xl);
+}
+
+.shell.is-editor-focus .sidebar-close-btn {
+  display: inline-flex;
+}
+
+.shell.is-editor-focus .mobile-nav-backdrop {
+  display: block;
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.5);
+  backdrop-filter: blur(2px);
+  z-index: 999;
+  animation: fadeIn var(--transition-fast);
+}
+
+.wb-sidebar-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.25rem 0.45rem;
+  line-height: 1;
+}
+
 .wb-shell {
   display: flex;
   flex-direction: column;
+  width: 100%;
   height: calc(100vh - var(--header-height, 56px));
   background-color: var(--color-bg-app);
   overflow: hidden;
