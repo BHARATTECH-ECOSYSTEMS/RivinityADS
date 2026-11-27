@@ -785,7 +785,7 @@ export const WebsiteEditor: React.FC = () => {
 
   const previewPagePath = activePage?.is_home ? "/" : `/${activePage?.slug || ""}`;
   const previewIframeSrc = previewToken
-    ? `${BASE_URL}/api/v1/public/website/preview/${previewToken}?path=${encodeURIComponent(previewPagePath)}&edit_mode=1`
+    ? `${BASE_URL}/preview/${previewToken}?path=${encodeURIComponent(previewPagePath)}&edit_mode=1`
     : "";
 
   return (
