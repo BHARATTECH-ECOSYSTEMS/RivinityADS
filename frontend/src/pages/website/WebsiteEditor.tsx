@@ -46,6 +46,7 @@ import {
   syncBlockChangesToPreview,
 } from "../../services/websiteBridge";
 import { validateGeneratedBlockItem } from "../../services/openDesignPatcher";
+import { useEditorFocus } from "../../components/EditorFocusContext";
 
 const BASE_URL = (import.meta.env?.VITE_API_BASE_URL as string | undefined) ?? "";
 
@@ -54,6 +55,14 @@ export const WebsiteEditor: React.FC = () => {
   const projectId = parseInt(id || "0", 10);
   const location = useLocation();
   const basePath = location.pathname.startsWith("/admin") ? "/admin/websites" : "/publisher/websites";
+  const { isSidebarDrawerOpen, toggleSidebarDrawer, setEditorFocusMounted } = useEditorFocus();
+
+  useEffect(() => {
+    setEditorFocusMounted(true);
+    return () => {
+      setEditorFocusMounted(false);
+    };
+  }, [setEditorFocusMounted]);
 
   // Core Data States
   const [project, setProject] = useState<ProjectData | null>(null);
@@ -792,8 +801,24 @@ export const WebsiteEditor: React.FC = () => {
     <div className="wb-shell" data-testid="website-editor">
       {/* ── TOP TOOLBAR ──────────────────────────────────────────────────────── */}
       <header className="wb-toolbar" data-testid="website-toolbar">
-        {/* Left: Back & Project Info */}
-        <div style={{ display: "flex", alignItems: "center", gap: "0.875rem" }}>
+        {/* Left: Navigation Drawer Toggle, Back & Project Info */}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm wb-sidebar-toggle"
+            onClick={toggleSidebarDrawer}
+            aria-label="Toggle navigation sidebar"
+            aria-expanded={isSidebarDrawerOpen}
+            aria-controls="app-sidebar"
+            title="Toggle navigation sidebar"
+            data-testid="editor-sidebar-toggle"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16" aria-hidden="true">
+              <line x1="3" y1="6" x2="21" y2="6" strokeLinecap="round" />
+              <line x1="3" y1="12" x2="21" y2="12" strokeLinecap="round" />
+              <line x1="3" y1="18" x2="21" y2="18" strokeLinecap="round" />
+            </svg>
+          </button>
           <Link
             to={basePath}
             className="btn btn-secondary btn-sm"
@@ -1285,13 +1310,15 @@ export const WebsiteEditor: React.FC = () => {
         <main className="wb-center-stage" data-testid="website-center-stage">
           {viewMode === "canvas" ? (
             /* Visual Canvas */
-            <div style={{ maxWidth: "960px", margin: "0 auto", padding: "1.5rem 1rem" }}>
+            <div style={{ width: "100%", maxWidth: "1040px", margin: "0 auto", padding: "1.5rem 1.25rem" }}>
               {/* Active Page Header Bar */}
               <div
                 style={{
                   display: "flex",
                   justifyContent: "space-between",
                   alignItems: "center",
+                  flexWrap: "wrap",
+                  gap: "0.75rem",
                   padding: "0.75rem 1rem",
                   backgroundColor: "var(--bg-card)",
                   border: "1px solid var(--border)",
